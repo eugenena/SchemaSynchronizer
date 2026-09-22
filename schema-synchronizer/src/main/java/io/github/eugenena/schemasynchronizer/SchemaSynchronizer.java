@@ -5,9 +5,13 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import javax.sql.DataSource;
+import java.io.IOException;
 import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
+import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.Savepoint;
 import java.sql.SQLException;
@@ -47,6 +51,64 @@ public class SchemaSynchronizer {
     private final String classpathResource;
     private final SchemaSynchronizerOptions options;
     private final ThreadLocal<List<String>> plannedSql = ThreadLocal.withInitial(ArrayList::new);
+
+    /**
+     * Standalone entry point that synchronizes a target database from a schema file.
+     *
+     * <p>Usage:
+     * <pre>
+     * SchemaSynchronizer &lt;jdbc-url&gt; &lt;user&gt; &lt;password-or--&gt; &lt;schema-file&gt;
+     *     [schema] [history-table]
+     * </pre>
+     * Use {@code -} for the password to read {@code SCHEMA_DB_PASSWORD}. The optional
+     * schema and history table default to {@code public} and
+     * {@code schema_synchronizer_history}.
+     */
+    public static void main(String[] args) throws Exception {
+        if (args.length < 4 || args.length > 6) {
+            throw new IllegalArgumentException("Usage: SchemaSynchronizer <jdbc-url> <user> "
+                    + "<password-or--> <schema-file> [schema] [history-table]");
+        }
+
+        String password = readPassword(args[2]);
+        Path schemaFile = Path.of(args[3]);
+        String schema = SqlIdentifiers.requireIdentifier(args.length >= 5 ? args[4] : "public", "schema");
+        String historyTable = SqlIdentifiers.requireIdentifier(
+                args.length >= 6 ? args[5] : "schema_synchronizer_history", "history table");
+        ObjectMapper mapper = new ObjectMapper();
+        SchemaDefinition definition = readDefinition(mapper, schemaFile);
+        SchemaSynchronizerOptions options = new SchemaSynchronizerOptions(
+                schema, historyTable, 7_249_031_147L, false, true, true);
+        SchemaSynchronizer synchronizer = new SchemaSynchronizer(mapper, null, "", options);
+
+        log.info("[SchemaSynchronizer] Connecting to {}", args[0]);
+        try (Connection connection = DriverManager.getConnection(args[0], args[1], password)) {
+            SchemaSynchronizationResult result = synchronizer.synchronizeWithResult(connection, definition);
+            log.info("[SchemaSynchronizer] Complete: {} table(s) created, {} column(s) added, "
+                            + "{} column alteration(s), {} change set(s) applied, {} pending statement(s)",
+                    result.tablesCreated(), result.columnsAdded(), result.columnsAltered(),
+                    result.changeSetsApplied(), result.pendingSql().size());
+        }
+    }
+
+    private static String readPassword(String argument) {
+        if (!"-".equals(argument)) {
+            return argument;
+        }
+        String password = System.getenv("SCHEMA_DB_PASSWORD");
+        if (password == null) {
+            throw new IllegalArgumentException(
+                    "SCHEMA_DB_PASSWORD must be set when the password argument is '-'");
+        }
+        return password;
+    }
+
+    private static SchemaDefinition readDefinition(ObjectMapper mapper, Path schemaFile) throws IOException {
+        if (!Files.isRegularFile(schemaFile)) {
+            throw new IllegalArgumentException("Schema definition does not exist: " + schemaFile.toAbsolutePath());
+        }
+        return mapper.readValue(schemaFile.toFile(), SchemaDefinition.class);
+    }
 
     public SchemaSynchronizer(ObjectMapper objectMapper, DataSource dataSource) {
         this(objectMapper, dataSource, "/schema-definition.json", SchemaSynchronizerOptions.defaults());
