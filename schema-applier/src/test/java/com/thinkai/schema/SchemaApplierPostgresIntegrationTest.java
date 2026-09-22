@@ -191,8 +191,11 @@ class SchemaApplierPostgresIntegrationTest {
             statement.execute("INSERT INTO " + schema + ".caller_work VALUES (1)");
             applier.applySchemaWithResult(connection, new SchemaDefinition(Map.of(
                     "managed", new SchemaDefinition.TableDef("CREATE TABLE managed (id BIGINT PRIMARY KEY)",
-                    List.of(new SchemaDefinition.ColumnDef("id", "BIGINT NOT NULL")),
-                    List.of("CREATE UNIQUE INDEX IF NOT EXISTS managed_pkey ON managed (id)")))));
+                            List.of(new SchemaDefinition.ColumnDef("id", "BIGINT NOT NULL")),
+                            List.of("CREATE UNIQUE INDEX IF NOT EXISTS managed_pkey ON managed (id)")),
+                    "caller_work", new SchemaDefinition.TableDef(
+                            "CREATE TABLE IF NOT EXISTS caller_work (value INTEGER)",
+                            List.of(new SchemaDefinition.ColumnDef("value", "INTEGER")), List.of()))));
             assertThat(connection.getAutoCommit()).isFalse();
             assertThat(queryString(connection, "SHOW search_path")).isEqualTo(originalSearchPath);
             connection.rollback();
@@ -250,6 +253,91 @@ class SchemaApplierPostgresIntegrationTest {
             assertThat(queryLong(connection, "SELECT count(*) FROM pg_constraint c JOIN pg_namespace n "
                     + "ON n.oid = c.connamespace WHERE n.nspname = '" + schema + "' "
                     + "AND conname = 'fk_child_parent'")).isEqualTo(1);
+        }
+    }
+
+    @Test
+    void rejectsIndexDefinitionDriftAndOrphanTables() throws Exception {
+        DataSource dataSource = dataSource();
+        String schema = uniqueSchema("drift_case");
+        createSchema(dataSource, schema);
+        SchemaDefinition definition = new SchemaDefinition(Map.of(
+                "items", new SchemaDefinition.TableDef(
+                        "CREATE TABLE IF NOT EXISTS items (id BIGINT PRIMARY KEY, code VARCHAR(20))",
+                        List.of(new SchemaDefinition.ColumnDef("id", "BIGINT NOT NULL"),
+                                new SchemaDefinition.ColumnDef("code", "VARCHAR(20)")),
+                        List.of("CREATE UNIQUE INDEX IF NOT EXISTS items_pkey ON items (id)",
+                                "CREATE INDEX IF NOT EXISTS idx_items_code ON items (code)"))));
+        SchemaApplier applier = applier(dataSource, schema, false);
+        try (Connection connection = dataSource.getConnection()) {
+            applier.applySchemaWithResult(connection, definition);
+            try (var statement = connection.createStatement()) {
+                statement.execute("SET search_path TO " + schema);
+                statement.execute("ALTER TABLE items DROP CONSTRAINT items_pkey");
+            }
+            assertThatThrownBy(() -> applier.applySchemaWithResult(connection, definition))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("primary key is missing");
+            try (var statement = connection.createStatement()) {
+                statement.execute("SET search_path TO " + schema);
+                statement.execute("ALTER TABLE items ADD PRIMARY KEY (id)");
+                statement.execute("DROP INDEX idx_items_code");
+                statement.execute("CREATE INDEX idx_items_code ON items (id)");
+            }
+            assertThatThrownBy(() -> applier.applySchemaWithResult(connection, definition))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("index definition drift");
+            try (var statement = connection.createStatement()) {
+                statement.execute("SET search_path TO " + schema);
+                statement.execute("DROP INDEX idx_items_code");
+                statement.execute("CREATE INDEX idx_items_code ON items (code)");
+                statement.execute("CREATE TABLE forgotten_table (value INTEGER)");
+            }
+            assertThatThrownBy(() -> applier.applySchemaWithResult(connection, definition))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("table absent from definition");
+        }
+    }
+
+    @Test
+    void doesNotTreatConstraintOwnedIndexesAsOrphans() throws Exception {
+        DataSource dataSource = dataSource();
+        String schema = uniqueSchema("constraint_index_case");
+        createSchema(dataSource, schema);
+        SchemaDefinition definition = new SchemaDefinition(Map.of(
+                "accounts", new SchemaDefinition.TableDef(
+                        "CREATE TABLE IF NOT EXISTS accounts (id BIGINT PRIMARY KEY, email VARCHAR(100) UNIQUE)",
+                        List.of(new SchemaDefinition.ColumnDef("id", "BIGINT NOT NULL"),
+                                new SchemaDefinition.ColumnDef("email", "VARCHAR(100)")),
+                        List.of())));
+
+        try (Connection connection = dataSource.getConnection()) {
+            SchemaApplyResult result = applier(dataSource, schema, false)
+                    .applySchemaWithResult(connection, definition);
+            assertThat(result.pendingSql()).isEmpty();
+        }
+    }
+
+    @Test
+    void verificationMustReturnOneNonNullBoolean() throws Exception {
+        DataSource dataSource = dataSource();
+        String schema = uniqueSchema("verification_shape_case");
+        createSchema(dataSource, schema);
+        SchemaDefinition multipleRows = new SchemaDefinition(Map.of(), List.of(
+                new SchemaDefinition.ChangeSet("multiple", "invalid verification shape",
+                        List.of("SELECT 1"), "SELECT value FROM (VALUES (true), (false)) AS values(value)")));
+        SchemaDefinition nullResult = new SchemaDefinition(Map.of(), List.of(
+                new SchemaDefinition.ChangeSet("null-result", "invalid verification value",
+                        List.of("SELECT 1"), "SELECT NULL::boolean")));
+        try (Connection connection = dataSource.getConnection()) {
+            assertThatThrownBy(() -> applier(dataSource, schema, false)
+                    .applySchemaWithResult(connection, multipleRows))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("exactly one row");
+            assertThatThrownBy(() -> applier(dataSource, schema, false)
+                    .applySchemaWithResult(connection, nullResult))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("returned NULL");
         }
     }
 

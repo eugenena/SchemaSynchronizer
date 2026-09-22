@@ -18,6 +18,9 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Applies a {@link SchemaDefinition} to a live Postgres database.
@@ -31,6 +34,13 @@ import java.util.Set;
 public class SchemaApplier {
 
     private static final Logger log = LoggerFactory.getLogger(SchemaApplier.class);
+    private static final Pattern CREATE_TABLE_TARGET = Pattern.compile(
+            "(?is)^\\s*CREATE\\s+TABLE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?"
+                    + "(?:(?:([a-zA-Z_][a-zA-Z0-9_]*)\\.)?([a-zA-Z_][a-zA-Z0-9_]*))\\s*\\(.*");
+    private static final Pattern PRIMARY_KEY_COLUMNS = Pattern.compile(
+            "(?is)\\bPRIMARY\\s+KEY\\s*\\(([^)]+)\\)");
+    private static final Pattern INLINE_PRIMARY_KEY = Pattern.compile(
+            "(?is)(?:\\(|,)\\s*([a-zA-Z_][a-zA-Z0-9_]*)\\s+[^,]*?\\bPRIMARY\\s+KEY\\b");
 
     private final ObjectMapper objectMapper;
     private final DataSource dataSource;
@@ -82,13 +92,16 @@ public class SchemaApplier {
     }
 
     public SchemaApplyResult applySchemaWithResult(Connection conn, SchemaDefinition def) throws Exception {
+        requirePostgres(conn);
         boolean previousAutoCommit = conn.getAutoCommit();
         boolean ownsTransaction = previousAutoCommit;
         Savepoint savepoint = null;
         String previousSearchPath = null;
         ChangeSetExecutor executor = new ChangeSetExecutor();
+        validateDeclarativeDefinition(def);
         List<SchemaDefinition.ChangeSet> allChanges = executor.validate(def.changes());
         plannedSql.set(new ArrayList<>());
+        Exception primaryFailure = null;
         try {
             if (ownsTransaction) {
                 conn.setAutoCommit(false);
@@ -122,13 +135,33 @@ public class SchemaApplier {
                     declarative.columnsAdded(), declarative.columnsAltered(), List.copyOf(plannedSql.get()),
                     declarative.pendingSql());
         } catch (Exception exception) {
-            rollback(conn, ownsTransaction, savepoint);
+            primaryFailure = exception;
+            try {
+                rollback(conn, ownsTransaction, savepoint);
+            } catch (SQLException rollbackFailure) {
+                exception.addSuppressed(rollbackFailure);
+            }
             throw exception;
         } finally {
             plannedSql.remove();
             if (ownsTransaction) {
-                conn.setAutoCommit(previousAutoCommit);
+                try {
+                    conn.setAutoCommit(previousAutoCommit);
+                } catch (SQLException restoreFailure) {
+                    if (primaryFailure != null) {
+                        primaryFailure.addSuppressed(restoreFailure);
+                    } else {
+                        throw restoreFailure;
+                    }
+                }
             }
+        }
+    }
+
+    private void requirePostgres(Connection conn) throws SQLException {
+        String product = conn.getMetaData().getDatabaseProductName();
+        if (product != null && !product.toLowerCase(Locale.ROOT).contains("postgresql")) {
+            throw new IllegalStateException("SchemaApplier supports PostgreSQL only; connected to " + product);
         }
     }
 
@@ -249,19 +282,15 @@ public class SchemaApplier {
                 }
             }
 
-            if (tableDef.indexes() != null) {
-                for (String indexSql : tableDef.indexes()) {
-                    NonDestructiveSqlPolicy.requireCreateIndex(indexSql);
-                    execute(conn, indexSql);
-                }
-            }
+            reconcilePrimaryKey(meta, tableName, tableDef, pendingSql);
+            reconcileIndexes(conn, tableName, tableDef, pendingSql);
 
             if (PkIdentity.createSqlWantsIdIdentity(tableDef.createSql())) {
                 repairIdIdentity(conn, tableName);
             }
         }
 
-        List<String> orphanedIndexes = detectOrphanedIndexes(conn, def, existingTables);
+        List<String> orphanedTables = detectOrphanedTables(def, existingTables);
 
         if (tablesCreated > 0 || columnsAdded > 0 || columnsAltered > 0) {
             log.info("[SchemaApplier] Applied: {} table(s) created, {} column(s) added, {} column alter(s)",
@@ -282,18 +311,18 @@ public class SchemaApplier {
             }
         }
 
-        if (!orphanedIndexes.isEmpty()) {
+        if (!orphanedTables.isEmpty()) {
             log.warn("");
             log.warn("╔══════════════════════════════════════════════════════════════════╗");
-            log.warn("║         ORPHANED INDEXES DETECTED                               ║");
-            log.warn("║  Indexes exist in DB but are absent from schema-definition.json ║");
+            log.warn("║         ORPHANED TABLES DETECTED                                ║");
+            log.warn("║  Tables exist in DB but are absent from schema-definition.json  ║");
             log.warn("║  Run these manually if you intend to drop them:                 ║");
             log.warn("╚══════════════════════════════════════════════════════════════════╝");
-            for (String sql : orphanedIndexes) {
+            for (String sql : orphanedTables) {
                 log.warn("    {}", sql);
             }
         }
-        pendingSql.addAll(orphanedIndexes);
+        pendingSql.addAll(orphanedTables);
         return new DeclarativeResult(tablesCreated, columnsAdded, columnsAltered, List.copyOf(pendingSql));
     }
 
@@ -317,55 +346,195 @@ public class SchemaApplier {
     public static boolean isIgnorableSchemaTable(String tableName) {
         if (tableName == null || tableName.isBlank()) return true;
         String t = tableName.toLowerCase(Locale.ROOT);
-        return t.startsWith("flyway_") || t.startsWith("thinkai_schema_");
+        return "flyway_schema_history".equals(t) || "thinkai_schema_history".equals(t);
     }
 
     public static boolean isIgnorableSchemaIndex(String indexName) {
         if (indexName == null || indexName.isBlank()) return true;
         String i = indexName.toLowerCase(Locale.ROOT);
-        return i.startsWith("flyway_") || i.startsWith("thinkai_schema_");
+        return i.startsWith("flyway_schema_history_") || i.startsWith("thinkai_schema_history_");
     }
 
-    private List<String> detectOrphanedIndexes(
-            Connection conn, SchemaDefinition def, Set<String> existingTables) {
-        List<String> orphanedIndexes = new ArrayList<>();
-        try {
-            Set<String> serializedIndexNames = new HashSet<>();
-            for (SchemaDefinition.TableDef tableDef : def.tables().values()) {
-                if (tableDef.indexes() == null) continue;
-                for (String idx : tableDef.indexes()) {
-                    String name = idx.replaceFirst("^CREATE (UNIQUE )?INDEX IF NOT EXISTS ", "");
-                    int onPos = name.indexOf(" ON ");
-                    if (onPos > 0) {
-                        serializedIndexNames.add(name.substring(0, onPos).toLowerCase(Locale.ROOT));
-                    }
-                }
-            }
-            for (String tableName : existingTables) {
-                if (isIgnorableSchemaTable(tableName)) continue;
-                try (var stmt = conn.prepareStatement(
-                        "SELECT indexname FROM pg_indexes WHERE schemaname = ? AND tablename = ?")) {
-                    stmt.setString(1, options.schema());
-                    stmt.setString(2, tableName);
-                    try (var rs = stmt.executeQuery()) {
-                        while (rs.next()) {
-                            String idxName = rs.getString("indexname").toLowerCase(Locale.ROOT);
-                            if (isIgnorableSchemaIndex(idxName)) continue;
-                            if (!serializedIndexNames.contains(idxName)) {
-                                orphanedIndexes.add(String.format(
-                                        "DROP INDEX IF EXISTS %s; -- table=%s", idxName, tableName));
-                            }
-                        }
-                    }
-                }
-            }
-        } catch (Exception e) {
-            if (options.failOnPending()) {
-                throw new IllegalStateException("Unable to verify indexes in schema " + options.schema(), e);
-            }
-            log.warn("[SchemaApplier] Orphaned index detection skipped: {}", e.getMessage());
+    private void validateDeclarativeDefinition(SchemaDefinition definition) {
+        if (definition == null) {
+            throw new IllegalArgumentException("schema definition is null");
         }
-        return orphanedIndexes;
+        if (definition.tables() == null) {
+            return;
+        }
+        for (Map.Entry<String, SchemaDefinition.TableDef> entry : definition.tables().entrySet()) {
+            String table = SqlIdentifiers.requireIdentifier(entry.getKey(), "table");
+            SchemaDefinition.TableDef tableDef = entry.getValue();
+            if (tableDef == null) {
+                throw new IllegalArgumentException("table definition is null: " + table);
+            }
+            if (tableDef.createSql() != null) {
+                NonDestructiveSqlPolicy.requireCreateTable(tableDef.createSql());
+                Matcher matcher = CREATE_TABLE_TARGET.matcher(tableDef.createSql());
+                if (!matcher.matches()
+                        || (matcher.group(1) != null && !options.schema().equalsIgnoreCase(matcher.group(1)))
+                        || !table.equalsIgnoreCase(matcher.group(2))) {
+                    throw new IllegalArgumentException("table createSql target does not match definition: " + table);
+                }
+            }
+            Set<String> columns = new HashSet<>();
+            if (tableDef.columns() != null) {
+                for (SchemaDefinition.ColumnDef column : tableDef.columns()) {
+                    if (column == null) {
+                        throw new IllegalArgumentException("null column definition in table: " + table);
+                    }
+                    String name = SqlIdentifiers.requireIdentifier(column.name(), "column");
+                    if (!columns.add(name)) {
+                        throw new IllegalArgumentException("duplicate column definition: " + table + "." + name);
+                    }
+                    if (column.definition() != null) {
+                        ColumnDefinitionParser.parse(column.definition());
+                    }
+                }
+            }
+            Set<String> indexes = new HashSet<>();
+            if (tableDef.indexes() != null) {
+                for (String sql : tableDef.indexes()) {
+                    NonDestructiveSqlPolicy.requireCreateIndex(sql);
+                    IndexDefinition index = IndexDefinition.parse(sql);
+                    if ((index.schema() != null && !options.schema().equals(index.schema()))
+                            || !table.equals(index.table())) {
+                        throw new IllegalArgumentException("index target does not match table definition: "
+                                + index.name());
+                    }
+                    if (!indexes.add(index.name())) {
+                        throw new IllegalArgumentException("duplicate index definition: " + index.name());
+                    }
+                }
+            }
+        }
+    }
+
+    private void reconcileIndexes(Connection conn, String tableName, SchemaDefinition.TableDef tableDef,
+                                  List<String> pendingSql) throws SQLException {
+        Map<String, String> live = new HashMap<>();
+        try (var stmt = conn.prepareStatement(
+                "SELECT indexes.indexname, indexes.indexdef "
+                        + "FROM pg_indexes indexes "
+                        + "JOIN pg_namespace namespace ON namespace.nspname = indexes.schemaname "
+                        + "JOIN pg_class index_class ON index_class.relnamespace = namespace.oid "
+                        + "AND index_class.relname = indexes.indexname "
+                        + "WHERE indexes.schemaname = ? AND indexes.tablename = ? "
+                        + "AND NOT EXISTS (SELECT 1 FROM pg_constraint constraint_row "
+                        + "WHERE constraint_row.conindid = index_class.oid)")) {
+            stmt.setString(1, options.schema());
+            stmt.setString(2, tableName);
+            try (var rows = stmt.executeQuery()) {
+                while (rows.next()) {
+                    String name = SqlIdentifiers.requireIdentifier(rows.getString(1), "live index");
+                    if (live.put(name, rows.getString(2)) != null) {
+                        throw new IllegalStateException("duplicate live index name: " + name);
+                    }
+                }
+            }
+        }
+        Set<String> expected = new HashSet<>();
+        if (tableDef.indexes() != null) {
+            for (String sql : tableDef.indexes()) {
+                IndexDefinition target = IndexDefinition.parse(sql);
+                expected.add(target.name());
+                String liveSql = live.get(target.name());
+                if (liveSql == null) {
+                    execute(conn, sql);
+                } else if (!target.canonicalSql().equals(IndexDefinition.parse(liveSql).canonicalSql())) {
+                    pendingSql.add("-- pending: index definition drift for " + target.name()
+                            + "; expected=" + target.canonicalSql()
+                            + "; live=" + IndexDefinition.parse(liveSql).canonicalSql());
+                }
+            }
+        }
+        for (String liveName : live.keySet()) {
+            if (!expected.contains(liveName)) {
+                pendingSql.add("DROP INDEX IF EXISTS " + liveName + "; -- table=" + tableName);
+            }
+        }
+    }
+
+    private void reconcilePrimaryKey(DatabaseMetaData meta, String tableName,
+                                     SchemaDefinition.TableDef tableDef, List<String> pendingSql)
+            throws SQLException {
+        if (tableDef.createSql() == null) {
+            return;
+        }
+        List<String> expected = primaryKeyColumns(tableDef.createSql());
+        TreeMap<Short, String> orderedLive = new TreeMap<>();
+        String constraintName = null;
+        try (ResultSet rows = meta.getPrimaryKeys(null, options.schema(), tableName)) {
+            while (rows.next()) {
+                short sequence = rows.getShort("KEY_SEQ");
+                String column = SqlIdentifiers.requireIdentifier(rows.getString("COLUMN_NAME"), "primary-key column");
+                if (orderedLive.put(sequence, column) != null) {
+                    throw new IllegalStateException("duplicate primary-key sequence for table: " + tableName);
+                }
+                String rowConstraint = rows.getString("PK_NAME");
+                if (rowConstraint != null) {
+                    rowConstraint = SqlIdentifiers.requireIdentifier(rowConstraint, "primary-key constraint");
+                    if (constraintName != null && !constraintName.equals(rowConstraint)) {
+                        throw new IllegalStateException("multiple primary-key constraints reported for table: "
+                                + tableName);
+                    }
+                    constraintName = rowConstraint;
+                }
+            }
+        }
+        List<String> live = List.copyOf(orderedLive.values());
+        if (expected.equals(live)) {
+            return;
+        }
+        if (expected.isEmpty()) {
+            if (constraintName == null) {
+                pendingSql.add("-- pending: primary key is absent from definition for " + tableName
+                        + ", but JDBC did not report its constraint name");
+            } else {
+                pendingSql.add("ALTER TABLE " + tableName + " DROP CONSTRAINT " + constraintName
+                        + "; -- pending: primary key absent from definition");
+            }
+        } else if (live.isEmpty()) {
+            pendingSql.add("ALTER TABLE " + tableName + " ADD PRIMARY KEY ("
+                    + String.join(", ", expected) + "); -- pending: primary key is missing");
+        } else {
+            pendingSql.add("-- pending: primary key drift for " + tableName
+                    + "; expected=" + expected + "; live=" + live);
+        }
+    }
+
+    private List<String> primaryKeyColumns(String createSql) {
+        if (createSql == null) {
+            return List.of();
+        }
+        Matcher matcher = PRIMARY_KEY_COLUMNS.matcher(createSql);
+        if (!matcher.find()) {
+            Matcher inline = INLINE_PRIMARY_KEY.matcher(createSql);
+            if (!inline.find()) {
+                return List.of();
+            }
+            return List.of(SqlIdentifiers.requireIdentifier(inline.group(1), "primary-key column"));
+        }
+        List<String> columns = new ArrayList<>();
+        for (String raw : matcher.group(1).split(",")) {
+            columns.add(SqlIdentifiers.requireIdentifier(raw.trim(), "primary-key column"));
+        }
+        return List.copyOf(columns);
+    }
+
+    private List<String> detectOrphanedTables(SchemaDefinition def, Set<String> existingTables) {
+        Set<String> expected = new HashSet<>();
+        if (def.tables() != null) {
+            def.tables().keySet().forEach(name -> expected.add(name.toLowerCase(Locale.ROOT)));
+        }
+        List<String> pending = new ArrayList<>();
+        for (String table : existingTables) {
+            if (!expected.contains(table) && !isIgnorableSchemaTable(table)
+                    && !table.equals(options.historyTable())) {
+                pending.add("DROP TABLE " + table + "; -- pending: table absent from definition");
+            }
+        }
+        return pending;
     }
 
     private Set<String> getExistingTables(DatabaseMetaData meta) throws SQLException {
@@ -385,17 +554,51 @@ public class SchemaApplier {
                 String name = rs.getString("COLUMN_NAME").toLowerCase(Locale.ROOT);
                 String typeName = rs.getString("TYPE_NAME");
                 int size = rs.getInt("COLUMN_SIZE");
+                int decimalDigits = rs.getInt("DECIMAL_DIGITS");
+                boolean decimalDigitsNull = rs.wasNull();
                 boolean notNull = "NO".equalsIgnoreCase(rs.getString("IS_NULLABLE"));
                 String colDefault = rs.getString("COLUMN_DEF");
                 Integer length = null;
+                Integer scale = null;
                 String normalized = ColumnDefinitionParser.normalizeType(typeName);
-                if ("VARCHAR".equals(normalized) && size > 0 && size < 10_000) {
+                if (("VARCHAR".equals(normalized) || "CHAR".equals(normalized))
+                        && size > 0 && size < 10_000) {
                     length = size;
+                } else if ("NUMERIC".equals(normalized) && size > 0 && size <= 1_000) {
+                    length = size;
+                    scale = decimalDigitsNull ? null : decimalDigits;
+                } else if ("VECTOR".equals(normalized)) {
+                    length = readVectorDimension(meta.getConnection(), tableName, name);
                 }
-                columns.put(name, new LiveColumn(normalized, length, notNull, colDefault));
+                columns.put(name, new LiveColumn(normalized, length, scale, notNull, colDefault));
             }
         }
         return columns;
+    }
+
+    private int readVectorDimension(Connection conn, String tableName, String columnName) throws SQLException {
+        if (conn == null) {
+            throw new SQLException("JDBC metadata did not expose its connection for vector inspection");
+        }
+        String sql = "SELECT format_type(a.atttypid, a.atttypmod) "
+                + "FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid "
+                + "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                + "WHERE n.nspname = ? AND c.relname = ? AND a.attname = ? "
+                + "AND a.attnum > 0 AND NOT a.attisdropped";
+        try (var statement = conn.prepareStatement(sql)) {
+            statement.setString(1, options.schema());
+            statement.setString(2, tableName);
+            statement.setString(3, columnName);
+            try (var rows = statement.executeQuery()) {
+                if (rows.next()) {
+                    String formatted = rows.getString(1);
+                    if (formatted != null && formatted.matches("(?i)^vector\\(\\d+\\)$")) {
+                        return Integer.parseInt(formatted.substring(7, formatted.length() - 1));
+                    }
+                }
+            }
+        }
+        throw new SQLException("Could not determine vector dimension for " + tableName + "." + columnName);
     }
 
     private void execute(Connection conn, String sql) throws SQLException {

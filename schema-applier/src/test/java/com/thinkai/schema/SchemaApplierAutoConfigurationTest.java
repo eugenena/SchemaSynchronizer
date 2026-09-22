@@ -36,6 +36,17 @@ class SchemaApplierAutoConfigurationTest {
         });
     }
 
+    @Test
+    void backsOffWhenMultipleDataSourcesExist() {
+        new ApplicationContextRunner()
+                .withConfiguration(AutoConfigurations.of(SchemaApplierAutoConfiguration.class))
+                .withUserConfiguration(MultipleDataSourcesConfiguration.class)
+                .run(context -> {
+                    assertThat(context).doesNotHaveBean(SchemaApplier.class);
+                    assertThat(context).doesNotHaveBean(SchemaApplierInitializer.class);
+                });
+    }
+
     @Configuration(proxyBeanMethods = false)
     static class TestConfiguration {
         @Bean ObjectMapper objectMapper() { return new ObjectMapper(); }
@@ -44,5 +55,12 @@ class SchemaApplierAutoConfigurationTest {
             when(result.getConnection().getAutoCommit()).thenReturn(true);
             return result;
         }
+    }
+
+    @Configuration(proxyBeanMethods = false)
+    static class MultipleDataSourcesConfiguration {
+        @Bean ObjectMapper objectMapper() { return new ObjectMapper(); }
+        @Bean DataSource firstDataSource() { return mock(DataSource.class); }
+        @Bean DataSource secondDataSource() { return mock(DataSource.class); }
     }
 }

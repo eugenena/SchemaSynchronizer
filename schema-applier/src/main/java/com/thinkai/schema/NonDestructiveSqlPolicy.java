@@ -23,7 +23,7 @@ public final class NonDestructiveSqlPolicy {
         String normalized = executableSql(sql).toUpperCase(Locale.ROOT);
         requireSingleStatement(sql, "schema change SQL");
         requireNoForbiddenTokens(sql);
-        if (!startsWithAllowedVerb(normalized)) {
+        if (!matchesAllowedStatement(normalized)) {
             throw new IllegalArgumentException("unsupported schema change SQL: " + summarize(sql));
         }
     }
@@ -55,6 +55,11 @@ public final class NonDestructiveSqlPolicy {
                 .matches("(?s)^CREATE\\s+(UNIQUE\\s+)?INDEX\\b.*")) {
             throw new IllegalArgumentException("index definition must contain one CREATE INDEX statement");
         }
+        if (!executableSql(sql).toUpperCase(Locale.ROOT)
+                .matches("(?s)^CREATE\\s+(UNIQUE\\s+)?INDEX\\s+IF\\s+NOT\\s+EXISTS\\b.*")) {
+            throw new IllegalArgumentException("index definition must use IF NOT EXISTS");
+        }
+        IndexDefinition.parse(sql);
     }
 
     private static void requireSingleStatement(String sql, String label) {
@@ -129,8 +134,19 @@ public final class NonDestructiveSqlPolicy {
         }
     }
 
-    private static boolean startsWithAllowedVerb(String sql) {
-        return sql.matches("(?s)^(CREATE|ALTER|UPDATE|INSERT|COMMENT|GRANT|DO|SELECT)\\b.*");
+    private static boolean matchesAllowedStatement(String sql) {
+        return sql.matches("(?s)^CREATE\\s+TABLE\\b.*")
+                || sql.matches("(?s)^CREATE\\s+(UNIQUE\\s+)?INDEX\\b.*")
+                || sql.matches("(?s)^CREATE\\s+(OR\\s+REPLACE\\s+)?FUNCTION\\b.*")
+                || sql.matches("(?s)^CREATE\\s+TRIGGER\\b.*")
+                || sql.matches("(?s)^CREATE\\s+EXTENSION\\b.*")
+                || sql.matches("(?s)^ALTER\\s+TABLE\\b.*\\s+ADD\\s+(COLUMN|CONSTRAINT)\\b.*")
+                || sql.matches("(?s)^ALTER\\s+TABLE\\b.*\\s+ALTER\\s+COLUMN\\b.*\\s+SET\\s+NOT\\s+NULL\\b.*")
+                || sql.matches("(?s)^ALTER\\s+TABLE\\b.*\\s+VALIDATE\\s+CONSTRAINT\\b.*")
+                || sql.matches("(?s)^(UPDATE|INSERT\\s+INTO)\\b.*")
+                || sql.matches("(?s)^COMMENT\\s+ON\\b.*")
+                || sql.matches("(?s)^GRANT\\b.*")
+                || sql.matches("(?s)^SELECT\\b.*");
     }
 
     private static Pattern token(String expression) {
