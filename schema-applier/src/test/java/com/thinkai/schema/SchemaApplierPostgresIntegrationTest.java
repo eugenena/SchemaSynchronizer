@@ -138,6 +138,86 @@ class SchemaApplierPostgresIntegrationTest {
     }
 
     @Test
+    void advisoryLockSerializesDeclarativeOnlyStartup() throws Exception {
+        DataSource dataSource = dataSource();
+        String schema = uniqueSchema("declarative_concurrent_case");
+        createSchema(dataSource, schema);
+        SchemaDefinition definition = new SchemaDefinition(Map.of(
+                "only_table", new SchemaDefinition.TableDef(
+                        "CREATE TABLE only_table (id BIGINT PRIMARY KEY)",
+                        List.of(new SchemaDefinition.ColumnDef("id", "BIGINT NOT NULL")),
+                        List.of("CREATE UNIQUE INDEX IF NOT EXISTS only_table_pkey ON only_table (id)"))));
+        SchemaApplier applier = applier(dataSource, schema, false);
+        CountDownLatch ready = new CountDownLatch(2);
+        CountDownLatch start = new CountDownLatch(1);
+
+        try (var executor = Executors.newFixedThreadPool(2)) {
+            var first = executor.submit(() -> applyAfterSignal(dataSource, applier, definition, ready, start));
+            var second = executor.submit(() -> applyAfterSignal(dataSource, applier, definition, ready, start));
+            ready.await();
+            start.countDown();
+            assertThat(first.get().tablesCreated() + second.get().tablesCreated()).isEqualTo(1);
+        }
+    }
+
+    @Test
+    void rejectsRemovedAppliedChange() throws Exception {
+        DataSource dataSource = dataSource();
+        String schema = uniqueSchema("removed_change_case");
+        createSchema(dataSource, schema);
+        SchemaApplier applier = applier(dataSource, schema, false);
+        try (Connection connection = dataSource.getConnection()) {
+            applier.applySchemaWithResult(connection, definition("CHECK (score >= 0)"));
+        }
+        try (Connection connection = dataSource.getConnection()) {
+            assertThatThrownBy(() -> applier.applySchemaWithResult(
+                    connection, new SchemaDefinition(Map.of(), List.of())))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("missing from the immutable ledger");
+        }
+    }
+
+    @Test
+    void preservesCallerTransactionOnSuccessAndFailure() throws Exception {
+        DataSource dataSource = dataSource();
+        String schema = uniqueSchema("caller_transaction_case");
+        createSchema(dataSource, schema);
+        SchemaApplier applier = applier(dataSource, schema, false);
+        try (Connection connection = dataSource.getConnection(); var statement = connection.createStatement()) {
+            connection.setAutoCommit(false);
+            statement.execute("SET search_path TO " + schema);
+            statement.execute("CREATE TABLE caller_work (value INTEGER)");
+            statement.execute("INSERT INTO caller_work VALUES (1)");
+            applier.applySchemaWithResult(connection, new SchemaDefinition(Map.of(
+                    "managed", new SchemaDefinition.TableDef("CREATE TABLE managed (id BIGINT PRIMARY KEY)",
+                    List.of(new SchemaDefinition.ColumnDef("id", "BIGINT NOT NULL")),
+                    List.of("CREATE UNIQUE INDEX IF NOT EXISTS managed_pkey ON managed (id)")))));
+            assertThat(connection.getAutoCommit()).isFalse();
+            connection.rollback();
+        }
+        try (Connection connection = dataSource.getConnection()) {
+            assertThat(tableExists(connection, schema, "caller_work")).isFalse();
+            assertThat(tableExists(connection, schema, "managed")).isFalse();
+        }
+
+        try (Connection connection = dataSource.getConnection(); var statement = connection.createStatement()) {
+            connection.setAutoCommit(false);
+            statement.execute("SET search_path TO " + schema);
+            statement.execute("CREATE TABLE caller_work (value INTEGER)");
+            assertThatThrownBy(() -> applier.applySchemaWithResult(connection,
+                    new SchemaDefinition(Map.of(), List.of(new SchemaDefinition.ChangeSet(
+                            "bad", "fails policy", List.of("DROP TABLE caller_work"))))))
+                    .isInstanceOf(IllegalArgumentException.class);
+            statement.execute("INSERT INTO caller_work VALUES (2)");
+            connection.commit();
+        }
+        try (Connection connection = dataSource.getConnection()) {
+            assertThat(queryLong(connection, "SELECT count(*) FROM " + schema + ".caller_work"))
+                    .isEqualTo(1);
+        }
+    }
+
+    @Test
     void appliesPostSchemaConstraintsAfterCreatingFreshDeclarativeTables() throws Exception {
         DataSource dataSource = dataSource();
         String schema = uniqueSchema("post_schema_case");

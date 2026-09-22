@@ -12,6 +12,10 @@ class NonDestructiveSqlPolicyTest {
                 "ALTER TABLE child ADD CONSTRAINT fk_parent FOREIGN KEY (parent_id) REFERENCES parent(id)"))
                 .doesNotThrowAnyException();
         assertThatCode(() -> NonDestructiveSqlPolicy.requireSafe(
+                "CREATE OR REPLACE FUNCTION f() RETURNS void LANGUAGE plpgsql AS $body$ "
+                        + "BEGIN PERFORM 1; PERFORM ';'; END $body$;"))
+                .doesNotThrowAnyException();
+        assertThatCode(() -> NonDestructiveSqlPolicy.requireSafe(
                 "UPDATE child SET state = 'READY' WHERE state IS NULL"))
                 .doesNotThrowAnyException();
         assertThatCode(() -> NonDestructiveSqlPolicy.requireSafe(
@@ -32,5 +36,13 @@ class NonDestructiveSqlPolicyTest {
         assertThatThrownBy(() -> NonDestructiveSqlPolicy.requireSafe(
                 "ALTER TABLE customers ALTER COLUMN name TYPE VARCHAR(10)"))
                 .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> NonDestructiveSqlPolicy.requireSafe(
+                "SELECT 1; DROP FUNCTION f() CASCADE"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("exactly one statement");
+        assertThatThrownBy(() -> NonDestructiveSqlPolicy.requireReadOnlyVerification(
+                "SELECT true; UPDATE customers SET name = 'changed'"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("exactly one statement");
     }
 }

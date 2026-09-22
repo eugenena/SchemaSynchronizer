@@ -21,7 +21,6 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.lenient;
-import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -33,6 +32,7 @@ class SchemaApplierTest {
     @Mock private DatabaseMetaData metaData;
     @Mock private Statement statement;
     @Mock private ResultSet tablesRs;
+    @Mock private ResultSet historyTablesRs;
     @Mock private ResultSet columnsRs;
     @Mock private PreparedStatement preparedStatement;
     @Mock private ResultSet preparedRows;
@@ -45,6 +45,10 @@ class SchemaApplierTest {
         applier = new SchemaApplier(objectMapper, dataSource);
         lenient().when(dataSource.getConnection()).thenReturn(connection);
         lenient().when(connection.getMetaData()).thenReturn(metaData);
+        lenient().when(connection.getAutoCommit()).thenReturn(true);
+        lenient().when(metaData.getTables(null, "public", "thinkai_schema_history", new String[]{"TABLE"}))
+                .thenReturn(historyTablesRs);
+        lenient().when(historyTablesRs.next()).thenReturn(false);
         lenient().when(connection.createStatement()).thenReturn(statement);
         lenient().when(statement.execute(anyString())).thenReturn(true);
         lenient().when(connection.prepareStatement(anyString())).thenReturn(preparedStatement);
@@ -53,9 +57,22 @@ class SchemaApplierTest {
     }
 
     @Test
-    void emptyTables_doesNothing() throws Exception {
+    void emptyDefinitionStillChecksTheImmutableLedgerUnderLock() throws Exception {
         applier.applySchema(connection, new SchemaDefinition(Map.of()));
-        verify(statement, never()).execute(anyString());
+        verify(statement).execute("SELECT pg_advisory_xact_lock(7249031147)");
+    }
+
+    @Test
+    void rejectsDuplicateChangeIdsAcrossPhases() {
+        SchemaDefinition definition = new SchemaDefinition(Map.of(), List.of(
+                new SchemaDefinition.ChangeSet("duplicate", "before", List.of("SELECT 1"), null,
+                        SchemaDefinition.ChangeSet.Phase.BEFORE_SCHEMA),
+                new SchemaDefinition.ChangeSet("duplicate", "after", List.of("SELECT 2"), null,
+                        SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA)));
+
+        assertThatThrownBy(() -> applier.applySchema(connection, definition))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("duplicate schema change id");
     }
 
     @Test

@@ -21,6 +21,7 @@ public final class NonDestructiveSqlPolicy {
             throw new IllegalArgumentException("schema change statement is blank");
         }
         String normalized = stripComments(sql).toUpperCase(Locale.ROOT);
+        requireSingleStatement(sql, "schema change SQL");
         requireNoForbiddenTokens(sql);
         if (!startsWithAllowedVerb(normalized)) {
             throw new IllegalArgumentException("unsupported schema change SQL: " + summarize(sql));
@@ -31,6 +32,7 @@ public final class NonDestructiveSqlPolicy {
         if (sql == null || !stripComments(sql).toUpperCase(Locale.ROOT).matches("(?s)^(SELECT|WITH)\\b.*")) {
             throw new IllegalArgumentException("verification SQL must be a SELECT or WITH query");
         }
+        requireSingleStatement(sql, "verification SQL");
         requireNoForbiddenTokens(sql);
     }
 
@@ -52,8 +54,64 @@ public final class NonDestructiveSqlPolicy {
     }
 
     private static void requireSingleStatement(String sql, String label) {
-        if (stripComments(sql).contains(";")) {
-            throw new IllegalArgumentException(label + " must not contain a statement separator");
+        boolean singleQuoted = false;
+        boolean doubleQuoted = false;
+        boolean lineComment = false;
+        boolean blockComment = false;
+        String dollarTag = null;
+        for (int index = 0; index < sql.length(); index++) {
+            char current = sql.charAt(index);
+            char next = index + 1 < sql.length() ? sql.charAt(index + 1) : '\0';
+            if (lineComment) {
+                if (current == '\n') lineComment = false;
+                continue;
+            }
+            if (blockComment) {
+                if (current == '*' && next == '/') {
+                    blockComment = false;
+                    index++;
+                }
+                continue;
+            }
+            if (dollarTag != null) {
+                if (sql.startsWith(dollarTag, index)) {
+                    index += dollarTag.length() - 1;
+                    dollarTag = null;
+                }
+                continue;
+            }
+            if (singleQuoted) {
+                if (current == '\'' && next == '\'') index++;
+                else if (current == '\'') singleQuoted = false;
+                continue;
+            }
+            if (doubleQuoted) {
+                if (current == '"' && next == '"') index++;
+                else if (current == '"') doubleQuoted = false;
+                continue;
+            }
+            if (current == '-' && next == '-') {
+                lineComment = true;
+                index++;
+            } else if (current == '/' && next == '*') {
+                blockComment = true;
+                index++;
+            } else if (current == '\'') {
+                singleQuoted = true;
+            } else if (current == '"') {
+                doubleQuoted = true;
+            } else if (current == '$') {
+                int end = sql.indexOf('$', index + 1);
+                if (end >= 0) {
+                    String candidate = sql.substring(index, end + 1);
+                    if (candidate.matches("\\$[A-Za-z_][A-Za-z0-9_]*\\$|\\$\\$")) {
+                        dollarTag = candidate;
+                        index = end;
+                    }
+                }
+            } else if (current == ';' && !stripComments(sql.substring(index + 1)).isBlank()) {
+                throw new IllegalArgumentException(label + " must contain exactly one statement");
+            }
         }
     }
 

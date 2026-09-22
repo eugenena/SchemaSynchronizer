@@ -50,7 +50,6 @@ final class ChangeSetExecutor {
             return new Result(0, List.copyOf(planned));
         }
 
-        execute(conn, "SELECT pg_advisory_xact_lock(" + options.advisoryLockId() + ")");
         createHistory(conn, history);
         applied = readHistory(conn, history);
         for (SchemaDefinition.ChangeSet change : safeChanges) {
@@ -82,7 +81,7 @@ final class ChangeSetExecutor {
         return new Result(appliedCount, List.copyOf(planned));
     }
 
-    private List<SchemaDefinition.ChangeSet> validate(List<SchemaDefinition.ChangeSet> changes) {
+    List<SchemaDefinition.ChangeSet> validate(List<SchemaDefinition.ChangeSet> changes) {
         if (changes == null || changes.isEmpty()) {
             return List.of();
         }
@@ -103,6 +102,30 @@ final class ChangeSetExecutor {
             }
         }
         return List.copyOf(changes);
+    }
+
+    void validateHistory(Connection conn, List<SchemaDefinition.ChangeSet> changes, SchemaApplierOptions options)
+            throws Exception {
+        if (!historyExists(conn, options)) {
+            return;
+        }
+        String history = SqlIdentifiers.qualified(options.schema(), options.historyTable());
+        Map<String, String> applied = readHistory(conn, history);
+        Map<String, String> expected = new HashMap<>();
+        for (SchemaDefinition.ChangeSet change : changes) {
+            expected.put(change.id(), checksum(change));
+        }
+        for (Map.Entry<String, String> entry : applied.entrySet()) {
+            String expectedChecksum = expected.get(entry.getKey());
+            if (expectedChecksum == null) {
+                throw new IllegalStateException("applied schema change is missing from the immutable ledger: "
+                        + entry.getKey());
+            }
+            if (!expectedChecksum.equals(entry.getValue())) {
+                throw new IllegalStateException("checksum mismatch for applied schema change '"
+                        + entry.getKey() + "': committed changes are immutable");
+            }
+        }
     }
 
     private boolean historyExists(Connection conn, SchemaApplierOptions options) throws SQLException {

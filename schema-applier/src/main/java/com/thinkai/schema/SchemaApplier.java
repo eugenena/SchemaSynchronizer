@@ -9,6 +9,7 @@ import java.io.InputStream;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.ResultSet;
+import java.sql.Savepoint;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -81,53 +82,66 @@ public class SchemaApplier {
     }
 
     public SchemaApplyResult applySchemaWithResult(Connection conn, SchemaDefinition def) throws Exception {
-        boolean noTables = def.tables() == null || def.tables().isEmpty();
-        boolean noChanges = def.changes() == null || def.changes().isEmpty();
-        if (noTables && noChanges) {
-            return new SchemaApplyResult(0, 0, 0, 0, List.of(), List.of());
-        }
         boolean previousAutoCommit = conn.getAutoCommit();
+        boolean ownsTransaction = previousAutoCommit;
+        Savepoint savepoint = null;
+        ChangeSetExecutor executor = new ChangeSetExecutor();
+        List<SchemaDefinition.ChangeSet> allChanges = executor.validate(def.changes());
         plannedSql.set(new ArrayList<>());
         try {
-            conn.setAutoCommit(false);
+            if (ownsTransaction) {
+                conn.setAutoCommit(false);
+            } else {
+                savepoint = conn.setSavepoint("thinkai_schema_applier");
+            }
             executeControl(conn, "SET LOCAL search_path TO " + options.schema());
-            ChangeSetExecutor executor = new ChangeSetExecutor();
+            executeControl(conn, "SELECT pg_advisory_xact_lock(" + options.advisoryLockId() + ")");
+            executor.validateHistory(conn, allChanges, options);
             ChangeSetExecutor.Result beforeChanges = executor.apply(conn,
-                    changesForPhase(def, SchemaDefinition.ChangeSet.Phase.BEFORE_SCHEMA), options);
+                    changesForPhase(allChanges, SchemaDefinition.ChangeSet.Phase.BEFORE_SCHEMA), options);
             plannedSql.get().addAll(beforeChanges.plannedSql());
             DeclarativeResult declarative = applyDeclarativeSchema(conn, def);
             ChangeSetExecutor.Result afterChanges = executor.apply(conn,
-                    changesForPhase(def, SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA), options);
+                    changesForPhase(allChanges, SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA), options);
             plannedSql.get().addAll(afterChanges.plannedSql());
             if (options.failOnPending() && !declarative.pendingSql().isEmpty()) {
                 throw new IllegalStateException("unsafe or destructive schema differences require manual resolution: "
                         + String.join(" | ", declarative.pendingSql()));
             }
             if (options.dryRun()) {
-                conn.rollback();
-            } else {
+                rollback(conn, ownsTransaction, savepoint);
+            } else if (ownsTransaction) {
                 conn.commit();
+            } else {
+                conn.releaseSavepoint(savepoint);
             }
             return new SchemaApplyResult(beforeChanges.applied() + afterChanges.applied(), declarative.tablesCreated(),
                     declarative.columnsAdded(), declarative.columnsAltered(), List.copyOf(plannedSql.get()),
                     declarative.pendingSql());
         } catch (Exception exception) {
-            conn.rollback();
+            rollback(conn, ownsTransaction, savepoint);
             throw exception;
         } finally {
             plannedSql.remove();
-            conn.setAutoCommit(previousAutoCommit);
+            if (ownsTransaction) {
+                conn.setAutoCommit(previousAutoCommit);
+            }
         }
     }
 
     private List<SchemaDefinition.ChangeSet> changesForPhase(
-            SchemaDefinition definition, SchemaDefinition.ChangeSet.Phase phase) {
-        if (definition.changes() == null) {
-            return List.of();
-        }
-        return definition.changes().stream()
-                .filter(change -> change != null && change.effectivePhase() == phase)
+            List<SchemaDefinition.ChangeSet> changes, SchemaDefinition.ChangeSet.Phase phase) {
+        return changes.stream()
+                .filter(change -> change.effectivePhase() == phase)
                 .toList();
+    }
+
+    private void rollback(Connection conn, boolean ownsTransaction, Savepoint savepoint) throws SQLException {
+        if (ownsTransaction) {
+            conn.rollback();
+        } else if (savepoint != null) {
+            conn.rollback(savepoint);
+        }
     }
 
     private DeclarativeResult applyDeclarativeSchema(Connection conn, SchemaDefinition def) throws Exception {
