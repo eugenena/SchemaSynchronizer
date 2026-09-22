@@ -120,16 +120,31 @@ Example definition (statements are intentionally one JDBC statement per entry):
 }
 ```
 
-Generate or refresh the declarative snapshot after changing a local PostgreSQL schema:
+### Standalone utilities
+
+Serialize a source database to a schema definition:
 
 ```bash
 SCHEMA_DB_PASSWORD='local-password' mvn -pl schema-synchronizer exec:java \
-  -Dexec.mainClass=io.github.eugenena.schemasynchronizer.SchemaSnapshotWriter \
+  -Dexec.mainClass=io.github.eugenena.schemasynchronizer.SchemaSerializer \
   -Dexec.args="jdbc:postgresql://localhost:5432/app user - public src/main/resources/schema-definition.json"
 ```
 
 The snapshot writer preserves the hand-authored `changes` array. It does not attempt to
 invent backfills or reconstruct the intent of constraints, functions, and triggers.
+
+Synchronize a target database from the serialized definition:
+
+```bash
+SCHEMA_DB_PASSWORD='target-password' mvn -pl schema-synchronizer exec:java \
+  -Dexec.mainClass=io.github.eugenena.schemasynchronizer.SchemaSynchronizer \
+  -Dexec.args="jdbc:postgresql://localhost:5432/target target_user - schema-definition.json public schema_synchronizer_history"
+```
+
+Both utilities accept the password directly in the third argument, but `-` plus
+`SCHEMA_DB_PASSWORD` is recommended so credentials do not appear in the process list or
+shell history. The synchronizer fails closed if the definition is missing, verification
+fails, or destructive/unsafe differences require manual execution.
 
 ### Flyway cutover
 
