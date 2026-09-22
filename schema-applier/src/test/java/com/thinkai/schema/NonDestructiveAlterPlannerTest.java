@@ -53,6 +53,16 @@ class NonDestructiveAlterPlannerTest {
     }
 
     @Test
+    void widensFixedCharToVarcharWithoutTruncation() {
+        var target = ColumnDefinitionParser.parse("VARCHAR(3)");
+        var live = live("BPCHAR", 3, false, null);
+        var plan = NonDestructiveAlterPlanner.plan("t", "currency", target, live);
+        assertThat(plan.applySql()).containsExactly(
+                "ALTER TABLE t ALTER COLUMN currency TYPE VARCHAR(3)");
+        assertThat(plan.pendingSql()).isEmpty();
+    }
+
+    @Test
     void narrowVarcharIsPending() {
         var target = ColumnDefinitionParser.parse("VARCHAR(20)");
         var live = live("VARCHAR", 100, false, null);

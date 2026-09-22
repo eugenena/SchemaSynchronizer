@@ -34,19 +34,27 @@ public class SchemaApplier {
     private final ObjectMapper objectMapper;
     private final DataSource dataSource;
     private final String classpathResource;
+    private final SchemaApplierOptions options;
+    private final ThreadLocal<List<String>> plannedSql = ThreadLocal.withInitial(ArrayList::new);
 
     public SchemaApplier(ObjectMapper objectMapper, DataSource dataSource) {
-        this(objectMapper, dataSource, "/schema-definition.json");
+        this(objectMapper, dataSource, "/schema-definition.json", SchemaApplierOptions.defaults());
     }
 
     public SchemaApplier(ObjectMapper objectMapper, DataSource dataSource, String classpathResource) {
+        this(objectMapper, dataSource, classpathResource, SchemaApplierOptions.defaults());
+    }
+
+    public SchemaApplier(ObjectMapper objectMapper, DataSource dataSource, String classpathResource,
+                         SchemaApplierOptions options) {
         this.objectMapper = objectMapper;
         this.dataSource = dataSource;
         this.classpathResource = classpathResource;
+        this.options = options;
     }
 
     /** Load definition from classpath and apply. */
-    public void applyFromClasspath() throws Exception {
+    public SchemaApplyResult applyFromClasspath() throws Exception {
         try (Connection conn = dataSource.getConnection()) {
             InputStream fromClass = getClass().getResourceAsStream(classpathResource);
             InputStream resource = fromClass != null ? fromClass
@@ -54,19 +62,62 @@ public class SchemaApplier {
                     .getResourceAsStream(classpathResource.startsWith("/")
                             ? classpathResource.substring(1) : classpathResource);
             if (resource == null) {
-                log.debug("[SchemaApplier] No {} on classpath — nothing to do", classpathResource);
-                return;
+                if (options.requireDefinition()) {
+                    throw new IllegalStateException("Required schema definition is missing from classpath: "
+                            + classpathResource);
+                }
+                log.warn("[SchemaApplier] No {} on classpath — schema management is inactive", classpathResource);
+                return new SchemaApplyResult(0, 0, 0, 0, List.of(), List.of());
             }
             try (InputStream in = resource) {
                 SchemaDefinition def = objectMapper.readValue(in, SchemaDefinition.class);
-                applySchema(conn, def);
+                return applySchemaWithResult(conn, def);
             }
         }
     }
 
     public void applySchema(Connection conn, SchemaDefinition def) throws Exception {
+        applySchemaWithResult(conn, def);
+    }
+
+    public SchemaApplyResult applySchemaWithResult(Connection conn, SchemaDefinition def) throws Exception {
+        boolean noTables = def.tables() == null || def.tables().isEmpty();
+        boolean noChanges = def.changes() == null || def.changes().isEmpty();
+        if (noTables && noChanges) {
+            return new SchemaApplyResult(0, 0, 0, 0, List.of(), List.of());
+        }
+        boolean previousAutoCommit = conn.getAutoCommit();
+        plannedSql.set(new ArrayList<>());
+        try {
+            conn.setAutoCommit(false);
+            executeControl(conn, "SET LOCAL search_path TO " + options.schema());
+            ChangeSetExecutor.Result changes = new ChangeSetExecutor().apply(conn, def.changes(), options);
+            plannedSql.get().addAll(changes.plannedSql());
+            DeclarativeResult declarative = applyDeclarativeSchema(conn, def);
+            if (options.failOnPending() && !declarative.pendingSql().isEmpty()) {
+                throw new IllegalStateException("unsafe or destructive schema differences require manual resolution: "
+                        + String.join(" | ", declarative.pendingSql()));
+            }
+            if (options.dryRun()) {
+                conn.rollback();
+            } else {
+                conn.commit();
+            }
+            return new SchemaApplyResult(changes.applied(), declarative.tablesCreated(),
+                    declarative.columnsAdded(), declarative.columnsAltered(), List.copyOf(plannedSql.get()),
+                    declarative.pendingSql());
+        } catch (Exception exception) {
+            conn.rollback();
+            throw exception;
+        } finally {
+            plannedSql.remove();
+            conn.setAutoCommit(previousAutoCommit);
+        }
+    }
+
+    private DeclarativeResult applyDeclarativeSchema(Connection conn, SchemaDefinition def) throws Exception {
         if (def.tables() == null || def.tables().isEmpty()) {
-            return;
+            return new DeclarativeResult(0, 0, 0, List.of());
         }
 
         DatabaseMetaData meta = conn.getMetaData();
@@ -79,16 +130,20 @@ public class SchemaApplier {
 
         for (Map.Entry<String, SchemaDefinition.TableDef> entry : def.tables().entrySet()) {
             String tableName = entry.getKey().toLowerCase(Locale.ROOT);
+            SqlIdentifiers.requireIdentifier(tableName, "table");
             SchemaDefinition.TableDef tableDef = entry.getValue();
 
             if (!existingTables.contains(tableName)) {
                 if (tableDef.createSql() != null) {
+                    NonDestructiveSqlPolicy.requireCreateTable(tableDef.createSql());
                     execute(conn, tableDef.createSql());
                     log.info("[SchemaApplier] Created table: {}", tableName);
                     tablesCreated++;
                     existingTables.add(tableName);
                 } else {
                     log.warn("[SchemaApplier] Table '{}' missing but no createSql provided — skipping", tableName);
+                    pendingSql.add("CREATE TABLE " + tableName
+                            + " (...); -- pending: table missing and createSql is absent");
                     continue;
                 }
             }
@@ -99,9 +154,11 @@ public class SchemaApplier {
 
                 for (SchemaDefinition.ColumnDef col : tableDef.columns()) {
                     String colName = col.name().toLowerCase(Locale.ROOT);
+                    SqlIdentifiers.requireIdentifier(colName, "column");
                     targetColumns.add(colName);
                     if (!liveColumns.containsKey(colName)) {
                         if (col.definition() != null) {
+                            ColumnDefinitionParser.parse(col.definition());
                             String sql = String.format(
                                     "ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s %s",
                                     tableName, col.name(), col.definition()
@@ -109,6 +166,9 @@ public class SchemaApplier {
                             execute(conn, sql);
                             log.info("[SchemaApplier] Added column {}.{}", tableName, col.name());
                             columnsAdded++;
+                        } else {
+                            pendingSql.add("ALTER TABLE " + tableName + " ADD COLUMN " + colName
+                                    + " ...; -- pending: column definition is absent");
                         }
                         continue;
                     }
@@ -127,7 +187,8 @@ public class SchemaApplier {
                         }
                         pendingSql.addAll(plan.pendingSql());
                     } catch (IllegalArgumentException ex) {
-                        log.debug("[SchemaApplier] Skip alter {}.{}: {}", tableName, col.name(), ex.getMessage());
+                        pendingSql.add("-- pending: cannot safely reconcile " + tableName + "." + colName
+                                + ": " + ex.getMessage());
                     }
                 }
 
@@ -142,6 +203,7 @@ public class SchemaApplier {
 
             if (tableDef.indexes() != null) {
                 for (String indexSql : tableDef.indexes()) {
+                    NonDestructiveSqlPolicy.requireCreateIndex(indexSql);
                     execute(conn, indexSql);
                 }
             }
@@ -183,7 +245,12 @@ public class SchemaApplier {
                 log.warn("    {}", sql);
             }
         }
+        pendingSql.addAll(orphanedIndexes);
+        return new DeclarativeResult(tablesCreated, columnsAdded, columnsAltered, List.copyOf(pendingSql));
     }
+
+    private record DeclarativeResult(int tablesCreated, int columnsAdded, int columnsAltered,
+                                     List<String> pendingSql) {}
 
     /** Identity / serial columns must not get DROP DEFAULT from nextval noise. */
     public static boolean shouldSkipAlter(String definition, LiveColumn live) {
@@ -202,13 +269,13 @@ public class SchemaApplier {
     public static boolean isIgnorableSchemaTable(String tableName) {
         if (tableName == null || tableName.isBlank()) return true;
         String t = tableName.toLowerCase(Locale.ROOT);
-        return t.startsWith("flyway_") || t.equals("shedlock");
+        return t.startsWith("flyway_") || t.startsWith("thinkai_schema_") || t.equals("shedlock");
     }
 
     public static boolean isIgnorableSchemaIndex(String indexName) {
         if (indexName == null || indexName.isBlank()) return true;
         String i = indexName.toLowerCase(Locale.ROOT);
-        return i.startsWith("flyway_") || i.equals("shedlock_pkey");
+        return i.startsWith("flyway_") || i.startsWith("thinkai_schema_") || i.equals("shedlock_pkey");
     }
 
     private List<String> detectOrphanedIndexes(
@@ -229,8 +296,9 @@ public class SchemaApplier {
             for (String tableName : existingTables) {
                 if (isIgnorableSchemaTable(tableName)) continue;
                 try (var stmt = conn.prepareStatement(
-                        "SELECT indexname FROM pg_indexes WHERE schemaname = 'public' AND tablename = ?")) {
-                    stmt.setString(1, tableName);
+                        "SELECT indexname FROM pg_indexes WHERE schemaname = ? AND tablename = ?")) {
+                    stmt.setString(1, options.schema());
+                    stmt.setString(2, tableName);
                     try (var rs = stmt.executeQuery()) {
                         while (rs.next()) {
                             String idxName = rs.getString("indexname").toLowerCase(Locale.ROOT);
@@ -244,14 +312,17 @@ public class SchemaApplier {
                 }
             }
         } catch (Exception e) {
-            log.debug("[SchemaApplier] Orphaned index detection skipped (non-PostgreSQL?): {}", e.getMessage());
+            if (options.failOnPending()) {
+                throw new IllegalStateException("Unable to verify indexes in schema " + options.schema(), e);
+            }
+            log.warn("[SchemaApplier] Orphaned index detection skipped: {}", e.getMessage());
         }
         return orphanedIndexes;
     }
 
     private Set<String> getExistingTables(DatabaseMetaData meta) throws SQLException {
         Set<String> tables = new HashSet<>();
-        try (ResultSet rs = meta.getTables(null, "public", "%", new String[]{"TABLE"})) {
+        try (ResultSet rs = meta.getTables(null, options.schema(), "%", new String[]{"TABLE"})) {
             while (rs.next()) {
                 tables.add(rs.getString("TABLE_NAME").toLowerCase(Locale.ROOT));
             }
@@ -261,7 +332,7 @@ public class SchemaApplier {
 
     Map<String, LiveColumn> getLiveColumns(DatabaseMetaData meta, String tableName) throws SQLException {
         Map<String, LiveColumn> columns = new HashMap<>();
-        try (ResultSet rs = meta.getColumns(null, "public", tableName.toLowerCase(Locale.ROOT), "%")) {
+        try (ResultSet rs = meta.getColumns(null, options.schema(), tableName.toLowerCase(Locale.ROOT), "%")) {
             while (rs.next()) {
                 String name = rs.getString("COLUMN_NAME").toLowerCase(Locale.ROOT);
                 String typeName = rs.getString("TYPE_NAME");
@@ -280,6 +351,16 @@ public class SchemaApplier {
     }
 
     private void execute(Connection conn, String sql) throws SQLException {
+        if (options.dryRun()) {
+            plannedSql.get().add(sql);
+            return;
+        }
+        try (var stmt = conn.createStatement()) {
+            stmt.execute(sql);
+        }
+    }
+
+    private void executeControl(Connection conn, String sql) throws SQLException {
         try (var stmt = conn.createStatement()) {
             stmt.execute(sql);
         }
@@ -301,9 +382,9 @@ public class SchemaApplier {
         }
     }
 
-    private void repairIdIdentity(Connection conn, String tableName) {
-        boolean prevAutoCommit = true;
-        boolean txnStarted = false;
+    private void repairIdIdentity(Connection conn, String tableName) throws SQLException {
+        boolean prevAutoCommit = conn.getAutoCommit();
+        boolean ownsTransaction = prevAutoCommit;
         try {
             String attidentity = null;
             String seq = null;
@@ -312,10 +393,11 @@ public class SchemaApplier {
                     "FROM pg_attribute a " +
                     "JOIN pg_class c ON a.attrelid = c.oid " +
                     "JOIN pg_namespace n ON c.relnamespace = n.oid " +
-                    "WHERE n.nspname = 'public' AND c.relname = ? AND a.attname = 'id' " +
+                    "WHERE n.nspname = ? AND c.relname = ? AND a.attname = 'id' " +
                     "AND a.attnum > 0 AND NOT a.attisdropped")) {
-                stmt.setString(1, tableName);
-                stmt.setString(2, tableName);
+                stmt.setString(1, options.schema() + "." + tableName);
+                stmt.setString(2, options.schema());
+                stmt.setString(3, tableName);
                 try (ResultSet rs = stmt.executeQuery()) {
                     if (!rs.next()) {
                         return;
@@ -337,9 +419,9 @@ public class SchemaApplier {
                     return;
                 }
             }
-            prevAutoCommit = conn.getAutoCommit();
-            conn.setAutoCommit(false);
-            txnStarted = true;
+            if (ownsTransaction) {
+                conn.setAutoCommit(false);
+            }
             execute(conn, PkIdentity.lockTableSql(tableName));
             if (attach) {
                 execute(conn, PkIdentity.addGeneratedIdentitySql(tableName));
@@ -349,21 +431,23 @@ public class SchemaApplier {
                     && PkIdentity.needsSequenceAdvance(after.lastValue, after.maxId)) {
                 execute(conn, PkIdentity.syncIdentitySequenceSql(tableName));
             }
-            conn.commit();
+            if (ownsTransaction) {
+                conn.commit();
+            }
             if (attach) {
                 log.info("[SchemaApplier] Added IDENTITY on {}.id", tableName);
             }
         } catch (Exception e) {
-            if (txnStarted) {
+            if (ownsTransaction) {
                 try {
                     conn.rollback();
                 } catch (SQLException ignored) {
                     // keep original error
                 }
             }
-            log.warn("[SchemaApplier] Could not repair IDENTITY on {}.id: {}", tableName, e.getMessage());
+            throw new SQLException("Could not repair IDENTITY on " + tableName + ".id", e);
         } finally {
-            if (txnStarted) {
+            if (ownsTransaction) {
                 try {
                     conn.setAutoCommit(prevAutoCommit);
                 } catch (SQLException ignored) {

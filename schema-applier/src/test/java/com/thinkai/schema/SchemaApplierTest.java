@@ -10,12 +10,14 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import javax.sql.DataSource;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Statement;
 import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.lenient;
@@ -32,6 +34,8 @@ class SchemaApplierTest {
     @Mock private Statement statement;
     @Mock private ResultSet tablesRs;
     @Mock private ResultSet columnsRs;
+    @Mock private PreparedStatement preparedStatement;
+    @Mock private ResultSet preparedRows;
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     private SchemaApplier applier;
@@ -43,12 +47,23 @@ class SchemaApplierTest {
         lenient().when(connection.getMetaData()).thenReturn(metaData);
         lenient().when(connection.createStatement()).thenReturn(statement);
         lenient().when(statement.execute(anyString())).thenReturn(true);
+        lenient().when(connection.prepareStatement(anyString())).thenReturn(preparedStatement);
+        lenient().when(preparedStatement.executeQuery()).thenReturn(preparedRows);
+        lenient().when(preparedRows.next()).thenReturn(false);
     }
 
     @Test
     void emptyTables_doesNothing() throws Exception {
         applier.applySchema(connection, new SchemaDefinition(Map.of()));
         verify(statement, never()).execute(anyString());
+    }
+
+    @Test
+    void missingRequiredDefinitionFailsClosed() {
+        SchemaApplier missing = new SchemaApplier(objectMapper, dataSource, "/does-not-exist.json");
+        assertThatThrownBy(missing::applyFromClasspath)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Required schema definition is missing");
     }
 
     @Test

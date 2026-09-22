@@ -6,7 +6,7 @@
 
   <groupId>com.thinkai</groupId>
   <artifactId>thinkai-shared</artifactId>
-  <version>0.1.0-SNAPSHOT</version>
+  <version>0.2.0-SNAPSHOT</version>
   <packaging>pom</packaging>
   <name>thinkai-shared</name>
   <description>Reusable libraries for ThinkAI Spring/Postgres apps</description>
@@ -15,6 +15,19 @@
     <module>schema-applier</module>
   </modules>
 
+  <distributionManagement>
+    <repository>
+      <id>github</id>
+      <name>GitHub Packages</name>
+      <url>https://maven.pkg.github.com/eugenena/thinkai-shared</url>
+    </repository>
+    <snapshotRepository>
+      <id>github</id>
+      <name>GitHub Packages</name>
+      <url>https://maven.pkg.github.com/eugenena/thinkai-shared</url>
+    </snapshotRepository>
+  </distributionManagement>
+
   <properties>
     <java.version>21</java.version>
     <maven.compiler.release>21</maven.compiler.release>
@@ -22,6 +35,7 @@
     <junit.version>5.11.4</junit.version>
     <assertj.version>3.27.3</assertj.version>
     <jackson.version>2.18.3</jackson.version>
+    <spring-boot.version>3.4.6</spring-boot.version>
   </properties>
 
   <dependencyManagement>
@@ -35,6 +49,11 @@
         <groupId>com.fasterxml.jackson.core</groupId>
         <artifactId>jackson-databind</artifactId>
         <version>${jackson.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-autoconfigure</artifactId>
+        <version>${spring-boot.version}</version>
       </dependency>
       <dependency>
         <groupId>org.junit.jupiter</groupId>

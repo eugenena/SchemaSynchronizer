@@ -24,7 +24,7 @@ import org.slf4j.LoggerFactory;
  * <pre>
  *   mvn exec:java \
  *     -Dexec.mainClass=com.thinkai.schema.SchemaSerializer \
- *     -Dexec.args="jdbc:postgresql://localhost:5432/jobs enaoumov ''" \
+ *     -Dexec.args="jdbc:postgresql://localhost:5432/jobs enaoumov '' public src/main/resources/schema-definition.json" \
  *     -Dexec.classpathScope=compile
  * </pre>
  * Or using the shortcut script: {@code scripts/serialize-schema.sh}
@@ -32,12 +32,13 @@ import org.slf4j.LoggerFactory;
  * <p>The generated file is committed to source control and used by {@link SchemaApplier}
  * on every startup to verify and fix the production schema additively.
  *
- * <p><b>What is captured:</b> every table in the {@code public} schema, with every
+ * <p><b>What is captured:</b> every table in the configured schema, with every
  * column name and its SQL type + nullable flag as the {@code definition}. Also
  * captures {@code createSql} (full CREATE TABLE statement), all indexes from
  * {@code pg_indexes}, and correct vector dimensions via {@code pg_attribute}.
  *
- * <p><b>What is NOT captured:</b> sequences, constraints (FK, CHECK). Index capture
+ * <p><b>What is NOT captured:</b> sequences, constraints (FK, CHECK), functions, or triggers.
+ * These belong in the ordered {@code changes} array, which the serializer preserves. Index capture
  * means dropping an index locally no-ops silently in prod — SchemaApplier logs
  * orphaned indexes as warnings when they differ from the serialized set.
  */
@@ -50,15 +51,15 @@ public class SchemaSerializer {
     private static final String DEFAULT_PASSWORD = "";
 
     /** Tables to exclude from snapshot (system / internal tables). */
-    private static final Set<String> EXCLUDE = Set.of("flyway_schema_history");
+    private static final Set<String> EXCLUDE = Set.of("flyway_schema_history", "thinkai_schema_history");
 
     public static void main(String[] args) throws Exception {
         String url      = args.length > 0 ? args[0] : DEFAULT_URL;
         String user     = args.length > 1 ? args[1] : DEFAULT_USER;
         String password = args.length > 2 ? args[2] : DEFAULT_PASSWORD;
+        String schema   = args.length > 3 ? SqlIdentifiers.requireIdentifier(args[3], "schema") : "public";
 
-        // schema-definition.json lives in src/main/resources
-        Path outputPath = Paths.get("src/main/resources/schema-definition.json");
+        Path outputPath = Paths.get(args.length > 4 ? args[4] : "src/main/resources/schema-definition.json");
 
         if (args.length > 0 && "--restore-json".equals(args[0])) {
             restoreIdentityInJson(outputPath);
@@ -68,7 +69,7 @@ public class SchemaSerializer {
 
         log.info("[SchemaSerializer] Connecting to {}", url);
         try (Connection conn = DriverManager.getConnection(url, user, password)) {
-            Map<String, Object> tables = buildSnapshot(conn.getMetaData(), conn);
+            Map<String, Object> tables = buildSnapshot(conn.getMetaData(), conn, schema);
             writeJson(tables, outputPath);
         }
 
@@ -76,10 +77,11 @@ public class SchemaSerializer {
         log.info("[SchemaSerializer] Review the diff, then commit schema-definition.json.");
     }
 
-    private static Map<String, Object> buildSnapshot(DatabaseMetaData meta, Connection conn) throws Exception {
+    private static Map<String, Object> buildSnapshot(DatabaseMetaData meta, Connection conn, String schema)
+            throws Exception {
         Map<String, Object> tables = new TreeMap<>();
 
-        try (ResultSet rs = meta.getTables(null, "public", "%", new String[]{"TABLE"})) {
+        try (ResultSet rs = meta.getTables(null, schema, "%", new String[]{"TABLE"})) {
             while (rs.next()) {
                 String tableName = rs.getString("TABLE_NAME").toLowerCase();
                 if (EXCLUDE.contains(tableName)) continue;
@@ -88,7 +90,7 @@ public class SchemaSerializer {
                 List<String> pkCols = new ArrayList<>();
                 List<Map<String, Object>> pendingCols = new ArrayList<>();
 
-                try (ResultSet cols = meta.getColumns(null, "public", tableName, "%")) {
+                try (ResultSet cols = meta.getColumns(null, schema, tableName, "%")) {
                     while (cols.next()) {
                         String colName  = cols.getString("COLUMN_NAME").toLowerCase();
                         String typeName = cols.getString("TYPE_NAME").toUpperCase();
@@ -98,7 +100,7 @@ public class SchemaSerializer {
                         boolean autoInc = "YES".equalsIgnoreCase(cols.getString("IS_AUTOINCREMENT"));
 
                         if ("VECTOR".equals(typeName)) {
-                            size = readVectorDimension(conn, tableName, colName);
+                            size = readVectorDimension(conn, schema, tableName, colName);
                         }
 
                         Map<String, Object> pending = new LinkedHashMap<>();
@@ -112,7 +114,7 @@ public class SchemaSerializer {
                     }
                 }
 
-                try (ResultSet pk = meta.getPrimaryKeys(null, "public", tableName)) {
+                try (ResultSet pk = meta.getPrimaryKeys(null, schema, tableName)) {
                     while (pk.next()) {
                         pkCols.add(pk.getString("COLUMN_NAME").toLowerCase());
                     }
@@ -141,7 +143,7 @@ public class SchemaSerializer {
                     rawColumns.add(rawCol);
                 }
 
-                List<String> indexes = readIndexes(conn, tableName);
+                List<String> indexes = readIndexes(conn, schema, tableName);
                 String createSql = PkIdentity.restoreCreateSql(buildCreateSql(tableName, rawColumns, pkCols));
                 for (Map<String, String> col : columns) {
                     col.put("definition", PkIdentity.restoreIdColumnDefinition(
@@ -158,12 +160,13 @@ public class SchemaSerializer {
         return tables;
     }
 
-    private static int readVectorDimension(Connection conn, String tableName, String colName) throws Exception {
+    private static int readVectorDimension(Connection conn, String schema, String tableName, String colName)
+            throws Exception {
         String sql = "SELECT format_type(a.atttypid, a.atttypmod) AS fmt " +
                 "FROM pg_attribute a JOIN pg_type t ON a.atttypid = t.oid " +
                 "WHERE t.typname = 'vector' AND a.attrelid = ?::regclass AND a.attname = ? AND a.attnum > 0";
         try (var stmt = conn.prepareStatement(sql)) {
-            stmt.setString(1, tableName);
+            stmt.setString(1, schema + "." + tableName);
             stmt.setString(2, colName);
             try (var rs = stmt.executeQuery()) {
                 if (rs.next()) {
@@ -177,11 +180,12 @@ public class SchemaSerializer {
         return 768; // default fallback
     }
 
-    private static List<String> readIndexes(Connection conn, String tableName) throws Exception {
+    private static List<String> readIndexes(Connection conn, String schema, String tableName) throws Exception {
         List<String> indexes = new ArrayList<>();
-        String sql = "SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = 'public' AND tablename = ?";
+        String sql = "SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = ? AND tablename = ?";
         try (var stmt = conn.prepareStatement(sql)) {
-            stmt.setString(1, tableName);
+            stmt.setString(1, schema);
+            stmt.setString(2, tableName);
             try (var rs = stmt.executeQuery()) {
                 while (rs.next()) {
                     String indexdef = rs.getString("indexdef");
@@ -252,14 +256,21 @@ public class SchemaSerializer {
     }
 
     private static void writeJson(Map<String, Object> tables, Path outputPath) throws Exception {
-        Map<String, Object> root = new LinkedHashMap<>();
+        ObjectMapper mapper = new ObjectMapper().enable(SerializationFeature.INDENT_OUTPUT);
+        JsonNode preservedChanges = null;
+        if (outputPath.toFile().isFile()) {
+            preservedChanges = mapper.readTree(outputPath.toFile()).get("changes");
+        }
+        ObjectNode root = mapper.createObjectNode();
         root.put("_comment",
                 "AUTO-GENERATED by SchemaSerializer — do not edit by hand. " +
-                "Run scripts/serialize-schema.sh after applying local schema changes, then commit. " +
+                "The serializer preserves the hand-authored ordered changes array. " +
                 "Used by SchemaApplier on every startup to verify and fix the live DB additively.");
-        root.put("tables", tables);
+        root.set("tables", mapper.valueToTree(tables));
+        if (preservedChanges != null) {
+            root.set("changes", preservedChanges);
+        }
 
-        ObjectMapper mapper = new ObjectMapper().enable(SerializationFeature.INDENT_OUTPUT);
         outputPath.toFile().getParentFile().mkdirs();
         mapper.writeValue(outputPath.toFile(), root);
     }

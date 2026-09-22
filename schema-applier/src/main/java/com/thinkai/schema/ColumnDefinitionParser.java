@@ -23,6 +23,9 @@ public final class ColumnDefinitionParser {
         if (definition == null || definition.isBlank()) {
             throw new IllegalArgumentException("column definition is blank");
         }
+        if (definition.contains(";") || definition.contains("--") || definition.contains("/*")) {
+            throw new IllegalArgumentException("column definition contains SQL statement or comment syntax");
+        }
         String rest = definition.trim();
         String defaultExpr = null;
         Matcher defM = DEFAULT.matcher(rest);
@@ -64,6 +67,7 @@ public final class ColumnDefinitionParser {
         String t = typeName.trim().toUpperCase(Locale.ROOT).replaceAll("\\s+", " ");
         return switch (t) {
             case "CHARACTER VARYING", "VARCHAR" -> "VARCHAR";
+            case "CHARACTER", "CHAR", "BPCHAR" -> "CHAR";
             case "INT", "INT4", "INTEGER" -> "INTEGER";
             case "INT8", "BIGINT" -> "BIGINT";
             case "INT2", "SMALLINT" -> "SMALLINT";

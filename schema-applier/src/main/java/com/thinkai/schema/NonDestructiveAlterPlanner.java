@@ -59,7 +59,7 @@ public final class NonDestructiveAlterPlanner {
     static TypeChange classifyTypeChange(
             String liveType, Integer liveLen, String targetType, Integer targetLen) {
         if (liveType.equals(targetType)) {
-            if ("VARCHAR".equals(liveType)) {
+            if ("VARCHAR".equals(liveType) || "CHAR".equals(liveType)) {
                 int liveL = liveLen == null ? Integer.MAX_VALUE : liveLen;
                 int targetL = targetLen == null ? Integer.MAX_VALUE : targetLen;
                 if (targetL > liveL) return TypeChange.WIDEN;
@@ -67,6 +67,11 @@ public final class NonDestructiveAlterPlanner {
                 return TypeChange.SAME;
             }
             return TypeChange.SAME;
+        }
+        if ("CHAR".equals(liveType) && "VARCHAR".equals(targetType)) {
+            int liveL = liveLen == null ? Integer.MAX_VALUE : liveLen;
+            int targetL = targetLen == null ? Integer.MAX_VALUE : targetLen;
+            return targetL >= liveL ? TypeChange.WIDEN : TypeChange.NARROW;
         }
         // VARCHAR → TEXT
         if ("VARCHAR".equals(liveType) && "TEXT".equals(targetType)) {
@@ -93,8 +98,9 @@ public final class NonDestructiveAlterPlanner {
     }
 
     static String formatType(String baseType, Integer length) {
-        if ("VARCHAR".equals(baseType) && length != null && length > 0 && length < 10_000) {
-            return "VARCHAR(" + length + ")";
+        if (("VARCHAR".equals(baseType) || "CHAR".equals(baseType))
+                && length != null && length > 0 && length < 10_000) {
+            return baseType + "(" + length + ")";
         }
         return baseType;
     }
