@@ -186,7 +186,7 @@ public class SchemaApplier {
     }
 
     /** Identity / serial columns must not get DROP DEFAULT from nextval noise. */
-    static boolean shouldSkipAlter(String definition, LiveColumn live) {
+    public static boolean shouldSkipAlter(String definition, LiveColumn live) {
         if (definition == null) {
             return true;
         }
@@ -199,13 +199,13 @@ public class SchemaApplier {
         return liveDef != null && liveDef.contains("nextval(");
     }
 
-    static boolean isIgnorableSchemaTable(String tableName) {
+    public static boolean isIgnorableSchemaTable(String tableName) {
         if (tableName == null || tableName.isBlank()) return true;
         String t = tableName.toLowerCase(Locale.ROOT);
         return t.startsWith("flyway_") || t.equals("shedlock");
     }
 
-    static boolean isIgnorableSchemaIndex(String indexName) {
+    public static boolean isIgnorableSchemaIndex(String indexName) {
         if (indexName == null || indexName.isBlank()) return true;
         String i = indexName.toLowerCase(Locale.ROOT);
         return i.startsWith("flyway_") || i.equals("shedlock_pkey");
