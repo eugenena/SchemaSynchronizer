@@ -441,10 +441,15 @@ public class SchemaApplier {
                 String liveSql = live.get(target.name());
                 if (liveSql == null) {
                     execute(conn, sql);
-                } else if (!target.canonicalSql().equals(IndexDefinition.parse(liveSql).canonicalSql())) {
+                } else if (!target.hasSameStructure(IndexDefinition.parse(liveSql))) {
                     pendingSql.add("-- pending: index definition drift for " + target.name()
-                            + "; expected=" + target.canonicalSql()
-                            + "; live=" + IndexDefinition.parse(liveSql).canonicalSql());
+                            + "; expected=" + target.structuralSql()
+                            + "; live=" + IndexDefinition.parse(liveSql).structuralSql());
+                } else if (!target.canonicalSql().equals(IndexDefinition.parse(liveSql).canonicalSql())) {
+                    log.warn("[SchemaApplier] Index predicate text differs for {}.{}; PostgreSQL may have "
+                                    + "normalized equivalent casts. Review expected={} live={}",
+                            tableName, target.name(), target.predicateSql(),
+                            IndexDefinition.parse(liveSql).predicateSql());
                 }
             }
         }

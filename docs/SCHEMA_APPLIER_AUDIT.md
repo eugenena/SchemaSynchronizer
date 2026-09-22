@@ -46,6 +46,10 @@ PostgreSQL 16 verification suite passes.
   side-effect-free.
 - Only unquoted lower-case identifiers are supported. Quoted or mixed-case names are
   rejected to avoid ambiguous catalog matching.
+- Index uniqueness, keys/expressions, ordering, operator classes, and included columns
+  are enforced. Partial-index predicates are compared textually and reported as a
+  warning because PostgreSQL can render equivalent cast expressions differently;
+  predicate changes therefore require review rather than causing an automatic drop.
 - The declarative layer owns all ordinary tables in its configured schema. Extension-
   owned or externally managed tables should live in another schema; otherwise they
   are intentionally reported as pending orphans.
