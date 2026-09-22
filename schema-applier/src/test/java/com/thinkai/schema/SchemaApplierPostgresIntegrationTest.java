@@ -347,6 +347,37 @@ class SchemaApplierPostgresIntegrationTest {
     }
 
     @Test
+    void failsClosedAndPrintsReplacementForPartialIndexPredicateDrift() throws Exception {
+        DataSource dataSource = dataSource();
+        String schema = uniqueSchema("predicate_drift_case");
+        createSchema(dataSource, schema);
+        SchemaDefinition definition = new SchemaDefinition(Map.of(
+                "jobs", new SchemaDefinition.TableDef(
+                        "CREATE TABLE IF NOT EXISTS jobs (id BIGINT PRIMARY KEY, status VARCHAR(20))",
+                        List.of(new SchemaDefinition.ColumnDef("id", "BIGINT NOT NULL"),
+                                new SchemaDefinition.ColumnDef("status", "VARCHAR(20)")),
+                        List.of("CREATE UNIQUE INDEX IF NOT EXISTS uq_jobs_active ON jobs (id) "
+                                + "WHERE status = 'ACTIVE'"))));
+        try (Connection connection = dataSource.getConnection()) {
+            applier(dataSource, schema, false).applySchemaWithResult(connection, definition);
+            try (var statement = connection.createStatement()) {
+                statement.execute("SET search_path TO " + schema);
+                statement.execute("DROP INDEX uq_jobs_active");
+                statement.execute("CREATE UNIQUE INDEX uq_jobs_active ON jobs (id) WHERE status = 'DRAFT'");
+            }
+            assertThatThrownBy(() -> applier(dataSource, schema, false)
+                    .applySchemaWithResult(connection, definition))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("index definition drift");
+            SchemaApplyResult plan = reportingApplier(dataSource, schema)
+                    .applySchemaWithResult(connection, definition);
+            assertThat(plan.pendingSql()).containsSubsequence(
+                    "DROP INDEX IF EXISTS uq_jobs_active;",
+                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_jobs_active ON jobs (id) WHERE status = 'ACTIVE';");
+        }
+    }
+
+    @Test
     void verificationMustReturnOneNonNullBoolean() throws Exception {
         DataSource dataSource = dataSource();
         String schema = uniqueSchema("verification_shape_case");
