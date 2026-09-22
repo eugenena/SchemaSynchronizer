@@ -53,6 +53,16 @@ class NonDestructiveAlterPlannerTest {
     }
 
     @Test
+    void widensFixedCharToVarcharWithoutTruncation() {
+        var target = ColumnDefinitionParser.parse("VARCHAR(3)");
+        var live = live("BPCHAR", 3, false, null);
+        var plan = NonDestructiveAlterPlanner.plan("t", "currency", target, live);
+        assertThat(plan.applySql()).containsExactly(
+                "ALTER TABLE t ALTER COLUMN currency TYPE VARCHAR(3)");
+        assertThat(plan.pendingSql()).isEmpty();
+    }
+
+    @Test
     void narrowVarcharIsPending() {
         var target = ColumnDefinitionParser.parse("VARCHAR(20)");
         var live = live("VARCHAR", 100, false, null);
@@ -102,7 +112,31 @@ class NonDestructiveAlterPlannerTest {
         assertThat(plan.pendingSql()).isEmpty();
     }
 
+    @Test
+    void widensNumericOnlyWhenIntegerAndFractionCapacityDoNotShrink() {
+        var safe = NonDestructiveAlterPlanner.plan("t", "amount",
+                ColumnDefinitionParser.parse("NUMERIC(20,6)"),
+                new LiveColumn("NUMERIC", 18, 4, false, null));
+        assertThat(safe.applySql()).containsExactly(
+                "ALTER TABLE t ALTER COLUMN amount TYPE NUMERIC(20,6)");
+
+        var unsafe = NonDestructiveAlterPlanner.plan("t", "amount",
+                ColumnDefinitionParser.parse("NUMERIC(18,6)"),
+                new LiveColumn("NUMERIC", 18, 4, false, null));
+        assertThat(unsafe.applySql()).isEmpty();
+        assertThat(unsafe.pendingSql()).hasSize(1);
+    }
+
+    @Test
+    void vectorDimensionDriftIsNeverAppliedSilently() {
+        var target = ColumnDefinitionParser.parse("VECTOR(1536)");
+        var live = new LiveColumn("VECTOR", 768, null, false, null);
+        var plan = NonDestructiveAlterPlanner.plan("documents", "embedding", target, live);
+        assertThat(plan.applySql()).isEmpty();
+        assertThat(plan.pendingSql()).singleElement().asString().contains("VECTOR(1536)");
+    }
+
     private static LiveColumn live(String type, Integer length, boolean notNull, String def) {
-        return new LiveColumn(type, length, notNull, def);
+        return new LiveColumn(type, length, null, notNull, def);
     }
 }
