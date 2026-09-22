@@ -278,15 +278,39 @@ class SchemaApplierPostgresIntegrationTest {
             assertThatThrownBy(() -> applier.applySchemaWithResult(connection, definition))
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessageContaining("primary key is missing");
+            SchemaApplyResult missingPrimaryKey = reportingApplier(dataSource, schema)
+                    .applySchemaWithResult(connection, definition);
+            assertThat(missingPrimaryKey.pendingSql()).contains(
+                    "ALTER TABLE items ADD PRIMARY KEY (id); -- pending: primary key is missing");
             try (var statement = connection.createStatement()) {
                 statement.execute("SET search_path TO " + schema);
-                statement.execute("ALTER TABLE items ADD PRIMARY KEY (id)");
+                statement.execute("ALTER TABLE items ADD PRIMARY KEY (code)");
+            }
+            SchemaApplyResult driftedPrimaryKey = reportingApplier(dataSource, schema)
+                    .applySchemaWithResult(connection, definition);
+            assertThat(driftedPrimaryKey.pendingSql())
+                    .anySatisfy(sql -> assertThat(sql)
+                            .matches("ALTER TABLE items DROP CONSTRAINT items_pkey\\d*;"))
+                    .contains("ALTER TABLE items ADD PRIMARY KEY (id);",
+                            "ALTER TABLE items ALTER COLUMN code DROP NOT NULL;");
+            try (var statement = connection.createStatement()) {
+                statement.execute("SET search_path TO " + schema);
+                for (String sql : driftedPrimaryKey.pendingSql()) {
+                    if (!sql.startsWith("--")) {
+                        statement.execute(sql);
+                    }
+                }
                 statement.execute("DROP INDEX idx_items_code");
                 statement.execute("CREATE INDEX idx_items_code ON items (id)");
             }
             assertThatThrownBy(() -> applier.applySchemaWithResult(connection, definition))
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessageContaining("index definition drift");
+            SchemaApplyResult driftedIndex = reportingApplier(dataSource, schema)
+                    .applySchemaWithResult(connection, definition);
+            assertThat(driftedIndex.pendingSql()).containsSubsequence(
+                    "DROP INDEX IF EXISTS idx_items_code;",
+                    "CREATE INDEX IF NOT EXISTS idx_items_code ON items (code);");
             try (var statement = connection.createStatement()) {
                 statement.execute("SET search_path TO " + schema);
                 statement.execute("DROP INDEX idx_items_code");
@@ -296,6 +320,10 @@ class SchemaApplierPostgresIntegrationTest {
             assertThatThrownBy(() -> applier.applySchemaWithResult(connection, definition))
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessageContaining("table absent from definition");
+            SchemaApplyResult orphanTable = reportingApplier(dataSource, schema)
+                    .applySchemaWithResult(connection, definition);
+            assertThat(orphanTable.pendingSql()).contains(
+                    "DROP TABLE forgotten_table; -- pending: table absent from definition");
         }
     }
 
@@ -401,6 +429,11 @@ class SchemaApplierPostgresIntegrationTest {
     private SchemaApplier applier(DataSource dataSource, String schema, boolean dryRun) {
         return new SchemaApplier(new ObjectMapper(), dataSource, "/schema-definition.json",
                 new SchemaApplierOptions(schema, "thinkai_schema_history", 91L, dryRun, true, true));
+    }
+
+    private SchemaApplier reportingApplier(DataSource dataSource, String schema) {
+        return new SchemaApplier(new ObjectMapper(), dataSource, "/schema-definition.json",
+                new SchemaApplierOptions(schema, "thinkai_schema_history", 91L, false, false, true));
     }
 
     private void createSchema(DataSource dataSource, String schema) throws Exception {

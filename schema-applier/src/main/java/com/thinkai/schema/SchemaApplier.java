@@ -213,6 +213,9 @@ public class SchemaApplier {
             String tableName = entry.getKey().toLowerCase(Locale.ROOT);
             SqlIdentifiers.requireIdentifier(tableName, "table");
             SchemaDefinition.TableDef tableDef = entry.getValue();
+            Set<String> livePrimaryKeyColumns = existingTables.contains(tableName)
+                    ? getLivePrimaryKeyColumns(meta, tableName) : Set.of();
+            List<String> deferredNullabilitySql = new ArrayList<>();
 
             if (!existingTables.contains(tableName)) {
                 if (tableDef.createSql() != null) {
@@ -262,9 +265,13 @@ public class SchemaApplier {
                         NonDestructiveAlterPlanner.Plan plan =
                                 NonDestructiveAlterPlanner.plan(tableName, col.name(), target, liveColumns.get(colName));
                         for (String sql : plan.applySql()) {
-                            execute(conn, sql);
-                            log.info("[SchemaApplier] Altered {}.{}: {}", tableName, col.name(), sql);
-                            columnsAltered++;
+                            if (sql.endsWith(" DROP NOT NULL") && livePrimaryKeyColumns.contains(colName)) {
+                                deferredNullabilitySql.add(terminated(sql));
+                            } else {
+                                execute(conn, sql);
+                                log.info("[SchemaApplier] Altered {}.{}: {}", tableName, col.name(), sql);
+                                columnsAltered++;
+                            }
                         }
                         pendingSql.addAll(plan.pendingSql());
                     } catch (IllegalArgumentException ex) {
@@ -273,7 +280,7 @@ public class SchemaApplier {
                     }
                 }
 
-                for (String existingCol : liveColumns.keySet()) {
+                for (String existingCol : liveColumns.keySet().stream().sorted().toList()) {
                     if (!targetColumns.contains(existingCol)) {
                         pendingSql.add(String.format(
                                 "ALTER TABLE %s DROP COLUMN %s;", tableName, existingCol
@@ -283,6 +290,7 @@ public class SchemaApplier {
             }
 
             reconcilePrimaryKey(meta, tableName, tableDef, pendingSql);
+            pendingSql.addAll(deferredNullabilitySql);
             reconcileIndexes(conn, tableName, tableDef, pendingSql);
 
             if (PkIdentity.createSqlWantsIdIdentity(tableDef.createSql())) {
@@ -299,6 +307,7 @@ public class SchemaApplier {
             log.debug("[SchemaApplier] Schema is up to date — no changes needed");
         }
 
+        pendingSql.addAll(orphanedTables);
         if (!pendingSql.isEmpty()) {
             log.warn("");
             log.warn("╔══════════════════════════════════════════════════════════════════╗");
@@ -306,23 +315,13 @@ public class SchemaApplier {
             log.warn("║  Destructive or unsafe diffs vs schema-definition.json          ║");
             log.warn("║  Run these manually if you intend them:                         ║");
             log.warn("╚══════════════════════════════════════════════════════════════════╝");
+            log.warn("    BEGIN;");
+            log.warn("    SET LOCAL search_path TO {};", options.schema());
             for (String sql : pendingSql) {
                 log.warn("    {}", sql);
             }
+            log.warn("    COMMIT;");
         }
-
-        if (!orphanedTables.isEmpty()) {
-            log.warn("");
-            log.warn("╔══════════════════════════════════════════════════════════════════╗");
-            log.warn("║         ORPHANED TABLES DETECTED                                ║");
-            log.warn("║  Tables exist in DB but are absent from schema-definition.json  ║");
-            log.warn("║  Run these manually if you intend to drop them:                 ║");
-            log.warn("╚══════════════════════════════════════════════════════════════════╝");
-            for (String sql : orphanedTables) {
-                log.warn("    {}", sql);
-            }
-        }
-        pendingSql.addAll(orphanedTables);
         return new DeclarativeResult(tablesCreated, columnsAdded, columnsAltered, List.copyOf(pendingSql));
     }
 
@@ -378,6 +377,7 @@ public class SchemaApplier {
                 }
             }
             Set<String> columns = new HashSet<>();
+            Map<String, ColumnSpec> columnSpecs = new HashMap<>();
             if (tableDef.columns() != null) {
                 for (SchemaDefinition.ColumnDef column : tableDef.columns()) {
                     if (column == null) {
@@ -388,8 +388,15 @@ public class SchemaApplier {
                         throw new IllegalArgumentException("duplicate column definition: " + table + "." + name);
                     }
                     if (column.definition() != null) {
-                        ColumnDefinitionParser.parse(column.definition());
+                        columnSpecs.put(name, ColumnDefinitionParser.parse(column.definition()));
                     }
+                }
+            }
+            for (String primaryKeyColumn : primaryKeyColumns(tableDef.createSql())) {
+                ColumnSpec spec = columnSpecs.get(primaryKeyColumn);
+                if (spec != null && !spec.notNull()) {
+                    throw new IllegalArgumentException("primary-key column must be declared NOT NULL: "
+                            + table + "." + primaryKeyColumn);
                 }
             }
             Set<String> indexes = new HashSet<>();
@@ -442,9 +449,10 @@ public class SchemaApplier {
                 if (liveSql == null) {
                     execute(conn, sql);
                 } else if (!target.hasSameStructure(IndexDefinition.parse(liveSql))) {
-                    pendingSql.add("-- pending: index definition drift for " + target.name()
-                            + "; expected=" + target.structuralSql()
-                            + "; live=" + IndexDefinition.parse(liveSql).structuralSql());
+                    pendingSql.add("-- replace index definition drift for " + target.name()
+                            + "; live: " + IndexDefinition.parse(liveSql).structuralSql());
+                    pendingSql.add("DROP INDEX IF EXISTS " + target.name() + ";");
+                    pendingSql.add(terminated(sql));
                 } else if (!target.canonicalSql().equals(IndexDefinition.parse(liveSql).canonicalSql())) {
                     log.warn("[SchemaApplier] Index predicate text differs for {}.{}; PostgreSQL may have "
                                     + "normalized equivalent casts. Review expected={} live={}",
@@ -453,7 +461,7 @@ public class SchemaApplier {
                 }
             }
         }
-        for (String liveName : live.keySet()) {
+        for (String liveName : live.keySet().stream().sorted().toList()) {
             if (!expected.contains(liveName)) {
                 pendingSql.add("DROP INDEX IF EXISTS " + liveName + "; -- table=" + tableName);
             }
@@ -503,9 +511,32 @@ public class SchemaApplier {
             pendingSql.add("ALTER TABLE " + tableName + " ADD PRIMARY KEY ("
                     + String.join(", ", expected) + "); -- pending: primary key is missing");
         } else {
-            pendingSql.add("-- pending: primary key drift for " + tableName
-                    + "; expected=" + expected + "; live=" + live);
+            if (constraintName == null) {
+                pendingSql.add("-- primary key drift for " + tableName + "; expected=" + expected
+                        + "; live=" + live + "; JDBC did not report the constraint name");
+            } else {
+                pendingSql.add("-- replace drifted primary key on " + tableName + "; live=" + live);
+                pendingSql.add("ALTER TABLE " + tableName + " DROP CONSTRAINT " + constraintName + ";");
+                pendingSql.add("ALTER TABLE " + tableName + " ADD PRIMARY KEY ("
+                        + String.join(", ", expected) + ");");
+            }
         }
+    }
+
+    private Set<String> getLivePrimaryKeyColumns(DatabaseMetaData meta, String tableName) throws SQLException {
+        Set<String> columns = new HashSet<>();
+        try (ResultSet rows = meta.getPrimaryKeys(null, options.schema(), tableName)) {
+            while (rows.next()) {
+                columns.add(SqlIdentifiers.requireIdentifier(
+                        rows.getString("COLUMN_NAME"), "primary-key column"));
+            }
+        }
+        return Set.copyOf(columns);
+    }
+
+    private String terminated(String sql) {
+        String trimmed = sql.trim();
+        return trimmed.endsWith(";") ? trimmed : trimmed + ";";
     }
 
     private List<String> primaryKeyColumns(String createSql) {
@@ -533,7 +564,7 @@ public class SchemaApplier {
             def.tables().keySet().forEach(name -> expected.add(name.toLowerCase(Locale.ROOT)));
         }
         List<String> pending = new ArrayList<>();
-        for (String table : existingTables) {
+        for (String table : existingTables.stream().sorted().toList()) {
             if (!expected.contains(table) && !isIgnorableSchemaTable(table)
                     && !table.equals(options.historyTable())) {
                 pending.add("DROP TABLE " + table + "; -- pending: table absent from definition");
