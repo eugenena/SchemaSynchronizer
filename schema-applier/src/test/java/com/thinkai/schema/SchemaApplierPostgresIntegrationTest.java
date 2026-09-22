@@ -185,14 +185,16 @@ class SchemaApplierPostgresIntegrationTest {
         SchemaApplier applier = applier(dataSource, schema, false);
         try (Connection connection = dataSource.getConnection(); var statement = connection.createStatement()) {
             connection.setAutoCommit(false);
-            statement.execute("SET search_path TO " + schema);
-            statement.execute("CREATE TABLE caller_work (value INTEGER)");
-            statement.execute("INSERT INTO caller_work VALUES (1)");
+            statement.execute("SET LOCAL search_path TO pg_catalog, public");
+            String originalSearchPath = queryString(connection, "SHOW search_path");
+            statement.execute("CREATE TABLE " + schema + ".caller_work (value INTEGER)");
+            statement.execute("INSERT INTO " + schema + ".caller_work VALUES (1)");
             applier.applySchemaWithResult(connection, new SchemaDefinition(Map.of(
                     "managed", new SchemaDefinition.TableDef("CREATE TABLE managed (id BIGINT PRIMARY KEY)",
                     List.of(new SchemaDefinition.ColumnDef("id", "BIGINT NOT NULL")),
                     List.of("CREATE UNIQUE INDEX IF NOT EXISTS managed_pkey ON managed (id)")))));
             assertThat(connection.getAutoCommit()).isFalse();
+            assertThat(queryString(connection, "SHOW search_path")).isEqualTo(originalSearchPath);
             connection.rollback();
         }
         try (Connection connection = dataSource.getConnection()) {
@@ -298,6 +300,13 @@ class SchemaApplierPostgresIntegrationTest {
         try (var statement = connection.createStatement(); var rows = statement.executeQuery(sql)) {
             rows.next();
             return rows.getLong(1);
+        }
+    }
+
+    private String queryString(Connection connection, String sql) throws Exception {
+        try (var statement = connection.createStatement(); var rows = statement.executeQuery(sql)) {
+            rows.next();
+            return rows.getString(1);
         }
     }
 

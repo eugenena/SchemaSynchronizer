@@ -12,6 +12,7 @@ import javax.sql.DataSource;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
+import static org.mockito.Mockito.when;
 
 class SchemaApplierAutoConfigurationTest {
     private final ApplicationContextRunner runner = new ApplicationContextRunner()
@@ -38,6 +39,10 @@ class SchemaApplierAutoConfigurationTest {
     @Configuration(proxyBeanMethods = false)
     static class TestConfiguration {
         @Bean ObjectMapper objectMapper() { return new ObjectMapper(); }
-        @Bean DataSource dataSource() { return mock(DataSource.class, RETURNS_DEEP_STUBS); }
+        @Bean DataSource dataSource() throws Exception {
+            DataSource result = mock(DataSource.class, RETURNS_DEEP_STUBS);
+            when(result.getConnection().getAutoCommit()).thenReturn(true);
+            return result;
+        }
     }
 }

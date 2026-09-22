@@ -29,11 +29,15 @@ public final class NonDestructiveSqlPolicy {
     }
 
     public static void requireReadOnlyVerification(String sql) {
-        if (sql == null || !stripComments(sql).toUpperCase(Locale.ROOT).matches("(?s)^(SELECT|WITH)\\b.*")) {
+        String normalized = sql == null ? "" : stripComments(sql).toUpperCase(Locale.ROOT);
+        if (!normalized.matches("(?s)^(SELECT|WITH)\\b.*")) {
             throw new IllegalArgumentException("verification SQL must be a SELECT or WITH query");
         }
         requireSingleStatement(sql, "verification SQL");
         requireNoForbiddenTokens(sql);
+        if (normalized.matches("(?s).*\\b(INSERT|UPDATE|DELETE|MERGE)\\b.*")) {
+            throw new IllegalArgumentException("verification SQL must not contain a data-modifying statement");
+        }
     }
 
     public static void requireCreateTable(String sql) {

@@ -44,5 +44,10 @@ class NonDestructiveSqlPolicyTest {
                 "SELECT true; UPDATE customers SET name = 'changed'"))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("exactly one statement");
+        assertThatThrownBy(() -> NonDestructiveSqlPolicy.requireReadOnlyVerification(
+                "WITH changed AS (UPDATE accounts SET balance = 0 RETURNING *) "
+                        + "SELECT count(*) FROM changed"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("data-modifying");
     }
 }

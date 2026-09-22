@@ -85,6 +85,7 @@ public class SchemaApplier {
         boolean previousAutoCommit = conn.getAutoCommit();
         boolean ownsTransaction = previousAutoCommit;
         Savepoint savepoint = null;
+        String previousSearchPath = null;
         ChangeSetExecutor executor = new ChangeSetExecutor();
         List<SchemaDefinition.ChangeSet> allChanges = executor.validate(def.changes());
         plannedSql.set(new ArrayList<>());
@@ -93,6 +94,7 @@ public class SchemaApplier {
                 conn.setAutoCommit(false);
             } else {
                 savepoint = conn.setSavepoint("thinkai_schema_applier");
+                previousSearchPath = readSearchPath(conn);
             }
             executeControl(conn, "SET LOCAL search_path TO " + options.schema());
             executeControl(conn, "SELECT pg_advisory_xact_lock(" + options.advisoryLockId() + ")");
@@ -113,6 +115,7 @@ public class SchemaApplier {
             } else if (ownsTransaction) {
                 conn.commit();
             } else {
+                restoreSearchPath(conn, previousSearchPath);
                 conn.releaseSavepoint(savepoint);
             }
             return new SchemaApplyResult(beforeChanges.applied() + afterChanges.applied(), declarative.tablesCreated(),
@@ -141,6 +144,22 @@ public class SchemaApplier {
             conn.rollback();
         } else if (savepoint != null) {
             conn.rollback(savepoint);
+        }
+    }
+
+    private String readSearchPath(Connection conn) throws SQLException {
+        try (var statement = conn.createStatement(); var row = statement.executeQuery("SHOW search_path")) {
+            if (!row.next()) {
+                throw new SQLException("SHOW search_path returned no row");
+            }
+            return row.getString(1);
+        }
+    }
+
+    private void restoreSearchPath(Connection conn, String searchPath) throws SQLException {
+        try (var statement = conn.prepareStatement("SELECT set_config('search_path', ?, true)")) {
+            statement.setString(1, searchPath);
+            statement.execute();
         }
     }
 
