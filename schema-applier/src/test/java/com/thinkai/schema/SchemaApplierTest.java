@@ -10,16 +10,17 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import javax.sql.DataSource;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Statement;
 import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.lenient;
-import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -31,7 +32,11 @@ class SchemaApplierTest {
     @Mock private DatabaseMetaData metaData;
     @Mock private Statement statement;
     @Mock private ResultSet tablesRs;
+    @Mock private ResultSet historyTablesRs;
     @Mock private ResultSet columnsRs;
+    @Mock private ResultSet primaryKeysRs;
+    @Mock private PreparedStatement preparedStatement;
+    @Mock private ResultSet preparedRows;
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     private SchemaApplier applier;
@@ -41,14 +46,47 @@ class SchemaApplierTest {
         applier = new SchemaApplier(objectMapper, dataSource);
         lenient().when(dataSource.getConnection()).thenReturn(connection);
         lenient().when(connection.getMetaData()).thenReturn(metaData);
+        lenient().when(connection.getAutoCommit()).thenReturn(true);
+        lenient().when(metaData.getTables(null, "public", "thinkai_schema_history", new String[]{"TABLE"}))
+                .thenReturn(historyTablesRs);
+        lenient().when(historyTablesRs.next()).thenReturn(false);
+        lenient().when(metaData.getPrimaryKeys(null, "public", "existing_table"))
+                .thenReturn(primaryKeysRs);
+        lenient().when(metaData.getPrimaryKeys(null, "public", "t"))
+                .thenReturn(primaryKeysRs);
+        lenient().when(primaryKeysRs.next()).thenReturn(false);
         lenient().when(connection.createStatement()).thenReturn(statement);
         lenient().when(statement.execute(anyString())).thenReturn(true);
+        lenient().when(connection.prepareStatement(anyString())).thenReturn(preparedStatement);
+        lenient().when(preparedStatement.executeQuery()).thenReturn(preparedRows);
+        lenient().when(preparedRows.next()).thenReturn(false);
     }
 
     @Test
-    void emptyTables_doesNothing() throws Exception {
+    void emptyDefinitionStillChecksTheImmutableLedgerUnderLock() throws Exception {
         applier.applySchema(connection, new SchemaDefinition(Map.of()));
-        verify(statement, never()).execute(anyString());
+        verify(statement).execute("SELECT pg_advisory_xact_lock(7249031147)");
+    }
+
+    @Test
+    void rejectsDuplicateChangeIdsAcrossPhases() {
+        SchemaDefinition definition = new SchemaDefinition(Map.of(), List.of(
+                new SchemaDefinition.ChangeSet("duplicate", "before", List.of("SELECT 1"), null,
+                        SchemaDefinition.ChangeSet.Phase.BEFORE_SCHEMA),
+                new SchemaDefinition.ChangeSet("duplicate", "after", List.of("SELECT 2"), null,
+                        SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA)));
+
+        assertThatThrownBy(() -> applier.applySchema(connection, definition))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("duplicate schema change id");
+    }
+
+    @Test
+    void missingRequiredDefinitionFailsClosed() {
+        SchemaApplier missing = new SchemaApplier(objectMapper, dataSource, "/does-not-exist.json");
+        assertThatThrownBy(missing::applyFromClasspath)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Required schema definition is missing");
     }
 
     @Test
@@ -104,21 +142,25 @@ class SchemaApplierTest {
     void skipsNextvalIdentityDefaults() {
         assertThat(SchemaApplier.shouldSkipAlter(
                 "BIGINT NOT NULL",
-                new LiveColumn("BIGINT", null, true, "nextval('t_id_seq'::regclass)"))).isTrue();
+                new LiveColumn("BIGINT", null, null, true, "nextval('t_id_seq'::regclass)"))).isTrue();
         assertThat(SchemaApplier.shouldSkipAlter(
                 "BIGSERIAL NOT NULL",
-                new LiveColumn("BIGINT", null, true, null))).isTrue();
+                new LiveColumn("BIGINT", null, null, true, null))).isTrue();
         assertThat(SchemaApplier.shouldSkipAlter(
                 "VARCHAR(50) DEFAULT 'x'",
-                new LiveColumn("VARCHAR", 50, false, "'y'"))).isFalse();
+                new LiveColumn("VARCHAR", 50, null, false, "'y'"))).isFalse();
     }
 
     @Test
-    void ignoresFlywayAndShedlockSchemaNoise() {
+    void ignoresOnlyMigrationAndOwnHistorySchemaNoise() {
         assertThat(SchemaApplier.isIgnorableSchemaTable("flyway_schema_history")).isTrue();
-        assertThat(SchemaApplier.isIgnorableSchemaTable("shedlock")).isTrue();
-        assertThat(SchemaApplier.isIgnorableSchemaTable("jobs")).isFalse();
+        assertThat(SchemaApplier.isIgnorableSchemaTable("thinkai_schema_history")).isTrue();
+        assertThat(SchemaApplier.isIgnorableSchemaTable("thinkai_schema_business_data")).isFalse();
+        assertThat(SchemaApplier.isIgnorableSchemaTable("scheduler_lock")).isFalse();
+        assertThat(SchemaApplier.isIgnorableSchemaTable("work_items")).isFalse();
         assertThat(SchemaApplier.isIgnorableSchemaIndex("flyway_schema_history_pk")).isTrue();
-        assertThat(SchemaApplier.isIgnorableSchemaIndex("idx_jobs_title")).isFalse();
+        assertThat(SchemaApplier.isIgnorableSchemaIndex("flyway_business_idx")).isFalse();
+        assertThat(SchemaApplier.isIgnorableSchemaIndex("scheduler_lock_pkey")).isFalse();
+        assertThat(SchemaApplier.isIgnorableSchemaIndex("idx_work_items_title")).isFalse();
     }
 }

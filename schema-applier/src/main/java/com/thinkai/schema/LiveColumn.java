@@ -4,6 +4,7 @@ package com.thinkai.schema;
 public record LiveColumn(
         String baseType,
         Integer length,
+        Integer scale,
         boolean notNull,
         String defaultExpr
 ) {}

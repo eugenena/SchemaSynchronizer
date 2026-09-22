@@ -6,6 +6,7 @@ package com.thinkai.schema;
 public record ColumnSpec(
         String baseType,
         Integer length,
+        Integer scale,
         boolean notNull,
         String defaultExpr
 ) {}
