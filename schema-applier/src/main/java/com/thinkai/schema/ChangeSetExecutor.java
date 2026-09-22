@@ -90,6 +90,13 @@ final class ChangeSetExecutor {
             if (change == null || change.id() == null || !change.id().matches("[A-Za-z0-9][A-Za-z0-9._-]*")) {
                 throw new IllegalArgumentException("schema change id must be nonblank and filesystem-safe");
             }
+            if (change.id().length() > 200) {
+                throw new IllegalArgumentException("schema change id exceeds 200 characters: " + change.id());
+            }
+            if (change.description() != null && change.description().length() > 500) {
+                throw new IllegalArgumentException("schema change description exceeds 500 characters: "
+                        + change.id());
+            }
             if (!ids.add(change.id())) {
                 throw new IllegalArgumentException("duplicate schema change id: " + change.id());
             }
@@ -140,7 +147,10 @@ final class ChangeSetExecutor {
         try (var statement = conn.createStatement();
              var rows = statement.executeQuery("SELECT change_id, checksum FROM " + history)) {
             while (rows.next()) {
-                result.put(rows.getString(1), rows.getString(2));
+                String id = rows.getString(1);
+                if (result.put(id, rows.getString(2)) != null) {
+                    throw new IllegalStateException("duplicate schema history entry: " + id);
+                }
             }
         }
         return result;
@@ -165,7 +175,16 @@ final class ChangeSetExecutor {
                 throw new IllegalArgumentException("verification query returned no row for schema change: "
                         + change.id());
             }
-            return rows.getBoolean(1);
+            boolean verified = rows.getBoolean(1);
+            if (rows.wasNull()) {
+                throw new IllegalArgumentException("verification query returned NULL for schema change: "
+                        + change.id());
+            }
+            if (rows.next()) {
+                throw new IllegalArgumentException("verification query must return exactly one row for schema change: "
+                        + change.id());
+            }
+            return verified;
         }
     }
 

@@ -26,6 +26,11 @@ applied change fails startup. A change may include a read-only `verificationSql`
 this both verifies a fresh application and safely adopts an already-existing Flyway
 change only when PostgreSQL proves the expected object is present.
 
+Definitions and change sets are trusted application artifacts, not untrusted user
+input. The SQL policy rejects destructive and unsupported statement shapes, but it is
+not a SQL sandbox. In particular, authors must ensure functions invoked by
+`verificationSql` are side-effect-free.
+
 **Auto-apply:** create table, add column, create index, SET/DROP DEFAULT, safe type
 widenings, `NOT NULL` → nullable, and safety-checked ordered change sets.
 
@@ -35,6 +40,10 @@ change set may set `NOT NULL` after an explicit backfill. Unknown SQL is rejecte
 
 The default is fail-closed: a missing definition, checksum drift, failed verification,
 or pending destructive schema difference aborts startup.
+
+Current portability boundary: PostgreSQL 16+ with unquoted, lower-case identifiers.
+Other relational databases and quoted/mixed-case identifiers are rejected rather than
+handled approximately.
 
 ## Install locally
 
@@ -106,9 +115,9 @@ Example definition (statements are intentionally one JDBC statement per entry):
 Generate or refresh the declarative snapshot after changing a local PostgreSQL schema:
 
 ```bash
-mvn -pl schema-applier exec:java \
+SCHEMA_DB_PASSWORD='local-password' mvn -pl schema-applier exec:java \
   -Dexec.mainClass=com.thinkai.schema.SchemaSerializer \
-  -Dexec.args="jdbc:postgresql://localhost:5432/app user password public src/main/resources/schema-definition.json"
+  -Dexec.args="jdbc:postgresql://localhost:5432/app user - public src/main/resources/schema-definition.json"
 ```
 
 The serializer preserves the hand-authored `changes` array. It does not attempt to

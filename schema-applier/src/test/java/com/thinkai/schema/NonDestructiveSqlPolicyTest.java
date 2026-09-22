@@ -43,6 +43,22 @@ class NonDestructiveSqlPolicyTest {
                 "ALTER TABLE customers ALTER COLUMN name TYPE VARCHAR(10)"))
                 .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> NonDestructiveSqlPolicy.requireSafe(
+                "DO $$ BEGIN EXECUTE 'DROP TABLE customers'; END $$"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("unsupported");
+        assertThatThrownBy(() -> NonDestructiveSqlPolicy.requireSafe(
+                "ALTER SYSTEM SET shared_buffers = '1GB'"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("unsupported");
+        assertThatThrownBy(() -> NonDestructiveSqlPolicy.requireSafe(
+                "ALTER TABLE customers RENAME TO former_customers"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("unsupported");
+        assertThatThrownBy(() -> NonDestructiveSqlPolicy.requireSafe(
+                "CREATE DATABASE unexpected"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("unsupported");
+        assertThatThrownBy(() -> NonDestructiveSqlPolicy.requireSafe(
                 "SELECT 1; DROP FUNCTION f() CASCADE"))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("exactly one statement");

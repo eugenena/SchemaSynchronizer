@@ -34,6 +34,7 @@ class SchemaApplierTest {
     @Mock private ResultSet tablesRs;
     @Mock private ResultSet historyTablesRs;
     @Mock private ResultSet columnsRs;
+    @Mock private ResultSet primaryKeysRs;
     @Mock private PreparedStatement preparedStatement;
     @Mock private ResultSet preparedRows;
 
@@ -49,6 +50,11 @@ class SchemaApplierTest {
         lenient().when(metaData.getTables(null, "public", "thinkai_schema_history", new String[]{"TABLE"}))
                 .thenReturn(historyTablesRs);
         lenient().when(historyTablesRs.next()).thenReturn(false);
+        lenient().when(metaData.getPrimaryKeys(null, "public", "existing_table"))
+                .thenReturn(primaryKeysRs);
+        lenient().when(metaData.getPrimaryKeys(null, "public", "t"))
+                .thenReturn(primaryKeysRs);
+        lenient().when(primaryKeysRs.next()).thenReturn(false);
         lenient().when(connection.createStatement()).thenReturn(statement);
         lenient().when(statement.execute(anyString())).thenReturn(true);
         lenient().when(connection.prepareStatement(anyString())).thenReturn(preparedStatement);
@@ -136,22 +142,24 @@ class SchemaApplierTest {
     void skipsNextvalIdentityDefaults() {
         assertThat(SchemaApplier.shouldSkipAlter(
                 "BIGINT NOT NULL",
-                new LiveColumn("BIGINT", null, true, "nextval('t_id_seq'::regclass)"))).isTrue();
+                new LiveColumn("BIGINT", null, null, true, "nextval('t_id_seq'::regclass)"))).isTrue();
         assertThat(SchemaApplier.shouldSkipAlter(
                 "BIGSERIAL NOT NULL",
-                new LiveColumn("BIGINT", null, true, null))).isTrue();
+                new LiveColumn("BIGINT", null, null, true, null))).isTrue();
         assertThat(SchemaApplier.shouldSkipAlter(
                 "VARCHAR(50) DEFAULT 'x'",
-                new LiveColumn("VARCHAR", 50, false, "'y'"))).isFalse();
+                new LiveColumn("VARCHAR", 50, null, false, "'y'"))).isFalse();
     }
 
     @Test
     void ignoresOnlyMigrationAndOwnHistorySchemaNoise() {
         assertThat(SchemaApplier.isIgnorableSchemaTable("flyway_schema_history")).isTrue();
         assertThat(SchemaApplier.isIgnorableSchemaTable("thinkai_schema_history")).isTrue();
+        assertThat(SchemaApplier.isIgnorableSchemaTable("thinkai_schema_business_data")).isFalse();
         assertThat(SchemaApplier.isIgnorableSchemaTable("scheduler_lock")).isFalse();
         assertThat(SchemaApplier.isIgnorableSchemaTable("work_items")).isFalse();
         assertThat(SchemaApplier.isIgnorableSchemaIndex("flyway_schema_history_pk")).isTrue();
+        assertThat(SchemaApplier.isIgnorableSchemaIndex("flyway_business_idx")).isFalse();
         assertThat(SchemaApplier.isIgnorableSchemaIndex("scheduler_lock_pkey")).isFalse();
         assertThat(SchemaApplier.isIgnorableSchemaIndex("idx_work_items_title")).isFalse();
     }

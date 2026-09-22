@@ -40,4 +40,13 @@ class ColumnDefinitionParserTest {
         assertThat(spec.notNull()).isFalse();
         assertThat(ColumnDefinitionParser.normalizeDefault(spec.defaultExpr())).isEqualTo("0");
     }
+
+    @Test
+    void parsesNumericPrecisionAndScale() {
+        var spec = ColumnDefinitionParser.parse("NUMERIC(18, 4) NOT NULL");
+        assertThat(spec.baseType()).isEqualTo("NUMERIC");
+        assertThat(spec.length()).isEqualTo(18);
+        assertThat(spec.scale()).isEqualTo(4);
+        assertThat(spec.notNull()).isTrue();
+    }
 }

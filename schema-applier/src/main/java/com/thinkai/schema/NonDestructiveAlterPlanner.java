@@ -23,14 +23,17 @@ public final class NonDestructiveAlterPlanner {
         String liveType = ColumnDefinitionParser.normalizeType(live.baseType());
         String targetType = target.baseType();
 
-        TypeChange typeChange = classifyTypeChange(liveType, live.length(), targetType, target.length());
+        TypeChange typeChange = classifyTypeChange(liveType, live.length(), live.scale(),
+                targetType, target.length(), target.scale());
         switch (typeChange) {
             case SAME -> { /* no-op */ }
             case WIDEN -> apply.add(
-                    "ALTER TABLE " + t + " ALTER COLUMN " + c + " TYPE " + formatType(targetType, target.length()));
+                    "ALTER TABLE " + t + " ALTER COLUMN " + c + " TYPE "
+                            + formatType(targetType, target.length(), target.scale()));
             case NARROW, INCOMPATIBLE -> pending.add(
                     "ALTER TABLE " + t + " ALTER COLUMN " + c + " TYPE "
-                            + formatType(targetType, target.length()) + "; -- pending: type change not auto-safe");
+                            + formatType(targetType, target.length(), target.scale())
+                            + "; -- pending: type change not auto-safe");
         }
 
         String liveDef = ColumnDefinitionParser.normalizeDefault(live.defaultExpr());
@@ -57,7 +60,8 @@ public final class NonDestructiveAlterPlanner {
     enum TypeChange { SAME, WIDEN, NARROW, INCOMPATIBLE }
 
     static TypeChange classifyTypeChange(
-            String liveType, Integer liveLen, String targetType, Integer targetLen) {
+            String liveType, Integer liveLen, Integer liveScale,
+            String targetType, Integer targetLen, Integer targetScale) {
         if (liveType.equals(targetType)) {
             if ("VARCHAR".equals(liveType) || "CHAR".equals(liveType)) {
                 int liveL = liveLen == null ? Integer.MAX_VALUE : liveLen;
@@ -65,6 +69,23 @@ public final class NonDestructiveAlterPlanner {
                 if (targetL > liveL) return TypeChange.WIDEN;
                 if (targetL < liveL) return TypeChange.NARROW;
                 return TypeChange.SAME;
+            }
+            if ("NUMERIC".equals(liveType)) {
+                if (liveLen == null) return targetLen == null ? TypeChange.SAME : TypeChange.NARROW;
+                if (targetLen == null) return TypeChange.WIDEN;
+                int liveFraction = liveScale == null ? 0 : liveScale;
+                int targetFraction = targetScale == null ? 0 : targetScale;
+                int liveInteger = liveLen - liveFraction;
+                int targetInteger = targetLen - targetFraction;
+                if (targetInteger >= liveInteger && targetFraction >= liveFraction) {
+                    return targetInteger == liveInteger && targetFraction == liveFraction
+                            ? TypeChange.SAME : TypeChange.WIDEN;
+                }
+                return TypeChange.NARROW;
+            }
+            if ("VECTOR".equals(liveType)) {
+                return java.util.Objects.equals(liveLen, targetLen)
+                        ? TypeChange.SAME : TypeChange.INCOMPATIBLE;
             }
             return TypeChange.SAME;
         }
@@ -97,7 +118,13 @@ public final class NonDestructiveAlterPlanner {
         return TypeChange.INCOMPATIBLE;
     }
 
-    static String formatType(String baseType, Integer length) {
+    static String formatType(String baseType, Integer length, Integer scale) {
+        if ("NUMERIC".equals(baseType) && length != null && length > 0) {
+            return scale == null ? "NUMERIC(" + length + ")" : "NUMERIC(" + length + "," + scale + ")";
+        }
+        if ("VECTOR".equals(baseType) && length != null && length > 0) {
+            return "VECTOR(" + length + ")";
+        }
         if (("VARCHAR".equals(baseType) || "CHAR".equals(baseType))
                 && length != null && length > 0 && length < 10_000) {
             return baseType + "(" + length + ")";

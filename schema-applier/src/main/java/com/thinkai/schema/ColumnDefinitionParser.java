@@ -14,7 +14,8 @@ public final class ColumnDefinitionParser {
     private static final Pattern NOT_NULL = Pattern.compile(
             "\\s+NOT\\s+NULL\\b", Pattern.CASE_INSENSITIVE);
     private static final Pattern TYPE_LEN = Pattern.compile(
-            "^([A-Za-z][A-Za-z0-9_\\s]*?)(?:\\((\\d+)\\))?$", Pattern.CASE_INSENSITIVE);
+            "^([A-Za-z][A-Za-z0-9_\\s]*?)(?:\\((\\d+)(?:\\s*,\\s*(\\d+))?\\))?$",
+            Pattern.CASE_INSENSITIVE);
     private static final Pattern PG_CAST = Pattern.compile("::[A-Za-z][A-Za-z0-9_\\s]*$");
 
     private ColumnDefinitionParser() {}
@@ -45,7 +46,14 @@ public final class ColumnDefinitionParser {
         }
         String rawType = tm.group(1).trim();
         Integer length = tm.group(2) != null ? Integer.parseInt(tm.group(2)) : null;
-        return new ColumnSpec(normalizeType(rawType), length, notNull, defaultExpr);
+        Integer scale = tm.group(3) != null ? Integer.parseInt(tm.group(3)) : null;
+        if (scale != null && !"NUMERIC".equals(normalizeType(rawType))) {
+            throw new IllegalArgumentException("scale is supported only for NUMERIC: " + definition);
+        }
+        if (scale != null && scale > length) {
+            throw new IllegalArgumentException("NUMERIC scale exceeds precision: " + definition);
+        }
+        return new ColumnSpec(normalizeType(rawType), length, scale, notNull, defaultExpr);
     }
 
     public static String normalizeDefault(String defaultExpr) {
@@ -72,6 +80,7 @@ public final class ColumnDefinitionParser {
             case "INT8", "BIGINT" -> "BIGINT";
             case "INT2", "SMALLINT" -> "SMALLINT";
             case "BOOL", "BOOLEAN" -> "BOOLEAN";
+            case "DECIMAL", "NUMERIC" -> "NUMERIC";
             case "FLOAT4", "REAL" -> "REAL";
             case "FLOAT8", "DOUBLE PRECISION", "DOUBLE" -> "DOUBLE PRECISION";
             case "TIMESTAMP WITH TIME ZONE", "TIMESTAMPTZ" -> "TIMESTAMPTZ";

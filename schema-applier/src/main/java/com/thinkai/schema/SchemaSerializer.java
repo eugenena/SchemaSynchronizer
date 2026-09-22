@@ -7,6 +7,8 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.DriverManager;
@@ -24,10 +26,11 @@ import org.slf4j.LoggerFactory;
  * <pre>
  *   mvn exec:java \
  *     -Dexec.mainClass=com.thinkai.schema.SchemaSerializer \
- *     -Dexec.args="jdbc:postgresql://localhost:5432/app app_user password public src/main/resources/schema-definition.json" \
+ *     -Dexec.args="jdbc:postgresql://localhost:5432/app app_user - public src/main/resources/schema-definition.json" \
  *     -Dexec.classpathScope=compile
  * </pre>
- * Or using the shortcut script: {@code scripts/serialize-schema.sh}
+ * The {@code -} password argument reads {@code SCHEMA_DB_PASSWORD}, keeping the
+ * credential out of process arguments. Or use {@code scripts/serialize-schema.sh}.
  *
  * <p>The generated file is committed to source control and used by {@link SchemaApplier}
  * on every startup to verify and fix the production schema additively.
@@ -67,7 +70,11 @@ public class SchemaSerializer {
 
         String url = args[0];
         String user = args[1];
-        String password = args[2];
+        String password = "-".equals(args[2]) ? System.getenv("SCHEMA_DB_PASSWORD") : args[2];
+        if (password == null) {
+            throw new IllegalArgumentException(
+                    "SCHEMA_DB_PASSWORD must be set when the password argument is '-'");
+        }
         String schema = SqlIdentifiers.requireIdentifier(args[3], "schema");
         Path outputPath = Paths.get(args[4]);
 
@@ -99,6 +106,8 @@ public class SchemaSerializer {
                         String colName  = cols.getString("COLUMN_NAME").toLowerCase();
                         String typeName = cols.getString("TYPE_NAME").toUpperCase();
                         int size        = cols.getInt("COLUMN_SIZE");
+                        int scale       = cols.getInt("DECIMAL_DIGITS");
+                        boolean scaleNull = cols.wasNull();
                         String nullable = "YES".equals(cols.getString("IS_NULLABLE")) ? "" : " NOT NULL";
                         String colDefault = cols.getString("COLUMN_DEF");
                         boolean autoInc = "YES".equalsIgnoreCase(cols.getString("IS_AUTOINCREMENT"));
@@ -111,6 +120,7 @@ public class SchemaSerializer {
                         pending.put("name", colName);
                         pending.put("typeName", typeName);
                         pending.put("size", size);
+                        pending.put("scale", scaleNull ? null : scale);
                         pending.put("nullable", nullable);
                         pending.put("colDefault", colDefault);
                         pending.put("autoInc", autoInc);
@@ -129,12 +139,13 @@ public class SchemaSerializer {
                     String colName = (String) pending.get("name");
                     String typeName = (String) pending.get("typeName");
                     int size = (Integer) pending.get("size");
+                    Integer scale = (Integer) pending.get("scale");
                     String nullable = (String) pending.get("nullable");
                     String colDefault = (String) pending.get("colDefault");
                     boolean autoInc = Boolean.TRUE.equals(pending.get("autoInc"));
                     boolean isPk = pkCols.contains(colName);
 
-                    String colDef = buildDefinition(typeName, size, nullable, colDefault);
+                    String colDef = buildDefinition(typeName, size, scale, nullable, colDefault);
 
                     Map<String, String> col = new LinkedHashMap<>();
                     col.put("name", colName);
@@ -143,7 +154,8 @@ public class SchemaSerializer {
 
                     Map<String, String> rawCol = new LinkedHashMap<>();
                     rawCol.put("name", colName);
-                    rawCol.put("type", buildCreateType(typeName, size, nullable, colDefault, autoInc, isPk));
+                    rawCol.put("type", buildCreateType(
+                            typeName, size, scale, nullable, colDefault, autoInc, isPk));
                     rawColumns.add(rawCol);
                 }
 
@@ -181,7 +193,8 @@ public class SchemaSerializer {
                 }
             }
         }
-        return 768; // default fallback
+        throw new IllegalStateException("Could not determine vector dimension for "
+                + schema + "." + tableName + "." + colName);
     }
 
     private static List<String> readIndexes(Connection conn, String schema, String tableName) throws Exception {
@@ -215,7 +228,8 @@ public class SchemaSerializer {
         return "CREATE TABLE IF NOT EXISTS " + tableName + " (" + cols + ")";
     }
 
-    private static String buildCreateType(String typeName, int size, String nullable, String columnDefault,
+    private static String buildCreateType(String typeName, int size, Integer scale, String nullable,
+                                          String columnDefault,
                                           boolean autoIncrement, boolean primaryKey) {
         if (PkIdentity.isSequenceBackedInteger(typeName, columnDefault, autoIncrement)) {
             return PkIdentity.createType(typeName, nullable, columnDefault, autoIncrement, primaryKey);
@@ -225,6 +239,7 @@ public class SchemaSerializer {
             case "BIGSERIAL", "SERIAL" -> typeName;
             case "INT2" -> "SMALLINT";
             case "VECTOR" -> "vector(" + size + ")";
+            case "NUMERIC", "DECIMAL" -> numericType(size, scale);
             default -> typeName;
         };
         base += nullable;
@@ -239,7 +254,8 @@ public class SchemaSerializer {
      * clause when present. Sequence-backed defaults (nextval) are omitted — those columns
      * are PKs and are never added via ALTER TABLE.
      */
-    private static String buildDefinition(String typeName, int size, String nullable, String columnDefault) {
+    private static String buildDefinition(String typeName, int size, Integer scale, String nullable,
+                                          String columnDefault) {
         String base = switch (typeName) {
             case "VARCHAR", "CHARACTER VARYING" ->
                     size > 0 && size < 10_000 ? "VARCHAR(" + size + ")" + nullable : "TEXT" + nullable;
@@ -247,8 +263,9 @@ public class SchemaSerializer {
                  "TIMESTAMPTZ", "TIMESTAMP WITH TIME ZONE",
                  "TIMESTAMP", "DATE", "BOOLEAN", "BIGINT",
                  "INTEGER", "INT4", "INT8", "BIGSERIAL", "SERIAL",
-                 "NUMERIC", "FLOAT4", "FLOAT8", "DOUBLE PRECISION" ->
+                 "FLOAT4", "FLOAT8", "DOUBLE PRECISION" ->
                     typeName + nullable;
+            case "NUMERIC", "DECIMAL" -> numericType(size, scale) + nullable;
             case "INT2" -> "SMALLINT" + nullable;
             case "VECTOR" -> "vector(" + size + ")" + nullable;
             default -> typeName + nullable;
@@ -257,6 +274,14 @@ public class SchemaSerializer {
             return base + " DEFAULT " + columnDefault;
         }
         return base;
+    }
+
+    private static String numericType(int precision, Integer scale) {
+        if (precision <= 0 || precision > 1_000) {
+            return "NUMERIC";
+        }
+        return scale == null ? "NUMERIC(" + precision + ")"
+                : "NUMERIC(" + precision + "," + scale + ")";
     }
 
     private static void writeJson(Map<String, Object> tables, Path outputPath) throws Exception {
@@ -275,8 +300,7 @@ public class SchemaSerializer {
             root.set("changes", preservedChanges);
         }
 
-        outputPath.toFile().getParentFile().mkdirs();
-        mapper.writeValue(outputPath.toFile(), root);
+        writeAtomically(mapper, root, outputPath);
     }
 
     static void restoreIdentityInJson(Path outputPath) throws Exception {
@@ -306,6 +330,27 @@ public class SchemaSerializer {
                 }
             }
         });
-        mapper.writeValue(outputPath.toFile(), root);
+        writeAtomically(mapper, root, outputPath);
+    }
+
+    private static void writeAtomically(ObjectMapper mapper, JsonNode root, Path outputPath) throws Exception {
+        Path absolute = outputPath.toAbsolutePath();
+        Path parent = absolute.getParent();
+        if (parent == null) {
+            throw new IllegalArgumentException("output path has no parent: " + outputPath);
+        }
+        Files.createDirectories(parent);
+        Path temporary = Files.createTempFile(parent, absolute.getFileName().toString(), ".tmp");
+        try {
+            mapper.writeValue(temporary.toFile(), root);
+            try {
+                Files.move(temporary, absolute, StandardCopyOption.ATOMIC_MOVE,
+                        StandardCopyOption.REPLACE_EXISTING);
+            } catch (java.nio.file.AtomicMoveNotSupportedException unsupported) {
+                Files.move(temporary, absolute, StandardCopyOption.REPLACE_EXISTING);
+            }
+        } finally {
+            Files.deleteIfExists(temporary);
+        }
     }
 }
