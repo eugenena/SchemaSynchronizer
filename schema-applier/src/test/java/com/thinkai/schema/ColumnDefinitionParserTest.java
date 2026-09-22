@@ -8,18 +8,18 @@ class ColumnDefinitionParserTest {
 
     @Test
     void parsesVarcharNotNullWithDefault() {
-        var spec = ColumnDefinitionParser.parse("VARCHAR(100) NOT NULL DEFAULT 'JOB_SEARCHING'");
+        var spec = ColumnDefinitionParser.parse("VARCHAR(100) NOT NULL DEFAULT 'PENDING'");
         assertThat(spec.baseType()).isEqualTo("VARCHAR");
         assertThat(spec.length()).isEqualTo(100);
         assertThat(spec.notNull()).isTrue();
         assertThat(ColumnDefinitionParser.normalizeDefault(spec.defaultExpr()))
-                .isEqualTo("'JOB_SEARCHING'");
+                .isEqualTo("'PENDING'");
     }
 
     @Test
     void stripsPostgresTypeCastOnDefault() {
-        assertThat(ColumnDefinitionParser.normalizeDefault("'JOB_SEARCHING'::character varying"))
-                .isEqualTo("'JOB_SEARCHING'");
+        assertThat(ColumnDefinitionParser.normalizeDefault("'PENDING'::character varying"))
+                .isEqualTo("'PENDING'");
         assertThat(ColumnDefinitionParser.normalizeDefault("false"))
                 .isEqualTo("false");
     }

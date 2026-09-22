@@ -24,7 +24,7 @@ import org.slf4j.LoggerFactory;
  * <pre>
  *   mvn exec:java \
  *     -Dexec.mainClass=com.thinkai.schema.SchemaSerializer \
- *     -Dexec.args="jdbc:postgresql://localhost:5432/jobs enaoumov '' public src/main/resources/schema-definition.json" \
+ *     -Dexec.args="jdbc:postgresql://localhost:5432/app app_user password public src/main/resources/schema-definition.json" \
  *     -Dexec.classpathScope=compile
  * </pre>
  * Or using the shortcut script: {@code scripts/serialize-schema.sh}
@@ -46,26 +46,30 @@ public class SchemaSerializer {
 
     private static final Logger log = LoggerFactory.getLogger(SchemaSerializer.class);
 
-    private static final String DEFAULT_URL      = "jdbc:postgresql://localhost:5432/jobs";
-    private static final String DEFAULT_USER     = "enaoumov";
-    private static final String DEFAULT_PASSWORD = "";
-
     /** Tables to exclude from snapshot (system / internal tables). */
     private static final Set<String> EXCLUDE = Set.of("flyway_schema_history", "thinkai_schema_history");
 
     public static void main(String[] args) throws Exception {
-        String url      = args.length > 0 ? args[0] : DEFAULT_URL;
-        String user     = args.length > 1 ? args[1] : DEFAULT_USER;
-        String password = args.length > 2 ? args[2] : DEFAULT_PASSWORD;
-        String schema   = args.length > 3 ? SqlIdentifiers.requireIdentifier(args[3], "schema") : "public";
-
-        Path outputPath = Paths.get(args.length > 4 ? args[4] : "src/main/resources/schema-definition.json");
-
         if (args.length > 0 && "--restore-json".equals(args[0])) {
+            Path outputPath = Paths.get(args.length > 1
+                    ? args[1]
+                    : "src/main/resources/schema-definition.json");
             restoreIdentityInJson(outputPath);
             log.info("[SchemaSerializer] Restored PK identity in {}", outputPath.toAbsolutePath());
             return;
         }
+
+        if (args.length != 5) {
+            throw new IllegalArgumentException(
+                    "Usage: SchemaSerializer <jdbc-url> <user> <password> <schema> <output-path> "
+                            + "or SchemaSerializer --restore-json [output-path]");
+        }
+
+        String url = args[0];
+        String user = args[1];
+        String password = args[2];
+        String schema = SqlIdentifiers.requireIdentifier(args[3], "schema");
+        Path outputPath = Paths.get(args[4]);
 
         log.info("[SchemaSerializer] Connecting to {}", url);
         try (Connection conn = DriverManager.getConnection(url, user, password)) {

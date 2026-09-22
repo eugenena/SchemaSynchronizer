@@ -269,13 +269,13 @@ public class SchemaApplier {
     public static boolean isIgnorableSchemaTable(String tableName) {
         if (tableName == null || tableName.isBlank()) return true;
         String t = tableName.toLowerCase(Locale.ROOT);
-        return t.startsWith("flyway_") || t.startsWith("thinkai_schema_") || t.equals("shedlock");
+        return t.startsWith("flyway_") || t.startsWith("thinkai_schema_");
     }
 
     public static boolean isIgnorableSchemaIndex(String indexName) {
         if (indexName == null || indexName.isBlank()) return true;
         String i = indexName.toLowerCase(Locale.ROOT);
-        return i.startsWith("flyway_") || i.startsWith("thinkai_schema_") || i.equals("shedlock_pkey");
+        return i.startsWith("flyway_") || i.startsWith("thinkai_schema_");
     }
 
     private List<String> detectOrphanedIndexes(

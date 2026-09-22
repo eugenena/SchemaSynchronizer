@@ -1,6 +1,6 @@
 # thinkai-shared
 
-Reusable libraries for ThinkAI Spring / Postgres apps (JSI, Nestlogue backend, MarginPulse, Marketworks, …).
+Reusable infrastructure libraries for Spring applications backed by PostgreSQL.
 
 ## Modules
 
@@ -46,7 +46,7 @@ CI publishes tagged builds and manually dispatched builds to GitHub Packages at
 machine must configure that repository and a GitHub Packages credential in Maven
 settings, then pin the published version rather than relying on a mutable local JAR.
 
-Consuming app (e.g. getjsi):
+Consuming application:
 
 ```xml
 <dependency>
@@ -76,8 +76,8 @@ Example definition (statements are intentionally one JDBC statement per entry):
 ```json
 {
   "tables": {
-    "campaigns": {
-      "createSql": "CREATE TABLE IF NOT EXISTS campaigns (id UUID PRIMARY KEY, status VARCHAR(32))",
+    "work_items": {
+      "createSql": "CREATE TABLE IF NOT EXISTS work_items (id UUID PRIMARY KEY, status VARCHAR(32))",
       "columns": [
         {"name": "id", "definition": "UUID NOT NULL"},
         {"name": "status", "definition": "VARCHAR(32)"}
@@ -87,14 +87,14 @@ Example definition (statements are intentionally one JDBC statement per entry):
   },
   "changes": [
     {
-      "id": "001-campaign-status",
-      "description": "Backfill and constrain campaign status",
+      "id": "001-work-item-status",
+      "description": "Backfill and constrain work item status",
       "statements": [
-        "UPDATE campaigns SET status = 'DRAFT' WHERE status IS NULL",
-        "ALTER TABLE campaigns ALTER COLUMN status SET NOT NULL",
-        "ALTER TABLE campaigns ADD CONSTRAINT ck_campaign_status CHECK (status IN ('DRAFT', 'ACTIVE'))"
+        "UPDATE work_items SET status = 'PENDING' WHERE status IS NULL",
+        "ALTER TABLE work_items ALTER COLUMN status SET NOT NULL",
+        "ALTER TABLE work_items ADD CONSTRAINT ck_work_item_status CHECK (status IN ('PENDING', 'COMPLETE'))"
       ],
-      "verificationSql": "SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_campaign_status' AND conrelid = to_regclass('campaigns'))"
+      "verificationSql": "SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_work_item_status' AND conrelid = to_regclass('work_items'))"
     }
   ]
 }
@@ -134,7 +134,3 @@ mvn verify \
 ```
 
 Repository CI always supplies PostgreSQL 16 and therefore never skips this gate.
-
-## Portfolio
-
-Ops infrastructure — not a product. Apps stay separate; this jar is the bridge.

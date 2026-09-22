@@ -129,11 +129,13 @@ class SchemaApplierTest {
     }
 
     @Test
-    void ignoresFlywayAndShedlockSchemaNoise() {
+    void ignoresOnlyMigrationAndOwnHistorySchemaNoise() {
         assertThat(SchemaApplier.isIgnorableSchemaTable("flyway_schema_history")).isTrue();
-        assertThat(SchemaApplier.isIgnorableSchemaTable("shedlock")).isTrue();
-        assertThat(SchemaApplier.isIgnorableSchemaTable("jobs")).isFalse();
+        assertThat(SchemaApplier.isIgnorableSchemaTable("thinkai_schema_history")).isTrue();
+        assertThat(SchemaApplier.isIgnorableSchemaTable("scheduler_lock")).isFalse();
+        assertThat(SchemaApplier.isIgnorableSchemaTable("work_items")).isFalse();
         assertThat(SchemaApplier.isIgnorableSchemaIndex("flyway_schema_history_pk")).isTrue();
-        assertThat(SchemaApplier.isIgnorableSchemaIndex("idx_jobs_title")).isFalse();
+        assertThat(SchemaApplier.isIgnorableSchemaIndex("scheduler_lock_pkey")).isFalse();
+        assertThat(SchemaApplier.isIgnorableSchemaIndex("idx_work_items_title")).isFalse();
     }
 }
