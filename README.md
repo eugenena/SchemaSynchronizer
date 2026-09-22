@@ -16,7 +16,9 @@ SchemaApplier has two complementary layers:
    defaults, safe type widenings, nullability relaxations, and indexes.
 2. `changes` is an ordered, checksummed ledger for changes that cannot be inferred
    from column metadata: data backfills, foreign/check/unique constraints, functions,
-   triggers, extensions, comments, and grants.
+   triggers, extensions, comments, and grants. Changes default to `BEFORE_SCHEMA`;
+   use `AFTER_SCHEMA` for constraints, functions, and triggers that depend on tables
+   from the declarative snapshot.
 
 Every invocation is transactional and guarded by a PostgreSQL advisory lock. Applied
 change IDs and SHA-256 checksums are stored in `thinkai_schema_history`. Editing an
@@ -94,7 +96,8 @@ Example definition (statements are intentionally one JDBC statement per entry):
         "ALTER TABLE work_items ALTER COLUMN status SET NOT NULL",
         "ALTER TABLE work_items ADD CONSTRAINT ck_work_item_status CHECK (status IN ('PENDING', 'COMPLETE'))"
       ],
-      "verificationSql": "SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_work_item_status' AND conrelid = to_regclass('work_items'))"
+      "verificationSql": "SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_work_item_status' AND conrelid = to_regclass('work_items'))",
+      "phase": "AFTER_SCHEMA"
     }
   ]
 }

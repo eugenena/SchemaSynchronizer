@@ -137,6 +137,40 @@ class SchemaApplierPostgresIntegrationTest {
         }
     }
 
+    @Test
+    void appliesPostSchemaConstraintsAfterCreatingFreshDeclarativeTables() throws Exception {
+        DataSource dataSource = dataSource();
+        String schema = uniqueSchema("post_schema_case");
+        createSchema(dataSource, schema);
+        SchemaDefinition definition = new SchemaDefinition(Map.of(
+                "parent", new SchemaDefinition.TableDef(
+                        "CREATE TABLE IF NOT EXISTS parent (id UUID PRIMARY KEY)",
+                        List.of(new SchemaDefinition.ColumnDef("id", "UUID NOT NULL")),
+                        List.of("CREATE UNIQUE INDEX IF NOT EXISTS parent_pkey ON parent (id)")),
+                "child", new SchemaDefinition.TableDef(
+                        "CREATE TABLE IF NOT EXISTS child (id UUID PRIMARY KEY, parent_id UUID)",
+                        List.of(new SchemaDefinition.ColumnDef("id", "UUID NOT NULL"),
+                                new SchemaDefinition.ColumnDef("parent_id", "UUID")),
+                        List.of("CREATE UNIQUE INDEX IF NOT EXISTS child_pkey ON child (id)"))
+        ), List.of(new SchemaDefinition.ChangeSet(
+                "001-child-parent", "add the relationship after both tables exist",
+                List.of("ALTER TABLE child ADD CONSTRAINT fk_child_parent "
+                        + "FOREIGN KEY (parent_id) REFERENCES parent(id)"),
+                "SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_child_parent' "
+                        + "AND conrelid = to_regclass('child'))",
+                SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA)));
+
+        try (Connection connection = dataSource.getConnection()) {
+            SchemaApplyResult result = applier(dataSource, schema, false)
+                    .applySchemaWithResult(connection, definition);
+            assertThat(result.tablesCreated()).isEqualTo(2);
+            assertThat(result.changeSetsApplied()).isEqualTo(1);
+            assertThat(queryLong(connection, "SELECT count(*) FROM pg_constraint c JOIN pg_namespace n "
+                    + "ON n.oid = c.connamespace WHERE n.nspname = '" + schema + "' "
+                    + "AND conname = 'fk_child_parent'")).isEqualTo(1);
+        }
+    }
+
     private SchemaApplyResult applyAfterSignal(DataSource dataSource, SchemaApplier applier,
                                                SchemaDefinition definition, CountDownLatch ready,
                                                CountDownLatch start) throws Exception {

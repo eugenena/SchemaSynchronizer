@@ -91,9 +91,14 @@ public class SchemaApplier {
         try {
             conn.setAutoCommit(false);
             executeControl(conn, "SET LOCAL search_path TO " + options.schema());
-            ChangeSetExecutor.Result changes = new ChangeSetExecutor().apply(conn, def.changes(), options);
-            plannedSql.get().addAll(changes.plannedSql());
+            ChangeSetExecutor executor = new ChangeSetExecutor();
+            ChangeSetExecutor.Result beforeChanges = executor.apply(conn,
+                    changesForPhase(def, SchemaDefinition.ChangeSet.Phase.BEFORE_SCHEMA), options);
+            plannedSql.get().addAll(beforeChanges.plannedSql());
             DeclarativeResult declarative = applyDeclarativeSchema(conn, def);
+            ChangeSetExecutor.Result afterChanges = executor.apply(conn,
+                    changesForPhase(def, SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA), options);
+            plannedSql.get().addAll(afterChanges.plannedSql());
             if (options.failOnPending() && !declarative.pendingSql().isEmpty()) {
                 throw new IllegalStateException("unsafe or destructive schema differences require manual resolution: "
                         + String.join(" | ", declarative.pendingSql()));
@@ -103,7 +108,7 @@ public class SchemaApplier {
             } else {
                 conn.commit();
             }
-            return new SchemaApplyResult(changes.applied(), declarative.tablesCreated(),
+            return new SchemaApplyResult(beforeChanges.applied() + afterChanges.applied(), declarative.tablesCreated(),
                     declarative.columnsAdded(), declarative.columnsAltered(), List.copyOf(plannedSql.get()),
                     declarative.pendingSql());
         } catch (Exception exception) {
@@ -113,6 +118,16 @@ public class SchemaApplier {
             plannedSql.remove();
             conn.setAutoCommit(previousAutoCommit);
         }
+    }
+
+    private List<SchemaDefinition.ChangeSet> changesForPhase(
+            SchemaDefinition definition, SchemaDefinition.ChangeSet.Phase phase) {
+        if (definition.changes() == null) {
+            return List.of();
+        }
+        return definition.changes().stream()
+                .filter(change -> change != null && change.effectivePhase() == phase)
+                .toList();
     }
 
     private DeclarativeResult applyDeclarativeSchema(Connection conn, SchemaDefinition def) throws Exception {

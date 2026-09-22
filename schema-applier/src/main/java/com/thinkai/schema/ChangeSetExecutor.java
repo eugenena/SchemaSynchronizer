@@ -171,6 +171,8 @@ final class ChangeSetExecutor {
             digest.update(change.verificationSql().replace("\r\n", "\n").trim()
                     .getBytes(StandardCharsets.UTF_8));
         }
+        digest.update((byte) 0);
+        digest.update(change.effectivePhase().name().getBytes(StandardCharsets.UTF_8));
         return HexFormat.of().formatHex(digest.digest());
     }
 

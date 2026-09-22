@@ -30,9 +30,23 @@ public record SchemaDefinition(Map<String, TableDef> tables, List<ChangeSet> cha
      * Statements are safety-checked and the complete change is checksummed before execution.
      */
     @JsonIgnoreProperties(ignoreUnknown = true)
-    public record ChangeSet(String id, String description, List<String> statements, String verificationSql) {
+    public record ChangeSet(String id, String description, List<String> statements, String verificationSql,
+                            Phase phase) {
+        public enum Phase {
+            BEFORE_SCHEMA,
+            AFTER_SCHEMA
+        }
+
+        public ChangeSet(String id, String description, List<String> statements, String verificationSql) {
+            this(id, description, statements, verificationSql, Phase.BEFORE_SCHEMA);
+        }
+
         public ChangeSet(String id, String description, List<String> statements) {
-            this(id, description, statements, null);
+            this(id, description, statements, null, Phase.BEFORE_SCHEMA);
+        }
+
+        public Phase effectivePhase() {
+            return phase == null ? Phase.BEFORE_SCHEMA : phase;
         }
     }
 }
