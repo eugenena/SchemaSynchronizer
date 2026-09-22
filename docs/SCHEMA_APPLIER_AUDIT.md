@@ -24,6 +24,10 @@ credential handling, and release packaging.
   column sizes before insertion.
 - Added primary-key, explicit-index, orphan-index, and orphan-table reconciliation.
   Constraint-owned PostgreSQL indexes are excluded from orphan detection.
+- Preserved destructive reconciliation as an operator-only workflow: ordered manual
+  SQL is returned in `pendingSql` and logged as a schema-scoped transaction, including
+  executable replacement sequences for drifted indexes and primary keys. Live primary-
+  key nullability dependencies are ordered safely instead of auto-applied prematurely.
 - Added exact `NUMERIC(precision, scale)`, `CHAR(length)`, and `vector(dimension)`
   introspection. Numeric changes now reject loss of integer or fractional capacity,
   and vector dimension changes remain manual.
