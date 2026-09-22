@@ -20,7 +20,7 @@ public final class NonDestructiveSqlPolicy {
         if (sql == null || sql.isBlank()) {
             throw new IllegalArgumentException("schema change statement is blank");
         }
-        String normalized = stripComments(sql).toUpperCase(Locale.ROOT);
+        String normalized = executableSql(sql).toUpperCase(Locale.ROOT);
         requireSingleStatement(sql, "schema change SQL");
         requireNoForbiddenTokens(sql);
         if (!startsWithAllowedVerb(normalized)) {
@@ -29,7 +29,7 @@ public final class NonDestructiveSqlPolicy {
     }
 
     public static void requireReadOnlyVerification(String sql) {
-        String normalized = sql == null ? "" : stripComments(sql).toUpperCase(Locale.ROOT);
+        String normalized = sql == null ? "" : executableSql(sql).toUpperCase(Locale.ROOT);
         if (!normalized.matches("(?s)^(SELECT|WITH)\\b.*")) {
             throw new IllegalArgumentException("verification SQL must be a SELECT or WITH query");
         }
@@ -43,7 +43,7 @@ public final class NonDestructiveSqlPolicy {
     public static void requireCreateTable(String sql) {
         requireSafe(sql);
         requireSingleStatement(sql, "table createSql");
-        if (!stripComments(sql).toUpperCase(Locale.ROOT).matches("(?s)^CREATE\\s+TABLE\\b.*")) {
+        if (!executableSql(sql).toUpperCase(Locale.ROOT).matches("(?s)^CREATE\\s+TABLE\\b.*")) {
             throw new IllegalArgumentException("table createSql must contain one CREATE TABLE statement");
         }
     }
@@ -51,7 +51,7 @@ public final class NonDestructiveSqlPolicy {
     public static void requireCreateIndex(String sql) {
         requireSafe(sql);
         requireSingleStatement(sql, "index definition");
-        if (!stripComments(sql).toUpperCase(Locale.ROOT)
+        if (!executableSql(sql).toUpperCase(Locale.ROOT)
                 .matches("(?s)^CREATE\\s+(UNIQUE\\s+)?INDEX\\b.*")) {
             throw new IllegalArgumentException("index definition must contain one CREATE INDEX statement");
         }
@@ -120,7 +120,7 @@ public final class NonDestructiveSqlPolicy {
     }
 
     private static void requireNoForbiddenTokens(String sql) {
-        String normalized = stripComments(sql).toUpperCase(Locale.ROOT);
+        String normalized = executableSql(sql).toUpperCase(Locale.ROOT);
         for (Pattern pattern : FORBIDDEN) {
             if (pattern.matcher(normalized).find()) {
                 throw new IllegalArgumentException("destructive or manually-reviewed SQL is not allowed: "
@@ -139,6 +139,79 @@ public final class NonDestructiveSqlPolicy {
 
     private static String stripComments(String sql) {
         return sql.replaceAll("(?s)/\\*.*?\\*/", " ").replaceAll("(?m)--.*$", " ").trim();
+    }
+
+    /** Returns only executable SQL text, masking comments and every quoted form. */
+    private static String executableSql(String sql) {
+        char[] result = sql.toCharArray();
+        boolean singleQuoted = false;
+        boolean doubleQuoted = false;
+        boolean lineComment = false;
+        boolean blockComment = false;
+        String dollarTag = null;
+        for (int index = 0; index < sql.length(); index++) {
+            char current = sql.charAt(index);
+            char next = index + 1 < sql.length() ? sql.charAt(index + 1) : '\0';
+            if (lineComment) {
+                result[index] = ' ';
+                if (current == '\n') lineComment = false;
+                continue;
+            }
+            if (blockComment) {
+                result[index] = ' ';
+                if (current == '*' && next == '/') {
+                    result[++index] = ' ';
+                    blockComment = false;
+                }
+                continue;
+            }
+            if (dollarTag != null) {
+                if (sql.startsWith(dollarTag, index)) {
+                    for (int offset = 0; offset < dollarTag.length(); offset++) result[index + offset] = ' ';
+                    index += dollarTag.length() - 1;
+                    dollarTag = null;
+                } else {
+                    result[index] = ' ';
+                }
+                continue;
+            }
+            if (singleQuoted) {
+                result[index] = ' ';
+                if (current == '\'' && next == '\'') result[++index] = ' ';
+                else if (current == '\'') singleQuoted = false;
+                continue;
+            }
+            if (doubleQuoted) {
+                result[index] = ' ';
+                if (current == '"' && next == '"') result[++index] = ' ';
+                else if (current == '"') doubleQuoted = false;
+                continue;
+            }
+            if (current == '-' && next == '-') {
+                result[index] = result[++index] = ' ';
+                lineComment = true;
+            } else if (current == '/' && next == '*') {
+                result[index] = result[++index] = ' ';
+                blockComment = true;
+            } else if (current == '\'') {
+                result[index] = ' ';
+                singleQuoted = true;
+            } else if (current == '"') {
+                result[index] = ' ';
+                doubleQuoted = true;
+            } else if (current == '$') {
+                int end = sql.indexOf('$', index + 1);
+                if (end >= 0) {
+                    String candidate = sql.substring(index, end + 1);
+                    if (candidate.matches("\\$[A-Za-z_][A-Za-z0-9_]*\\$|\\$\\$")) {
+                        for (int offset = 0; offset < candidate.length(); offset++) result[index + offset] = ' ';
+                        dollarTag = candidate;
+                        index = end;
+                    }
+                }
+            }
+        }
+        return new String(result).trim();
     }
 
     private static String summarize(String sql) {

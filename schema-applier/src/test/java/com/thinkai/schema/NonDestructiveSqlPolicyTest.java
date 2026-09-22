@@ -11,6 +11,12 @@ class NonDestructiveSqlPolicyTest {
         assertThatCode(() -> NonDestructiveSqlPolicy.requireSafe(
                 "ALTER TABLE child ADD CONSTRAINT fk_parent FOREIGN KEY (parent_id) REFERENCES parent(id)"))
                 .doesNotThrowAnyException();
+        assertThatCode(() -> NonDestructiveSqlPolicy.requireReadOnlyVerification(
+                "SELECT EXISTS (SELECT 1 FROM audit_log WHERE operation = 'update')"))
+                .doesNotThrowAnyException();
+        assertThatCode(() -> NonDestructiveSqlPolicy.requireReadOnlyVerification(
+                "SELECT 'insert', \"delete\", $$merge$$"))
+                .doesNotThrowAnyException();
         assertThatCode(() -> NonDestructiveSqlPolicy.requireSafe(
                 "CREATE OR REPLACE FUNCTION f() RETURNS void LANGUAGE plpgsql AS $body$ "
                         + "BEGIN PERFORM 1; PERFORM ';'; END $body$;"))
