@@ -449,15 +449,12 @@ public class SchemaApplier {
                 if (liveSql == null) {
                     execute(conn, sql);
                 } else if (!target.hasSameStructure(IndexDefinition.parse(liveSql))) {
-                    pendingSql.add("-- replace index definition drift for " + target.name()
-                            + "; live: " + IndexDefinition.parse(liveSql).structuralSql());
-                    pendingSql.add("DROP INDEX IF EXISTS " + target.name() + ";");
-                    pendingSql.add(terminated(sql));
+                    addIndexReplacement(pendingSql, target, IndexDefinition.parse(liveSql), sql);
+                } else if (!target.hasEquivalentPredicate(IndexDefinition.parse(liveSql))) {
+                    addIndexReplacement(pendingSql, target, IndexDefinition.parse(liveSql), sql);
                 } else if (!target.canonicalSql().equals(IndexDefinition.parse(liveSql).canonicalSql())) {
-                    log.warn("[SchemaApplier] Index predicate text differs for {}.{}; PostgreSQL may have "
-                                    + "normalized equivalent casts. Review expected={} live={}",
-                            tableName, target.name(), target.predicateSql(),
-                            IndexDefinition.parse(liveSql).predicateSql());
+                    log.info("[SchemaApplier] PostgreSQL normalized equivalent predicate casts for {}.{}",
+                            tableName, target.name());
                 }
             }
         }
@@ -466,6 +463,14 @@ public class SchemaApplier {
                 pendingSql.add("DROP INDEX IF EXISTS " + liveName + "; -- table=" + tableName);
             }
         }
+    }
+
+    private void addIndexReplacement(List<String> pendingSql, IndexDefinition target,
+                                     IndexDefinition live, String createSql) {
+        pendingSql.add("-- replace index definition drift for " + target.name()
+                + "; live: " + live.canonicalSql());
+        pendingSql.add("DROP INDEX IF EXISTS " + target.name() + ";");
+        pendingSql.add(terminated(createSql));
     }
 
     private void reconcilePrimaryKey(DatabaseMetaData meta, String tableName,
