@@ -53,6 +53,7 @@ class SchemaSynchronizerAutoConfigurationTest {
         @Bean DataSource dataSource() throws Exception {
             DataSource result = mock(DataSource.class, RETURNS_DEEP_STUBS);
             when(result.getConnection().getAutoCommit()).thenReturn(true);
+            when(result.getConnection().getMetaData().getDatabaseProductName()).thenReturn("PostgreSQL");
             return result;
         }
     }
