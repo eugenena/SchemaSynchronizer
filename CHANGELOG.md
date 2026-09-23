@@ -5,6 +5,7 @@
 First public release.
 
 - Desired-state schema synchronization for PostgreSQL, MariaDB, and MySQL.
+- MySQL-dialect compatibility certified against Percona Server 8.4 and TiDB 8.5 LTS.
 - Automatic non-destructive table, column, index, default, widening, and nullability changes.
 - Explicit pending SQL for destructive or unsafe reconciliation.
 - Ordered, checksummed change sets for operations that cannot be inferred from metadata.
