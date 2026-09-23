@@ -1,81 +1,121 @@
 # SchemaSynchronizer
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![Java](https://img.shields.io/badge/Java-21%2B-orange.svg)](https://www.oracle.com/java/)
 
-Safe schema convergence for relational databases. PostgreSQL 16+ is the first and
-currently implemented dialect; the public API and project identity are intentionally
-database-neutral so additional dialects can be added without another rebrand.
+SchemaSynchronizer keeps a relational database aligned with a version-controlled
+schema definition. It applies additive and otherwise safe changes automatically,
+while returning destructive or ambiguous changes as SQL for a human operator to
+review.
 
-## Modules
+Use it as:
 
-| Module | Artifact | Purpose |
-|--------|----------|---------|
-| **schema-synchronizer** | `io.github.eugenena:schema-synchronizer` | Apply non-destructive schema diffs from `schema-definition.json` on startup |
+- two command-line utilities that serialize a source schema and synchronize a target;
+- a Spring Boot database initializer that runs before JPA validation; or
+- a small Java API over an existing JDBC connection.
 
-## schema-synchronizer contract
+## Supported dialects
 
-SchemaSynchronizer has two complementary layers:
+| Database | Status | Notes |
+|---|---|---|
+| PostgreSQL 16+ | Supported | Transactional DDL and advisory locking |
+| MariaDB 10.3+ | Supported | Named locking; DDL may commit implicitly |
+| MySQL | Detected, not yet supported | Fails closed until its compatibility suite is complete |
 
-1. `tables` is a serialized target-state snapshot. It converges tables, columns,
-   defaults, safe type widenings, nullability relaxations, and indexes.
-2. `changes` is an ordered, checksummed ledger for changes that cannot be inferred
-   from column metadata: data backfills, foreign/check/unique constraints, functions,
-   triggers, extensions, comments, and grants. Changes default to `BEFORE_SCHEMA`;
-   use `AFTER_SCHEMA` for constraints, functions, and triggers that depend on tables
-   from the declarative snapshot.
+Each database is an independent dialect. A definition serialized from one dialect
+can only be applied to that same dialect; SchemaSynchronizer is not a cross-database
+SQL translator.
 
-Every invocation is transactional and guarded by a PostgreSQL advisory lock. Applied
-change IDs and SHA-256 checksums are stored in `schema_synchronizer_history`. Editing an
-applied change fails startup. A change may include a read-only `verificationSql` query;
-this both verifies a fresh application and safely adopts an already-existing Flyway
-change only when PostgreSQL proves the expected object is present.
+## How it works
 
-Definitions and change sets are trusted application artifacts, not untrusted user
-input. The SQL policy rejects destructive and unsupported statement shapes, but it is
-not a SQL sandbox. In particular, authors must ensure functions invoked by
-`verificationSql` are side-effect-free.
+A `schema-definition.json` file has two complementary parts:
 
-**Auto-apply:** create table, add column, create index, SET/DROP DEFAULT, safe type
-widenings, `NOT NULL` → nullable, and safety-checked ordered change sets.
+1. `tables` describes the desired tables, columns, defaults, nullability, and
+   indexes. SchemaSynchronizer compares this state with the live database.
+2. `changes` is an ordered, checksummed ledger for operations that cannot be
+   inferred reliably from JDBC metadata: backfills, constraints, functions,
+   triggers, extensions, comments, and grants.
 
-**Rejected or pending:** drop table/column/index/schema/constraint, truncate, delete,
-arbitrary type changes, type narrowing, and inferred `NULL` → `NOT NULL`. A versioned
-change set may set `NOT NULL` after an explicit backfill. Unknown SQL is rejected.
+On each run SchemaSynchronizer detects the database dialect, validates the
+definition, obtains a database lock, applies safe changes, and records completed
+change sets in `schema_synchronizer_history`. Unsafe or destructive differences are
+not executed; they are returned in `pendingSql()` for manual review.
 
-SchemaSynchronizer never executes destructive or unsafe reconciliation. It returns the
-ordered statements in `SchemaSynchronizationResult.pendingSql()` and prints a copyable manual
-transaction (`BEGIN`, schema-scoped `search_path`, statements, `COMMIT`) for an operator
-to review and run separately. Set `schema-synchronizer.fail-on-pending=false` only when the
-application may start while that manual work remains outstanding.
+The defaults are fail-closed. A missing definition, dialect mismatch, checksum
+drift, failed verification query, or pending destructive change stops startup.
 
-The default is fail-closed: a missing definition, checksum drift, failed verification,
-or pending destructive schema difference aborts startup.
+## Quick start: command line
 
-Current support: PostgreSQL 16+ and MariaDB 10.3+ with unquoted identifiers. MariaDB
-uses a connection-scoped named lock and idempotent operations because its DDL may
-implicitly commit; pending manual DDL is therefore printed as individually reviewed
-statements rather than represented as an atomic transaction. Quoted identifiers are
-rejected rather than handled approximately. MySQL is detected but remains fail-closed
-until its independent compatibility suite is implemented.
+SchemaSynchronizer requires Java 21 and Maven 3.9 or later.
 
-Schema definitions declare both `formatVersion` and `dialect`. A definition can only be
-applied to the same database family that produced it; SchemaSynchronizer is not a
-cross-database migration or SQL-translation tool. Legacy definitions without those
-fields are interpreted as PostgreSQL format version 1.
-
-## Install locally
+### 1. Build and install locally
 
 ```bash
+git clone https://github.com/eugenena/SchemaSynchronizer.git
 cd SchemaSynchronizer
 mvn clean install
 ```
 
-CI publishes tagged builds and manually dispatched builds to GitHub Packages at
-`https://maven.pkg.github.com/eugenena/SchemaSynchronizer`. Consumers outside the local
-machine must configure that repository and a GitHub Packages credential in Maven
-settings, then pin the published version rather than relying on a mutable local JAR.
+This installs `io.github.eugenena:schema-synchronizer:0.2.0-SNAPSHOT` in your
+local Maven repository.
 
-Consuming application:
+### 2. Serialize a source database
+
+Set the password in the environment so it does not appear in shell history or the
+process list:
+
+```bash
+export SCHEMA_DB_PASSWORD='source-password'
+```
+
+PostgreSQL example:
+
+```bash
+mvn -pl schema-synchronizer exec:java \
+  -Dexec.mainClass=io.github.eugenena.schemasynchronizer.SchemaSerializer \
+  -Dexec.args="jdbc:postgresql://localhost:5432/source_app app_user - public schema-definition.json"
+```
+
+MariaDB example (the schema argument is the database/catalog name):
+
+```bash
+mvn -pl schema-synchronizer exec:java \
+  -Dexec.mainClass=io.github.eugenena.schemasynchronizer.SchemaSerializer \
+  -Dexec.args="jdbc:mariadb://localhost:3306/source_app app_user - source_app schema-definition.json"
+```
+
+Review the generated file before committing it. If the file already exists, the
+serializer preserves its hand-authored `changes` array.
+
+### 3. Synchronize a target database
+
+```bash
+export SCHEMA_DB_PASSWORD='target-password'
+```
+
+PostgreSQL example:
+
+```bash
+mvn -pl schema-synchronizer exec:java \
+  -Dexec.mainClass=io.github.eugenena.schemasynchronizer.SchemaSynchronizer \
+  -Dexec.args="jdbc:postgresql://localhost:5432/target_app app_user - schema-definition.json public schema_synchronizer_history"
+```
+
+MariaDB example:
+
+```bash
+mvn -pl schema-synchronizer exec:java \
+  -Dexec.mainClass=io.github.eugenena.schemasynchronizer.SchemaSynchronizer \
+  -Dexec.args="jdbc:mariadb://localhost:3306/target_app app_user - schema-definition.json target_app schema_synchronizer_history"
+```
+
+The database account must be able to read catalog metadata and execute the DDL in
+the definition. The process exits with an error when manual work is required.
+
+## Add the library to an application
+
+Until a release is available from Maven Central, run `mvn clean install` locally
+or consume a published build from GitHub Packages:
 
 ```xml
 <dependency>
@@ -85,8 +125,78 @@ Consuming application:
 </dependency>
 ```
 
-Spring Boot auto-configuration runs SchemaSynchronizer after the DataSource exists and
-registers it as a database initializer so JPA validation waits for it. Configuration:
+For GitHub Packages, add this repository to the consuming POM:
+
+```xml
+<repositories>
+  <repository>
+    <id>github-schema-synchronizer</id>
+    <url>https://maven.pkg.github.com/eugenena/SchemaSynchronizer</url>
+  </repository>
+</repositories>
+```
+
+GitHub Packages requires a GitHub credential in Maven `settings.xml`, including
+for public packages. Applications should pin a released version instead of relying
+on a mutable snapshot.
+
+The library includes PostgreSQL and MariaDB JDBC drivers at runtime. Applications
+can override their versions through dependency management.
+
+## CLI reference
+
+### SchemaSerializer
+
+`SchemaSerializer` reads a live database through JDBC and writes a target-state
+document:
+
+```text
+SchemaSerializer <jdbc-url> <user> <password-or--> <schema> <output-path>
+```
+
+| Argument | Description |
+|---|---|
+| `jdbc-url` | PostgreSQL or MariaDB JDBC URL |
+| `user` | Database username |
+| `password-or--` | Password, or `-` to read `SCHEMA_DB_PASSWORD` |
+| `schema` | PostgreSQL schema or MariaDB database/catalog |
+| `output-path` | Definition file to create or update |
+
+The serializer captures tables, columns, primary keys, defaults, nullability, and
+indexes. It does not invent changes for backfills, foreign keys, check constraints,
+functions, triggers, extensions, comments, or grants. Express those explicitly in
+the `changes` array.
+
+### SchemaSynchronizer
+
+`SchemaSynchronizer` applies a definition to a target database:
+
+```text
+SchemaSynchronizer <jdbc-url> <user> <password-or--> <schema-file> [schema] [history-table]
+```
+
+| Argument | Required | Default | Description |
+|---|---:|---|---|
+| `jdbc-url` | Yes | — | Target JDBC URL |
+| `user` | Yes | — | Database username |
+| `password-or--` | Yes | — | Password, or `-` to read `SCHEMA_DB_PASSWORD` |
+| `schema-file` | Yes | — | Path to the definition |
+| `schema` | No | `public` | PostgreSQL schema or MariaDB database/catalog |
+| `history-table` | No | `schema_synchronizer_history` | Change-set ledger table |
+
+Supplying the password directly is supported, but `-` is safer because it avoids
+putting the credential in command history and process arguments.
+
+## Spring Boot usage
+
+Add the dependency and put the definition here:
+
+```text
+src/main/resources/schema-definition.json
+```
+
+Auto-configuration activates when a `DataSource` and Jackson `ObjectMapper` are
+available. Recommended settings:
 
 ```properties
 schema-synchronizer.enabled=true
@@ -100,10 +210,98 @@ schema-synchronizer.require-definition=true
 spring.jpa.hibernate.ddl-auto=validate
 ```
 
-Example definition (statements are intentionally one JDBC statement per entry):
+| Property | Default | Meaning |
+|---|---|---|
+| `enabled` | `true` | Enable auto-configuration |
+| `resource` | `/schema-definition.json` | Classpath definition to load |
+| `schema` | `public` | PostgreSQL schema or MariaDB database/catalog |
+| `history-table` | `schema_synchronizer_history` | Applied change-set ledger |
+| `advisory-lock-id` | `7249031147` | PostgreSQL advisory-lock key |
+| `dry-run` | `false` | Plan changes and roll back PostgreSQL work |
+| `fail-on-pending` | `true` | Stop when manual SQL remains |
+| `require-definition` | `true` | Stop when the classpath definition is absent |
+
+SchemaSynchronizer registers as a database initializer and completes before JPA
+schema validation. Keep `ddl-auto=validate`; do not let JPA and SchemaSynchronizer
+both mutate the schema.
+
+MariaDB DDL can commit implicitly, so `dry-run` cannot provide PostgreSQL-style
+rollback guarantees. Validate new definitions against a disposable database first.
+
+## Java API
+
+### Apply a definition using an existing JDBC connection
+
+```java
+import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.eugenena.schemasynchronizer.SchemaDefinition;
+import io.github.eugenena.schemasynchronizer.SchemaSynchronizationResult;
+import io.github.eugenena.schemasynchronizer.SchemaSynchronizer;
+import io.github.eugenena.schemasynchronizer.SchemaSynchronizerOptions;
+
+import java.nio.file.Path;
+import java.sql.Connection;
+
+ObjectMapper mapper = new ObjectMapper();
+SchemaDefinition definition = mapper.readValue(
+        Path.of("schema-definition.json").toFile(),
+        SchemaDefinition.class);
+
+SchemaSynchronizerOptions options = new SchemaSynchronizerOptions(
+        "public",                         // schema or database/catalog
+        "schema_synchronizer_history",   // history table
+        7_249_031_147L,                   // PostgreSQL advisory-lock ID
+        false,                            // dry run
+        true,                             // fail on pending manual SQL
+        true);                            // require classpath definition
+
+SchemaSynchronizer synchronizer = new SchemaSynchronizer(
+        mapper, null, "", options);
+
+try (Connection connection = dataSource.getConnection()) {
+    SchemaSynchronizationResult result =
+            synchronizer.synchronizeWithResult(connection, definition);
+
+    System.out.printf(
+            "created=%d, columns=%d, altered=%d, changeSets=%d%n",
+            result.tablesCreated(),
+            result.columnsAdded(),
+            result.columnsAltered(),
+            result.changeSetsApplied());
+
+    result.pendingSql().forEach(sql ->
+            System.err.println("Manual review required: " + sql));
+}
+```
+
+`plannedSql()` contains SQL selected for the invocation, including a dry run.
+`pendingSql()` contains destructive or unsafe reconciliation that was not executed.
+`changed()` reports whether any safe table, column, or change-set work occurred.
+
+### Load a definition from the classpath
+
+```java
+ObjectMapper mapper = new ObjectMapper();
+SchemaSynchronizer synchronizer = new SchemaSynchronizer(
+        mapper,
+        dataSource,
+        "/schema-definition.json",
+        SchemaSynchronizerOptions.defaults());
+
+SchemaSynchronizationResult result = synchronizer.synchronizeFromClasspath();
+```
+
+The `DataSource` is required by `synchronizeFromClasspath()`. It is not used when
+the caller supplies a `Connection` directly.
+
+## Schema definition format
+
+PostgreSQL example:
 
 ```json
 {
+  "formatVersion": 2,
+  "dialect": "postgresql",
   "tables": {
     "work_items": {
       "createSql": "CREATE TABLE IF NOT EXISTS work_items (id UUID PRIMARY KEY, status VARCHAR(32))",
@@ -111,7 +309,9 @@ Example definition (statements are intentionally one JDBC statement per entry):
         {"name": "id", "definition": "UUID NOT NULL"},
         {"name": "status", "definition": "VARCHAR(32)"}
       ],
-      "indexes": []
+      "indexes": [
+        "CREATE INDEX IF NOT EXISTS idx_work_items_status ON work_items (status)"
+      ]
     }
   },
   "changes": [
@@ -130,55 +330,105 @@ Example definition (statements are intentionally one JDBC statement per entry):
 }
 ```
 
-### Standalone utilities
+The same structure is used for MariaDB, with `"dialect": "mariadb"` and SQL valid
+for that dialect. Generate the declarative portion with `SchemaSerializer` instead
+of manually translating SQL between dialects.
 
-Serialize a source database to a schema definition:
+| Top-level field | Description |
+|---|---|
+| `formatVersion` | Definition format; the current version is `2` |
+| `dialect` | `postgresql` or `mariadb`; must match the target |
+| `tables` | Declarative desired state keyed by table name |
+| `changes` | Ordered ledger of explicit operations |
+
+Legacy definitions without `formatVersion` and `dialect` are interpreted as
+PostgreSQL format version 1. New definitions should always declare both fields.
+
+### Change sets
+
+Every change set needs a stable, unique `id`. Once applied, do not edit its
+statements: the stored SHA-256 checksum protects history from silent drift. Create
+a new change set for subsequent work.
+
+`phase` controls ordering:
+
+- `BEFORE_SCHEMA` is the default and suits preparatory data changes.
+- `AFTER_SCHEMA` suits constraints, functions, and triggers that depend on newly
+  created tables or columns.
+
+`verificationSql` must be a read-only query whose first column is a boolean. It
+verifies a fresh application and can adopt an already-existing change only when the
+database proves the expected object or state exists. Any function called by a
+verification query must be side-effect-free.
+
+Each item in `statements` must contain exactly one JDBC statement. Definitions are
+trusted application artifacts, not untrusted user input: the SQL policy prevents
+accidental destructive DDL, but it is not a SQL sandbox.
+
+## Safety model
+
+Automatically applied operations include:
+
+- creating tables;
+- adding columns;
+- creating indexes;
+- setting or dropping defaults;
+- supported type widenings;
+- relaxing `NOT NULL` to nullable; and
+- validated, checksummed change sets.
+
+SchemaSynchronizer never infers or automatically performs:
+
+- dropping tables, columns, indexes, schemas, or constraints;
+- truncating or deleting data;
+- type narrowing or arbitrary type changes; or
+- changing nullable columns to `NOT NULL` without an explicit change set.
+
+For unsafe declarative differences, `pendingSql()` returns the ordered statements
+and the logger prints copyable SQL for operator review. PostgreSQL output includes a
+transaction and schema-scoped `search_path`. MariaDB prints individually reviewable
+statements because its DDL may commit implicitly.
+
+Set `fail-on-pending=false` only when the application may safely start while manual
+work remains unresolved. Quoted identifiers are rejected rather than handled
+approximately; definitions should use ordinary unquoted identifiers.
+
+## Moving from a migration tool
+
+Do not blindly mark historical migrations complete. Represent durable effects that
+are outside `tables` as ordered change sets with `verificationSql`, then test both:
+
+1. an empty database applies the complete definition; and
+2. an existing database adopts verified historical changes without rerunning them.
+
+Both paths must converge to the same schema before disabling the previous migration
+tool. Preserve historical migration files in source control as audit evidence.
+
+## Testing and development
+
+Run the normal test suite:
 
 ```bash
-SCHEMA_DB_PASSWORD='local-password' mvn -pl schema-synchronizer exec:java \
-  -Dexec.mainClass=io.github.eugenena.schemasynchronizer.SchemaSerializer \
-  -Dexec.args="jdbc:postgresql://localhost:5432/app user - public src/main/resources/schema-definition.json"
+mvn test
 ```
 
-The snapshot writer preserves the hand-authored `changes` array. It does not attempt to
-invent backfills or reconstruct the intent of constraints, functions, and triggers.
-
-Synchronize a target database from the serialized definition:
-
-```bash
-SCHEMA_DB_PASSWORD='target-password' mvn -pl schema-synchronizer exec:java \
-  -Dexec.mainClass=io.github.eugenena.schemasynchronizer.SchemaSynchronizer \
-  -Dexec.args="jdbc:postgresql://localhost:5432/target target_user - schema-definition.json public schema_synchronizer_history"
-```
-
-Both utilities accept the password directly in the third argument, but `-` plus
-`SCHEMA_DB_PASSWORD` is recommended so credentials do not appear in the process list or
-shell history. The synchronizer fails closed if the definition is missing, verification
-fails, or destructive/unsafe differences require manual execution.
-
-### Flyway cutover
-
-Do not blindly mark historical migrations complete. Convert their durable effects into
-ordered change sets with `verificationSql`, then test both paths:
-
-- a fresh empty PostgreSQL database applies every change;
-- an existing Flyway database adopts each verified change without rerunning it.
-
-Only after both converge to the same schema should the consuming application disable
-Flyway. Keep the historical migrations in source control as audit evidence.
-
-### Verification
-
-The normal suite runs unit and Spring Boot auto-configuration tests. The PostgreSQL
-acceptance suite is enabled when a test JDBC URL is supplied:
+Run the PostgreSQL acceptance suite:
 
 ```bash
 mvn verify \
   -Dschema.test.jdbc.url=jdbc:postgresql://localhost:5432/postgres \
-  -Dschema.test.jdbc.user="$USER"
+  -Dschema.test.jdbc.user="$USER" \
+  -Dschema.test.jdbc.password="$SCHEMA_DB_PASSWORD"
 ```
 
-Repository CI always supplies PostgreSQL 16 and therefore never skips this gate.
+Run the MariaDB acceptance suite:
+
+```bash
+mvn verify \
+  -Dschema.test.mariadb.jdbc.url=jdbc:mariadb://localhost:3306/test \
+  -Dschema.test.mariadb.jdbc.user=test_user \
+  -Dschema.test.mariadb.jdbc.password="$SCHEMA_DB_PASSWORD"
+```
 
 ## License
 
