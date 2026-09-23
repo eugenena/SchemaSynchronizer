@@ -13,6 +13,8 @@ public final class ColumnDefinitionParser {
             "\\s+DEFAULT\\s+(.+)$", Pattern.CASE_INSENSITIVE);
     private static final Pattern NOT_NULL = Pattern.compile(
             "\\s+NOT\\s+NULL\\b", Pattern.CASE_INSENSITIVE);
+    private static final Pattern AUTO_INCREMENT = Pattern.compile(
+            "\\s+AUTO_INCREMENT\\b", Pattern.CASE_INSENSITIVE);
     private static final Pattern TYPE_LEN = Pattern.compile(
             "^([A-Za-z][A-Za-z0-9_\\s]*?)(?:\\((\\d+)(?:\\s*,\\s*(\\d+))?\\))?$",
             Pattern.CASE_INSENSITIVE);
@@ -28,6 +30,7 @@ public final class ColumnDefinitionParser {
             throw new IllegalArgumentException("column definition contains SQL statement or comment syntax");
         }
         String rest = definition.trim();
+        rest = AUTO_INCREMENT.matcher(rest).replaceFirst("").trim();
         String defaultExpr = null;
         Matcher defM = DEFAULT.matcher(rest);
         if (defM.find()) {
@@ -64,6 +67,9 @@ public final class ColumnDefinitionParser {
         Matcher cast = PG_CAST.matcher(d);
         if (cast.find()) {
             d = d.substring(0, cast.start()).trim();
+        }
+        if (d.equalsIgnoreCase("CURRENT_TIMESTAMP") || d.equalsIgnoreCase("CURRENT_TIMESTAMP()")) {
+            return "CURRENT_TIMESTAMP";
         }
         return d;
     }

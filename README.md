@@ -49,11 +49,12 @@ application may start while that manual work remains outstanding.
 The default is fail-closed: a missing definition, checksum drift, failed verification,
 or pending destructive schema difference aborts startup.
 
-Current portability boundary: PostgreSQL 16+ with unquoted, lower-case identifiers.
-MariaDB snapshot serialization is available as the first step toward MariaDB
-synchronization; MariaDB target execution remains fail-closed until its DDL, locking,
-and non-transactional recovery semantics are implemented. Quoted/mixed-case identifiers
-are rejected rather than handled approximately.
+Current support: PostgreSQL 16+ and MariaDB 10.3+ with unquoted identifiers. MariaDB
+uses a connection-scoped named lock and idempotent operations because its DDL may
+implicitly commit; pending manual DDL is therefore printed as individually reviewed
+statements rather than represented as an atomic transaction. Quoted identifiers are
+rejected rather than handled approximately. MySQL is detected but remains fail-closed
+until its independent compatibility suite is implemented.
 
 Schema definitions declare both `formatVersion` and `dialect`. A definition can only be
 applied to the same database family that produced it; SchemaSynchronizer is not a
