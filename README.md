@@ -2,7 +2,7 @@
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Java](https://img.shields.io/badge/Java-21%2B-orange.svg)](https://www.oracle.com/java/)
-[![Maven Central](https://img.shields.io/maven-central/v/com.thinkaillc/schema-synchronizer.svg)](https://central.sonatype.com/artifact/com.thinkaillc/schema-synchronizer/1.0.0)
+[![Maven Central](https://img.shields.io/maven-central/v/com.thinkaillc/schema-synchronizer.svg)](https://central.sonatype.com/artifact/com.thinkaillc/schema-synchronizer)
 [![Javadocs](https://javadoc.io/badge2/com.thinkaillc/schema-synchronizer/javadoc.svg)](https://javadoc.io/doc/com.thinkaillc/schema-synchronizer)
 
 SchemaSynchronizer keeps a relational database aligned with a version-controlled
@@ -114,7 +114,7 @@ SchemaSynchronizer requires Java 21 or later. Add the Maven Central release:
 <dependency>
   <groupId>com.thinkaillc</groupId>
   <artifactId>schema-synchronizer</artifactId>
-  <version>1.0.0</version>
+  <version>1.1.0</version>
 </dependency>
 ```
 
@@ -128,19 +128,18 @@ working definition and configuration.
 
 ## Quick start: command line
 
-SchemaSynchronizer requires Java 21 and Maven 3.9 or later.
+The self-contained CLI requires Java 21. It includes the PostgreSQL, MariaDB, and
+MySQL JDBC drivers.
 
-### 1. Clone and build the current CLI distribution
+### 1. Download the executable JAR
 
 ```bash
-git clone https://github.com/eugenena/SchemaSynchronizer.git
-cd SchemaSynchronizer
-mvn clean install
+curl -fLO https://repo1.maven.org/maven2/com/thinkaillc/schema-synchronizer-cli/1.1.0/schema-synchronizer-cli-1.1.0-standalone.jar
+java -jar schema-synchronizer-cli-1.1.0-standalone.jar --version
 ```
 
-The library itself is available from Maven Central. The 1.0.0 command-line entry
-points are not packaged as a self-contained executable, so CLI use currently runs
-them from the source checkout with Maven.
+Maven Central publishes `.sha256` and `.sha512` files beside the JAR for integrity
+verification. GitHub releases also attach the executable.
 
 ### 2. Serialize a source database
 
@@ -154,17 +153,15 @@ export SCHEMA_DB_PASSWORD='source-password'
 PostgreSQL example:
 
 ```bash
-mvn -pl schema-synchronizer exec:java \
-  -Dexec.mainClass=com.thinkaillc.schemasynchronizer.SchemaSerializer \
-  -Dexec.args="jdbc:postgresql://localhost:5432/source_app app_user - public schema-definition.json"
+java -jar schema-synchronizer-cli-1.1.0-standalone.jar serialize \
+  jdbc:postgresql://localhost:5432/source_app app_user - public schema-definition.json
 ```
 
 MariaDB example (the schema argument is the database/catalog name):
 
 ```bash
-mvn -pl schema-synchronizer exec:java \
-  -Dexec.mainClass=com.thinkaillc.schemasynchronizer.SchemaSerializer \
-  -Dexec.args="jdbc:mariadb://localhost:3306/source_app app_user - source_app schema-definition.json"
+java -jar schema-synchronizer-cli-1.1.0-standalone.jar serialize \
+  jdbc:mariadb://localhost:3306/source_app app_user - source_app schema-definition.json
 ```
 
 MySQL uses the same argument shape with a `jdbc:mysql:` URL. Its serialized
@@ -188,17 +185,17 @@ export SCHEMA_DB_PASSWORD='target-password'
 PostgreSQL example:
 
 ```bash
-mvn -pl schema-synchronizer exec:java \
-  -Dexec.mainClass=com.thinkaillc.schemasynchronizer.SchemaSynchronizer \
-  -Dexec.args="jdbc:postgresql://localhost:5432/target_app app_user - schema-definition.json public schema_synchronizer_history"
+java -jar schema-synchronizer-cli-1.1.0-standalone.jar sync \
+  jdbc:postgresql://localhost:5432/target_app app_user - \
+  schema-definition.json public schema_synchronizer_history
 ```
 
 MariaDB example:
 
 ```bash
-mvn -pl schema-synchronizer exec:java \
-  -Dexec.mainClass=com.thinkaillc.schemasynchronizer.SchemaSynchronizer \
-  -Dexec.args="jdbc:mariadb://localhost:3306/target_app app_user - schema-definition.json target_app schema_synchronizer_history"
+java -jar schema-synchronizer-cli-1.1.0-standalone.jar sync \
+  jdbc:mariadb://localhost:3306/target_app app_user - \
+  schema-definition.json target_app schema_synchronizer_history
 ```
 
 The database account must be able to read catalog metadata and execute the DDL in
@@ -212,7 +209,7 @@ Add the Maven Central release to an application:
 <dependency>
   <groupId>com.thinkaillc</groupId>
   <artifactId>schema-synchronizer</artifactId>
-  <version>1.0.0</version>
+  <version>1.1.0</version>
 </dependency>
 ```
 
@@ -228,11 +225,12 @@ GitHub Actions is optional. A release can be published locally after the
 2. Put the Central Portal user-token username and password under server id
    `central` in Maven `settings.xml`.
 3. Export the signing-key passphrase as `MAVEN_GPG_PASSPHRASE`.
-4. Create the signed `v1.0.0` Git tag on the reviewed release commit.
+4. Create a signed `v<project-version>` Git tag on the reviewed release commit.
 5. From that tag, run `mvn --batch-mode --no-transfer-progress -Prelease clean deploy`. The
    command validates, publishes, and waits for Central to report the deployment as
    published.
-6. Create the GitHub release from the same signed tag.
+6. Create the GitHub release from the same signed tag and attach
+   `schema-synchronizer-cli-<version>-standalone.jar` plus its SHA-256 and SHA-512 files.
 
 The release profile attaches source and Javadoc archives, signs every artifact,
 generates MD5, SHA-1, SHA-256, and SHA-512 checksums, and publishes a Central Portal

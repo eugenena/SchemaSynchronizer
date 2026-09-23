@@ -7,9 +7,11 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
+import org.junit.jupiter.api.io.TempDir;
 import org.postgresql.ds.PGSimpleDataSource;
 
 import javax.sql.DataSource;
+import java.nio.file.Path;
 import java.sql.Connection;
 import java.util.ArrayList;
 import java.util.List;
@@ -24,6 +26,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 @EnabledIfSystemProperty(named = "schema.test.jdbc.url", matches = ".+")
 class SchemaSynchronizerPostgresIntegrationTest {
     private final List<String> cleanupSchemas = new ArrayList<>();
+
+    @TempDir
+    Path tempDirectory;
 
     @AfterEach
     void removeTestSchemas() throws Exception {
@@ -68,6 +73,40 @@ class SchemaSynchronizerPostgresIntegrationTest {
             assertThatThrownBy(() -> synchronizer.synchronizeWithResult(connection, edited))
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessageContaining("checksum mismatch");
+        }
+    }
+
+    @Test
+    void serializedDefinitionReplaysIntoDifferentSchema() throws Exception {
+        DataSource dataSource = dataSource();
+        String sourceSchema = uniqueSchema("serialize_source");
+        String targetSchema = uniqueSchema("serialize_target");
+        createSchema(dataSource, sourceSchema);
+        createSchema(dataSource, targetSchema);
+        try (Connection connection = dataSource.getConnection(); var statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE " + sourceSchema
+                    + ".accounts (id BIGINT PRIMARY KEY, email VARCHAR(320) NOT NULL)");
+            statement.execute("CREATE UNIQUE INDEX idx_accounts_email ON "
+                    + sourceSchema + ".accounts (email)");
+        }
+
+        Path definitionPath = tempDirectory.resolve("schema-definition.json");
+        SchemaSnapshotWriter.main(new String[]{
+                System.getProperty("schema.test.jdbc.url"),
+                System.getProperty("schema.test.jdbc.user", ""),
+                System.getProperty("schema.test.jdbc.password", ""),
+                sourceSchema,
+                definitionPath.toString()
+        });
+        SchemaDefinition definition = new ObjectMapper().readValue(definitionPath.toFile(), SchemaDefinition.class);
+
+        assertThat(definition.tables().get("accounts").indexes())
+                .containsExactly("CREATE UNIQUE INDEX IF NOT EXISTS idx_accounts_email ON accounts (email)");
+        try (Connection connection = dataSource.getConnection()) {
+            SchemaSynchronizationResult result = synchronizer(dataSource, targetSchema, false)
+                    .synchronizeWithResult(connection, definition);
+            assertThat(result.pendingSql()).isEmpty();
+            assertThat(tableExists(connection, targetSchema, "accounts")).isTrue();
         }
     }
 
