@@ -1,5 +1,7 @@
 # SchemaSynchronizer
 
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+
 Safe schema convergence for relational databases. PostgreSQL 16+ is the first and
 currently implemented dialect; the public API and project identity are intentionally
 database-neutral so additional dialects can be added without another rebrand.
@@ -177,3 +179,10 @@ mvn verify \
 ```
 
 Repository CI always supplies PostgreSQL 16 and therefore never skips this gate.
+
+## License
+
+SchemaSynchronizer is licensed under the [Apache License 2.0](LICENSE). You may
+use, modify, and distribute it in open-source or proprietary software subject to
+the license terms. Contributions submitted for inclusion in this repository are
+accepted under the same license unless explicitly stated otherwise.
