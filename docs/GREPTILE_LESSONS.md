@@ -1,5 +1,15 @@
 # Greptile lessons
 
+## 2026-09-23 — PR #10 — document observed normalization behavior
+
+- **Miss:** The schema reference repeated the intended lower-case-only boundary as
+  rejection, but definition table and column names are normalized before identifier
+  validation.
+- **Prevention:** Trace public input through normalization and validation before
+  documenting whether an unsupported shape is rejected, normalized, or ignored.
+- **Coverage:** The schema reference, troubleshooting guide, and production audit now
+  consistently describe lowercase normalization and quoted-identifier rejection.
+
 ## 2026-09-23 — PR #8 — database readiness must cross the SQL boundary
 
 - **Bug:** TiDB verification proceeded when its TCP port accepted a connection,
