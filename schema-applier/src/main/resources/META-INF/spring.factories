@@ -1,2 +1,0 @@
-org.springframework.boot.sql.init.dependency.DatabaseInitializerDetector=\
-com.thinkai.schema.SchemaApplierInitializerDetector
