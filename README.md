@@ -14,17 +14,21 @@ Use it as:
 - a Spring Boot database initializer that runs before JPA validation; or
 - a small Java API over an existing JDBC connection.
 
-## Supported dialects
+## Current dialect support
 
 | Database | Status | Notes |
 |---|---|---|
-| PostgreSQL 16+ | Supported | Transactional DDL and advisory locking |
-| MariaDB 10.3+ | Supported | Named locking; DDL may commit implicitly |
-| MySQL | Detected, not yet supported | Fails closed until its compatibility suite is complete |
+| PostgreSQL 16+ | Available | Transactional DDL and advisory locking |
+| MariaDB 10.3+ | Available | Named locking; DDL may commit implicitly |
+| MySQL | Planned | Detected today, but fails closed until its compatibility suite is complete |
 
-Each database is an independent dialect. A definition serialized from one dialect
-can only be applied to that same dialect; SchemaSynchronizer is not a cross-database
-SQL translator.
+PostgreSQL and MariaDB are the first dialect implementations, not a closed list.
+SchemaSynchronizer is designed to add more relational database dialects, each with
+its own metadata, SQL-generation, locking, safety, and compatibility behavior.
+
+A definition serialized from one dialect can only be applied to that same dialect;
+adding dialects expands the databases SchemaSynchronizer can manage, but does not
+turn it into a cross-database SQL translator.
 
 ## How it works
 
@@ -156,10 +160,10 @@ SchemaSerializer <jdbc-url> <user> <password-or--> <schema> <output-path>
 
 | Argument | Description |
 |---|---|
-| `jdbc-url` | PostgreSQL or MariaDB JDBC URL |
+| `jdbc-url` | JDBC URL for an available dialect |
 | `user` | Database username |
 | `password-or--` | Password, or `-` to read `SCHEMA_DB_PASSWORD` |
-| `schema` | PostgreSQL schema or MariaDB database/catalog |
+| `schema` | Dialect-specific schema namespace (a database/catalog in MariaDB) |
 | `output-path` | Definition file to create or update |
 
 The serializer captures tables, columns, primary keys, defaults, nullability, and
@@ -181,7 +185,7 @@ SchemaSynchronizer <jdbc-url> <user> <password-or--> <schema-file> [schema] [his
 | `user` | Yes | — | Database username |
 | `password-or--` | Yes | — | Password, or `-` to read `SCHEMA_DB_PASSWORD` |
 | `schema-file` | Yes | — | Path to the definition |
-| `schema` | No | `public` | PostgreSQL schema or MariaDB database/catalog |
+| `schema` | No | `public` | Dialect-specific schema namespace |
 | `history-table` | No | `schema_synchronizer_history` | Change-set ledger table |
 
 Supplying the password directly is supported, but `-` is safer because it avoids
@@ -214,7 +218,7 @@ spring.jpa.hibernate.ddl-auto=validate
 |---|---|---|
 | `enabled` | `true` | Enable auto-configuration |
 | `resource` | `/schema-definition.json` | Classpath definition to load |
-| `schema` | `public` | PostgreSQL schema or MariaDB database/catalog |
+| `schema` | `public` | Dialect-specific schema namespace |
 | `history-table` | `schema_synchronizer_history` | Applied change-set ledger |
 | `advisory-lock-id` | `7249031147` | PostgreSQL advisory-lock key |
 | `dry-run` | `false` | Plan changes and roll back PostgreSQL work |
@@ -248,7 +252,7 @@ SchemaDefinition definition = mapper.readValue(
         SchemaDefinition.class);
 
 SchemaSynchronizerOptions options = new SchemaSynchronizerOptions(
-        "public",                         // schema or database/catalog
+        "public",                         // dialect-specific schema namespace
         "schema_synchronizer_history",   // history table
         7_249_031_147L,                   // PostgreSQL advisory-lock ID
         false,                            // dry run
@@ -330,14 +334,15 @@ PostgreSQL example:
 }
 ```
 
-The same structure is used for MariaDB, with `"dialect": "mariadb"` and SQL valid
-for that dialect. Generate the declarative portion with `SchemaSerializer` instead
-of manually translating SQL between dialects.
+The structure is shared by every dialect implementation. For example, MariaDB uses
+`"dialect": "mariadb"` and SQL valid for MariaDB. Future dialects will use their
+own registered identifier and native SQL. Generate the declarative portion with
+`SchemaSerializer` instead of manually translating SQL between databases.
 
 | Top-level field | Description |
 |---|---|
 | `formatVersion` | Definition format; the current version is `2` |
-| `dialect` | `postgresql` or `mariadb`; must match the target |
+| `dialect` | Registered dialect identifier; must match the target database |
 | `tables` | Declarative desired state keyed by table name |
 | `changes` | Ordered ledger of explicit operations |
 
