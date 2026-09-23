@@ -1,19 +1,25 @@
 # Command-line guide
 
-SchemaSynchronizer 1.0.0 exposes two Java entry points:
+SchemaSynchronizer 1.1.0 publishes a self-contained executable JAR with two commands:
 
-- `SchemaSerializer` captures the declarative portion of a live source schema.
-- `SchemaSynchronizer` applies a definition to a target and reports manual work.
+- `serialize` captures the declarative portion of a live source schema.
+- `sync` applies a definition to a target and reports manual work.
 
-The 1.0.0 CLI is run from a source checkout with Maven; it is not yet distributed
-as a self-contained executable.
+The JAR requires Java 21 and includes PostgreSQL, MariaDB, and MySQL JDBC drivers.
 
-## Prepare the checkout
+## Download and verify
 
 ```bash
-git clone https://github.com/eugenena/SchemaSynchronizer.git
-cd SchemaSynchronizer
-mvn clean install
+curl -fLO https://repo1.maven.org/maven2/com/thinkaillc/schema-synchronizer-cli/1.1.0/schema-synchronizer-cli-1.1.0-standalone.jar
+curl -fLO https://repo1.maven.org/maven2/com/thinkaillc/schema-synchronizer-cli/1.1.0/schema-synchronizer-cli-1.1.0-standalone.jar.sha256
+```
+
+Compare the JAR's SHA-256 digest with the downloaded checksum before execution. The
+same executable and checksum files are attached to the GitHub release.
+
+```bash
+java -jar schema-synchronizer-cli-1.1.0-standalone.jar --version
+java -jar schema-synchronizer-cli-1.1.0-standalone.jar --help
 ```
 
 Use the environment for credentials so passwords do not appear in shell history or
@@ -26,23 +32,21 @@ export SCHEMA_DB_PASSWORD='replace-me'
 ## Serialize a source database
 
 ```text
-SchemaSerializer <jdbc-url> <user> <password-or--> <schema> <output-path>
+serialize <jdbc-url> <user> <password-or--> <schema> <output-path>
 ```
 
 PostgreSQL:
 
 ```bash
-mvn -pl schema-synchronizer exec:java \
-  -Dexec.mainClass=com.thinkaillc.schemasynchronizer.SchemaSerializer \
-  -Dexec.args="jdbc:postgresql://localhost:5432/source_app app_user - public schema-definition.json"
+java -jar schema-synchronizer-cli-1.1.0-standalone.jar serialize \
+  jdbc:postgresql://localhost:5432/source_app app_user - public schema-definition.json
 ```
 
 MySQL:
 
 ```bash
-mvn -pl schema-synchronizer exec:java \
-  -Dexec.mainClass=com.thinkaillc.schemasynchronizer.SchemaSerializer \
-  -Dexec.args="jdbc:mysql://localhost:3306/source_app app_user - source_app schema-definition.json"
+java -jar schema-synchronizer-cli-1.1.0-standalone.jar serialize \
+  jdbc:mysql://localhost:3306/source_app app_user - source_app schema-definition.json
 ```
 
 MariaDB uses a `jdbc:mariadb:` URL and `mariadb` dialect. If the output file already
@@ -52,17 +56,34 @@ the generated definition before committing it.
 ## Synchronize a target database
 
 ```text
-SchemaSynchronizer <jdbc-url> <user> <password-or--> <schema-file> [schema] [history-table]
+sync <jdbc-url> <user> <password-or--> <schema-file> [schema] [history-table]
 ```
 
 ```bash
-mvn -pl schema-synchronizer exec:java \
-  -Dexec.mainClass=com.thinkaillc.schemasynchronizer.SchemaSynchronizer \
-  -Dexec.args="jdbc:postgresql://localhost:5432/target_app app_user - schema-definition.json public schema_synchronizer_history"
+java -jar schema-synchronizer-cli-1.1.0-standalone.jar sync \
+  jdbc:postgresql://localhost:5432/target_app app_user - \
+  schema-definition.json public schema_synchronizer_history
 ```
 
 The process exits unsuccessfully when synchronization fails or pending manual SQL
 remains under the default safety policy. Capture the full output in deployment logs.
+
+Exit statuses are stable for automation:
+
+| Status | Meaning |
+|---:|---|
+| `0` | Command completed successfully |
+| `1` | Serialization, connection, validation, or synchronization failed |
+| `2` | Command name or CLI usage was invalid |
+
+## Build from source
+
+```bash
+git clone https://github.com/eugenena/SchemaSynchronizer.git
+cd SchemaSynchronizer
+mvn clean package
+java -jar schema-synchronizer-cli/target/schema-synchronizer-cli-1.1.0-standalone.jar --help
+```
 
 ## Credential rules
 

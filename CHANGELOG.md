@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.1.0 — Unreleased
 
 - Added task-oriented adoption guides for Spring Boot, CLI use, schema authoring,
   database dialects, production operations, migration, and troubleshooting.
@@ -8,6 +8,13 @@
 - Added Maven Central and Javadocs discovery links.
 - Aligned copyright notices with ThinkAI LLC ownership while retaining Eugene
   Naoumov as creator and maintainer.
+- Added a self-contained executable CLI JAR with `serialize`, `sync`, `help`, and
+  `version` commands, bundled JDBC drivers, stable exit statuses, and Maven Central
+  checksum publication.
+- Made PostgreSQL serializer output portable between source and target schemas by
+  removing source-schema qualification, omitting primary-key indexes recreated by
+  table DDL, preserving `UNIQUE` enforcement as unique indexes, and failing closed
+  for unsupported `EXCLUDE` constraints.
 
 ## 1.0.0 — 2026-09-23
 
