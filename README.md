@@ -97,7 +97,7 @@ cd SchemaSynchronizer
 mvn clean install
 ```
 
-This installs `io.github.eugenena:schema-synchronizer:0.2.0-SNAPSHOT` in your
+This installs `com.thinkaillc:schema-synchronizer:0.2.0-SNAPSHOT` in your
 local Maven repository.
 
 ### 2. Serialize a source database
@@ -113,7 +113,7 @@ PostgreSQL example:
 
 ```bash
 mvn -pl schema-synchronizer exec:java \
-  -Dexec.mainClass=io.github.eugenena.schemasynchronizer.SchemaSerializer \
+  -Dexec.mainClass=com.thinkaillc.schemasynchronizer.SchemaSerializer \
   -Dexec.args="jdbc:postgresql://localhost:5432/source_app app_user - public schema-definition.json"
 ```
 
@@ -121,7 +121,7 @@ MariaDB example (the schema argument is the database/catalog name):
 
 ```bash
 mvn -pl schema-synchronizer exec:java \
-  -Dexec.mainClass=io.github.eugenena.schemasynchronizer.SchemaSerializer \
+  -Dexec.mainClass=com.thinkaillc.schemasynchronizer.SchemaSerializer \
   -Dexec.args="jdbc:mariadb://localhost:3306/source_app app_user - source_app schema-definition.json"
 ```
 
@@ -138,7 +138,7 @@ PostgreSQL example:
 
 ```bash
 mvn -pl schema-synchronizer exec:java \
-  -Dexec.mainClass=io.github.eugenena.schemasynchronizer.SchemaSynchronizer \
+  -Dexec.mainClass=com.thinkaillc.schemasynchronizer.SchemaSynchronizer \
   -Dexec.args="jdbc:postgresql://localhost:5432/target_app app_user - schema-definition.json public schema_synchronizer_history"
 ```
 
@@ -146,7 +146,7 @@ MariaDB example:
 
 ```bash
 mvn -pl schema-synchronizer exec:java \
-  -Dexec.mainClass=io.github.eugenena.schemasynchronizer.SchemaSynchronizer \
+  -Dexec.mainClass=com.thinkaillc.schemasynchronizer.SchemaSynchronizer \
   -Dexec.args="jdbc:mariadb://localhost:3306/target_app app_user - schema-definition.json target_app schema_synchronizer_history"
 ```
 
@@ -160,7 +160,7 @@ or consume a published build from GitHub Packages:
 
 ```xml
 <dependency>
-  <groupId>io.github.eugenena</groupId>
+  <groupId>com.thinkaillc</groupId>
   <artifactId>schema-synchronizer</artifactId>
   <version>0.2.0-SNAPSHOT</version>
 </dependency>
@@ -275,10 +275,10 @@ rollback guarantees. Validate new definitions against a disposable database firs
 
 ```java
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.github.eugenena.schemasynchronizer.SchemaDefinition;
-import io.github.eugenena.schemasynchronizer.SchemaSynchronizationResult;
-import io.github.eugenena.schemasynchronizer.SchemaSynchronizer;
-import io.github.eugenena.schemasynchronizer.SchemaSynchronizerOptions;
+import com.thinkaillc.schemasynchronizer.SchemaDefinition;
+import com.thinkaillc.schemasynchronizer.SchemaSynchronizationResult;
+import com.thinkaillc.schemasynchronizer.SchemaSynchronizer;
+import com.thinkaillc.schemasynchronizer.SchemaSynchronizerOptions;
 
 import java.nio.file.Path;
 import java.sql.Connection;
