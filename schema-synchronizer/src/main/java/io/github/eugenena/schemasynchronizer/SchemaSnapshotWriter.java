@@ -97,7 +97,7 @@ public class SchemaSnapshotWriter {
             throws Exception {
         Map<String, Object> tables = new TreeMap<>();
 
-        String catalog = dialect == DatabaseDialect.POSTGRESQL ? null : schema;
+        String catalog = dialect == DatabaseDialect.POSTGRESQL ? null : conn.getCatalog();
         String schemaPattern = dialect == DatabaseDialect.POSTGRESQL ? schema : null;
 
         try (ResultSet rs = meta.getTables(catalog, schemaPattern, "%", new String[]{"TABLE"})) {
@@ -118,6 +118,9 @@ public class SchemaSnapshotWriter {
                         boolean scaleNull = cols.wasNull();
                         String nullable = "YES".equals(cols.getString("IS_NULLABLE")) ? "" : " NOT NULL";
                         String colDefault = cols.getString("COLUMN_DEF");
+                        if (dialect != DatabaseDialect.POSTGRESQL && "NULL".equalsIgnoreCase(colDefault)) {
+                            colDefault = null;
+                        }
                         boolean autoInc = "YES".equalsIgnoreCase(cols.getString("IS_AUTOINCREMENT"));
 
                         if (dialect == DatabaseDialect.POSTGRESQL && "VECTOR".equals(typeName)) {
@@ -213,7 +216,7 @@ public class SchemaSnapshotWriter {
     private static List<String> readIndexes(DatabaseMetaData meta, Connection conn, String schema, String tableName,
                                             DatabaseDialect dialect) throws Exception {
         if (dialect != DatabaseDialect.POSTGRESQL) {
-            return readJdbcIndexes(meta, schema, tableName);
+            return readMariaDbIndexes(conn, tableName);
         }
         List<String> indexes = new ArrayList<>();
         String sql = "SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = ? AND tablename = ?";
@@ -234,27 +237,32 @@ public class SchemaSnapshotWriter {
         return indexes;
     }
 
-    private static List<String> readJdbcIndexes(DatabaseMetaData meta, String catalog, String tableName)
+    private static List<String> readMariaDbIndexes(Connection conn, String tableName)
             throws SQLException {
         record IndexParts(boolean unique, SortedMap<Short, String> columns) {}
         Map<String, IndexParts> byName = new TreeMap<>();
-        try (ResultSet rows = meta.getIndexInfo(catalog, null, tableName, false, false)) {
+        try (var statement = conn.prepareStatement("SELECT index_name, non_unique, seq_in_index, column_name "
+                + "FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = ? "
+                + "ORDER BY index_name, seq_in_index")) {
+            statement.setString(1, tableName);
+            try (ResultSet rows = statement.executeQuery()) {
             while (rows.next()) {
-                String name = rows.getString("INDEX_NAME");
-                String column = rows.getString("COLUMN_NAME");
+                String name = rows.getString("index_name");
+                String column = rows.getString("column_name");
                 if (name == null || column == null || "PRIMARY".equalsIgnoreCase(name)) {
                     continue;
                 }
-                boolean unique = !rows.getBoolean("NON_UNIQUE");
-                short position = rows.getShort("ORDINAL_POSITION");
+                boolean unique = !rows.getBoolean("non_unique");
+                short position = rows.getShort("seq_in_index");
                 IndexParts parts = byName.computeIfAbsent(name,
                         ignored -> new IndexParts(unique, new TreeMap<>()));
                 parts.columns().put(position, column.toLowerCase(Locale.ROOT));
             }
+            }
         }
         List<String> indexes = new ArrayList<>();
         byName.forEach((name, parts) -> indexes.add("CREATE " + (parts.unique() ? "UNIQUE " : "")
-                + "INDEX " + name.toLowerCase(Locale.ROOT) + " ON " + tableName + " ("
+                + "INDEX IF NOT EXISTS " + name.toLowerCase(Locale.ROOT) + " ON " + tableName + " ("
                 + String.join(", ", parts.columns().values()) + ")"));
         return indexes;
     }
