@@ -219,7 +219,7 @@ public class SchemaSnapshotWriter {
     private static List<String> readIndexes(DatabaseMetaData meta, Connection conn, String schema, String tableName,
                                             DatabaseDialect dialect) throws Exception {
         if (dialect != DatabaseDialect.POSTGRESQL) {
-            return readMariaDbIndexes(conn, tableName);
+            return readMySqlFamilyIndexes(conn, tableName, dialect);
         }
         List<String> indexes = new ArrayList<>();
         String sql = "SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = ? AND tablename = ?";
@@ -240,7 +240,7 @@ public class SchemaSnapshotWriter {
         return indexes;
     }
 
-    static List<String> readMariaDbIndexes(Connection conn, String tableName)
+    static List<String> readMySqlFamilyIndexes(Connection conn, String tableName, DatabaseDialect dialect)
             throws SQLException {
         record IndexParts(boolean unique, SortedMap<Short, String> columns) {}
         Map<String, IndexParts> byName = new TreeMap<>();
@@ -257,7 +257,7 @@ public class SchemaSnapshotWriter {
                     continue;
                 }
                 if (column == null) {
-                    throw new SQLException("MariaDB expression index cannot be serialized safely: " + name);
+                    throw new SQLException(dialect.id() + " expression index cannot be serialized safely: " + name);
                 }
                 name = SqlIdentifiers.requireIdentifier(name.toLowerCase(Locale.ROOT), "index");
                 column = SqlIdentifiers.requireIdentifier(column.toLowerCase(Locale.ROOT), "index column");
@@ -271,15 +271,16 @@ public class SchemaSnapshotWriter {
                 IndexParts parts = byName.computeIfAbsent(name,
                         ignored -> new IndexParts(unique, new TreeMap<>()));
                 if (parts.unique() != unique) {
-                    throw new SQLException("MariaDB returned inconsistent uniqueness for index: " + name);
+                    throw new SQLException(dialect.id() + " returned inconsistent uniqueness for index: " + name);
                 }
                 parts.columns().put(position, columnSql);
             }
             }
         }
         List<String> indexes = new ArrayList<>();
+        String ifNotExists = dialect == DatabaseDialect.MARIADB ? " IF NOT EXISTS" : "";
         byName.forEach((name, parts) -> indexes.add("CREATE " + (parts.unique() ? "UNIQUE " : "")
-                + "INDEX IF NOT EXISTS " + name.toLowerCase(Locale.ROOT) + " ON " + tableName + " ("
+                + "INDEX" + ifNotExists + " " + name.toLowerCase(Locale.ROOT) + " ON " + tableName + " ("
                 + String.join(", ", parts.columns().values()) + ")"));
         return indexes;
     }

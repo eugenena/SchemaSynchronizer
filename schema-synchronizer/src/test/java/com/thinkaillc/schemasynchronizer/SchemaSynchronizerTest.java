@@ -161,13 +161,29 @@ class SchemaSynchronizerTest {
                 List.of("ALTER TABLE items ALTER COLUMN label SET DEFAULT 'x'"),
                 List.of("ALTER TABLE items ALTER COLUMN label TYPE VARCHAR(10)"));
 
-        NonDestructiveAlterPlanner.Plan result = SchemaSynchronizer.mariaDbColumnPlan(
+        NonDestructiveAlterPlanner.Plan result = SchemaSynchronizer.mySqlFamilyColumnPlan(
                 "items", "label", "VARCHAR(10) DEFAULT 'x'", mixed);
 
         assertThat(result.applySql()).isEmpty();
         assertThat(result.pendingSql()).containsExactly(
                 "ALTER TABLE items MODIFY COLUMN label VARCHAR(10) DEFAULT 'x'; "
                         + "-- pending: unsafe type/nullability change");
+    }
+
+    @Test
+    void removesUnsupportedIfNotExistsFromMySqlCreateIndex() {
+        assertThat(SchemaSynchronizer.mysqlCompatibleIndexSql(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_items_label ON items (label)",
+                DatabaseDialect.MYSQL))
+                .isEqualTo("CREATE UNIQUE INDEX idx_items_label ON items (label)");
+        assertThat(SchemaSynchronizer.mysqlCompatibleIndexSql(
+                "CREATE INDEX IF NOT EXISTS idx_items_label ON items (label)",
+                DatabaseDialect.MARIADB))
+                .contains("IF NOT EXISTS");
+        assertThat(SchemaSynchronizer.mysqlCompatibleAddColumnSql(
+                "ALTER TABLE items ADD COLUMN IF NOT EXISTS notes VARCHAR(255)",
+                DatabaseDialect.MYSQL))
+                .isEqualTo("ALTER TABLE items ADD COLUMN notes VARCHAR(255)");
     }
 
     @Test

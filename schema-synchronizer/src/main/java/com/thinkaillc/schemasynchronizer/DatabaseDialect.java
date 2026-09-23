@@ -23,6 +23,10 @@ public enum DatabaseDialect {
         return id;
     }
 
+    public boolean isMySqlFamily() {
+        return this == MARIADB || this == MYSQL;
+    }
+
     public static DatabaseDialect detect(DatabaseMetaData metadata) throws SQLException {
         String product = metadata.getDatabaseProductName();
         String normalized = product == null ? "" : product.toLowerCase(Locale.ROOT);

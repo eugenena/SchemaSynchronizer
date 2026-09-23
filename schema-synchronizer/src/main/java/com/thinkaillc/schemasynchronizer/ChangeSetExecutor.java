@@ -139,17 +139,19 @@ final class ChangeSetExecutor {
                         + entry.getKey() + "': committed changes are immutable");
             }
         }
-        if (dialect == DatabaseDialect.MARIADB) {
+        if (dialect.isMySqlFamily()) {
             for (SchemaDefinition.ChangeSet change : changes) {
                 if (applied.containsKey(change.id())) {
                     continue;
                 }
                 if (change.verificationSql() == null || change.verificationSql().isBlank()) {
-                    throw new IllegalArgumentException("unapplied MariaDB schema change requires verificationSql: "
+                    throw new IllegalArgumentException("unapplied " + dialect.id()
+                            + " schema change requires verificationSql: "
                             + change.id());
                 }
                 if (!isVerified(conn, change) && change.statements().size() != 1) {
-                    throw new IllegalArgumentException("unapplied MariaDB schema change must contain exactly one "
+                    throw new IllegalArgumentException("unapplied " + dialect.id()
+                            + " schema change must contain exactly one "
                             + "statement so implicit DDL commits are recoverable: " + change.id());
                 }
             }
