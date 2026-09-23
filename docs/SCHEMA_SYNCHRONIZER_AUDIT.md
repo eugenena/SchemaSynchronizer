@@ -44,7 +44,9 @@ PostgreSQL 16 verification suite passes.
 ## Deliberate boundaries
 
 - This release supports PostgreSQL, MariaDB, and MySQL through separately detected
-  and integration-tested dialects.
+  and integration-tested dialects. The MySQL contract is additionally certified
+  against Percona Server 8.4 and TiDB 8.5 LTS using pinned container images and the
+  same create/serialize/replay/widen/index/destructive-plan integration test.
 - Definitions are trusted, version-controlled application artifacts. The SQL policy
   is defense in depth, not a sandbox for hostile SQL. A `SELECT` can call a volatile
   user-defined function, so change authors must keep verification functions
