@@ -12,7 +12,7 @@
 
   <artifactId>schema-synchronizer</artifactId>
   <name>schema-synchronizer</name>
-  <description>Safe schema synchronization with PostgreSQL support and Spring Boot integration</description>
+  <description>Safe relational schema synchronization with PostgreSQL, MariaDB, MySQL, and Spring Boot support</description>
 
   <dependencies>
     <dependency>
