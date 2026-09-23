@@ -13,6 +13,7 @@ import org.postgresql.ds.PGSimpleDataSource;
 import javax.sql.DataSource;
 import java.nio.file.Path;
 import java.sql.Connection;
+import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -85,9 +86,9 @@ class SchemaSynchronizerPostgresIntegrationTest {
         createSchema(dataSource, targetSchema);
         try (Connection connection = dataSource.getConnection(); var statement = connection.createStatement()) {
             statement.execute("CREATE TABLE " + sourceSchema
-                    + ".accounts (id BIGINT PRIMARY KEY, email VARCHAR(320) NOT NULL)");
-            statement.execute("CREATE UNIQUE INDEX idx_accounts_email ON "
-                    + sourceSchema + ".accounts (email)");
+                    + ".accounts (id BIGINT PRIMARY KEY, email VARCHAR(320) NOT NULL UNIQUE, display_name TEXT)");
+            statement.execute("CREATE INDEX idx_accounts_display_name ON "
+                    + sourceSchema + ".accounts (display_name)");
         }
 
         Path definitionPath = tempDirectory.resolve("schema-definition.json");
@@ -101,13 +102,42 @@ class SchemaSynchronizerPostgresIntegrationTest {
         SchemaDefinition definition = new ObjectMapper().readValue(definitionPath.toFile(), SchemaDefinition.class);
 
         assertThat(definition.tables().get("accounts").indexes())
-                .containsExactly("CREATE UNIQUE INDEX IF NOT EXISTS idx_accounts_email ON accounts (email)");
+                .containsExactly(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS accounts_email_key ON accounts (email)",
+                        "CREATE INDEX IF NOT EXISTS idx_accounts_display_name ON accounts (display_name)");
         try (Connection connection = dataSource.getConnection()) {
             SchemaSynchronizationResult result = synchronizer(dataSource, targetSchema, false)
                     .synchronizeWithResult(connection, definition);
             assertThat(result.pendingSql()).isEmpty();
             assertThat(tableExists(connection, targetSchema, "accounts")).isTrue();
+            statement(connection, "INSERT INTO " + targetSchema + ".accounts (id, email) VALUES (1, 'a@example.com')");
+            assertThatThrownBy(() -> statement(connection, "INSERT INTO " + targetSchema
+                    + ".accounts (id, email) VALUES (2, 'a@example.com')"))
+                    .isInstanceOf(SQLException.class);
         }
+    }
+
+    @Test
+    void serializerFailsClosedForPostgresExcludeConstraint() throws Exception {
+        DataSource dataSource = dataSource();
+        String sourceSchema = uniqueSchema("serialize_exclude");
+        createSchema(dataSource, sourceSchema);
+        try (Connection connection = dataSource.getConnection(); var statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE " + sourceSchema
+                    + ".reservations (slot int4range, EXCLUDE USING gist (slot WITH &&))");
+        }
+
+        Path definitionPath = tempDirectory.resolve("exclude-schema-definition.json");
+        assertThatThrownBy(() -> SchemaSnapshotWriter.main(new String[]{
+                System.getProperty("schema.test.jdbc.url"),
+                System.getProperty("schema.test.jdbc.user", ""),
+                System.getProperty("schema.test.jdbc.password", ""),
+                sourceSchema,
+                definitionPath.toString()
+        }))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("EXCLUDE constraint")
+                .hasMessageContaining("ordered change set");
     }
 
     @Test
@@ -489,6 +519,12 @@ class SchemaSynchronizerPostgresIntegrationTest {
         try (var statement = connection.createStatement(); var rows = statement.executeQuery(sql)) {
             rows.next();
             return rows.getLong(1);
+        }
+    }
+
+    private void statement(Connection connection, String sql) throws SQLException {
+        try (var statement = connection.createStatement()) {
+            statement.execute(sql);
         }
     }
 

@@ -12,7 +12,9 @@
   `version` commands, bundled JDBC drivers, stable exit statuses, and Maven Central
   checksum publication.
 - Made PostgreSQL serializer output portable between source and target schemas by
-  removing source-schema qualification and excluding constraint-owned indexes.
+  removing source-schema qualification, omitting primary-key indexes recreated by
+  table DDL, preserving `UNIQUE` enforcement as unique indexes, and failing closed
+  for unsupported `EXCLUDE` constraints.
 
 ## 1.0.0 — 2026-09-23
 
