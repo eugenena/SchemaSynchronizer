@@ -1,5 +1,18 @@
 # Greptile lessons
 
+## 2026-09-23 — PR #11 — classify constraint-backed indexes by semantics
+
+- **Bug:** PostgreSQL serialization excluded every constraint-owned index even though
+  table DDL only recreated primary keys, silently losing `UNIQUE` and `EXCLUDE`
+  enforcement on a newly synchronized target.
+- **Missed because:** Constraint-backed indexes were treated as one category instead
+  of tracing which constraint types were recreated elsewhere and which semantics an
+  ordinary index can preserve.
+- **Prevention:** Classify PostgreSQL backing indexes by `pg_constraint.contype`:
+  omit only primary keys, preserve unique constraints as unique indexes, and fail
+  closed with an actionable message for exclusion constraints that need an explicit
+  ordered change set. Cross-schema replay tests must verify enforcement, not just DDL.
+
 ## 2026-09-23 — PR #10 — document observed normalization behavior
 
 - **Miss:** The schema reference repeated the intended lower-case-only boundary as
