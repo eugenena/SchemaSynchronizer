@@ -407,6 +407,13 @@ Each item in `statements` must contain exactly one JDBC statement. Definitions a
 trusted application artifacts, not untrusted user input: the SQL policy prevents
 accidental destructive DDL, but it is not a SQL sandbox.
 
+Because MariaDB DDL may commit implicitly, every unapplied MariaDB change set must
+provide `verificationSql`. If verification is false, the change set must contain
+exactly one statement. This lets a retry distinguish “the statement committed but
+the history insert failed” from “the statement still needs to run,” without
+replaying the first half of a multi-statement operation. Use multiple ordered change
+sets when a MariaDB operation requires several statements.
+
 ## Safety model
 
 Automatically applied operations include:

@@ -79,7 +79,7 @@ public class SchemaSnapshotWriter {
         String schema = SqlIdentifiers.requireIdentifier(args[3], "schema");
         Path outputPath = Paths.get(args[4]);
 
-        log.info("[SchemaSnapshotWriter] Connecting to {}", url);
+        log.info("[SchemaSnapshotWriter] Connecting to source database");
         try (Connection conn = DriverManager.getConnection(url, user, password)) {
             DatabaseDialect dialect = DatabaseDialect.detect(conn.getMetaData());
             log.info("[SchemaSnapshotWriter] Detected {} {}", dialect.id(),
@@ -237,11 +237,12 @@ public class SchemaSnapshotWriter {
         return indexes;
     }
 
-    private static List<String> readMariaDbIndexes(Connection conn, String tableName)
+    static List<String> readMariaDbIndexes(Connection conn, String tableName)
             throws SQLException {
         record IndexParts(boolean unique, SortedMap<Short, String> columns) {}
         Map<String, IndexParts> byName = new TreeMap<>();
-        try (var statement = conn.prepareStatement("SELECT index_name, non_unique, seq_in_index, column_name "
+        try (var statement = conn.prepareStatement("SELECT index_name, non_unique, seq_in_index, column_name, "
+                + "sub_part, collation "
                 + "FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = ? "
                 + "ORDER BY index_name, seq_in_index")) {
             statement.setString(1, tableName);
@@ -249,14 +250,27 @@ public class SchemaSnapshotWriter {
             while (rows.next()) {
                 String name = rows.getString("index_name");
                 String column = rows.getString("column_name");
-                if (name == null || column == null || "PRIMARY".equalsIgnoreCase(name)) {
+                if (name == null || "PRIMARY".equalsIgnoreCase(name)) {
                     continue;
                 }
+                if (column == null) {
+                    throw new SQLException("MariaDB expression index cannot be serialized safely: " + name);
+                }
+                name = SqlIdentifiers.requireIdentifier(name.toLowerCase(Locale.ROOT), "index");
+                column = SqlIdentifiers.requireIdentifier(column.toLowerCase(Locale.ROOT), "index column");
                 boolean unique = !rows.getBoolean("non_unique");
                 short position = rows.getShort("seq_in_index");
+                int prefixLength = rows.getInt("sub_part");
+                boolean hasPrefix = !rows.wasNull();
+                String direction = rows.getString("collation");
+                String columnSql = column + (hasPrefix ? "(" + prefixLength + ")" : "")
+                        + ("D".equalsIgnoreCase(direction) ? " DESC" : "");
                 IndexParts parts = byName.computeIfAbsent(name,
                         ignored -> new IndexParts(unique, new TreeMap<>()));
-                parts.columns().put(position, column.toLowerCase(Locale.ROOT));
+                if (parts.unique() != unique) {
+                    throw new SQLException("MariaDB returned inconsistent uniqueness for index: " + name);
+                }
+                parts.columns().put(position, columnSql);
             }
             }
         }

@@ -153,6 +153,21 @@ class SchemaSynchronizerTest {
     }
 
     @Test
+    void mariaDbNeverExecutesSafeFragmentsWhenTheSameColumnHasPendingNarrowing() {
+        NonDestructiveAlterPlanner.Plan mixed = new NonDestructiveAlterPlanner.Plan(
+                List.of("ALTER TABLE items ALTER COLUMN label SET DEFAULT 'x'"),
+                List.of("ALTER TABLE items ALTER COLUMN label TYPE VARCHAR(10)"));
+
+        NonDestructiveAlterPlanner.Plan result = SchemaSynchronizer.mariaDbColumnPlan(
+                "items", "label", "VARCHAR(10) DEFAULT 'x'", mixed);
+
+        assertThat(result.applySql()).isEmpty();
+        assertThat(result.pendingSql()).containsExactly(
+                "ALTER TABLE items MODIFY COLUMN label VARCHAR(10) DEFAULT 'x'; "
+                        + "-- pending: unsafe type/nullability change");
+    }
+
+    @Test
     void ignoresOnlyMigrationAndOwnHistorySchemaNoise() {
         assertThat(SchemaSynchronizer.isIgnorableSchemaTable("flyway_schema_history")).isTrue();
         assertThat(SchemaSynchronizer.isIgnorableSchemaTable("schema_synchronizer_history")).isTrue();

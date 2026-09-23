@@ -82,7 +82,7 @@ public class SchemaSynchronizer {
                 schema, historyTable, 7_249_031_147L, false, true, true);
         SchemaSynchronizer synchronizer = new SchemaSynchronizer(mapper, null, "", options);
 
-        log.info("[SchemaSynchronizer] Connecting to {}", args[0]);
+        log.info("[SchemaSynchronizer] Connecting to target database");
         try (Connection connection = DriverManager.getConnection(args[0], args[1], password)) {
             SchemaSynchronizationResult result = synchronizer.synchronizeWithResult(connection, definition);
             log.info("[SchemaSynchronizer] Complete: {} table(s) created, {} column(s) added, "
@@ -190,7 +190,7 @@ public class SchemaSynchronizer {
                     changesForPhase(allChanges, SchemaDefinition.ChangeSet.Phase.BEFORE_SCHEMA), options,
                     targetDialect);
             plannedSql.get().addAll(beforeChanges.plannedSql());
-            DeclarativeResult declarative = applyDeclarativeSchema(conn, def, targetDialect);
+            DeclarativeResult declarative = applyDeclarativeSchema(conn, def, targetDialect, true);
             ChangeSetExecutor.Result afterChanges = executor.apply(conn,
                     changesForPhase(allChanges, SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA), options,
                     targetDialect);
@@ -263,10 +263,15 @@ public class SchemaSynchronizer {
                 throw new IllegalStateException("Could not acquire MariaDB schema synchronization lock");
             }
             executor.validateHistory(conn, allChanges, options, dialect);
+            DeclarativeResult preflight = applyDeclarativeSchema(conn, def, dialect, false);
+            if (options.failOnPending() && !preflight.pendingSql().isEmpty()) {
+                throw new IllegalStateException("unsafe or destructive schema differences require manual resolution: "
+                        + String.join(" | ", preflight.pendingSql()));
+            }
             ChangeSetExecutor.Result before = executor.apply(conn,
                     changesForPhase(allChanges, SchemaDefinition.ChangeSet.Phase.BEFORE_SCHEMA), options, dialect);
             plannedSql.get().addAll(before.plannedSql());
-            DeclarativeResult declarative = applyDeclarativeSchema(conn, def, dialect);
+            DeclarativeResult declarative = applyDeclarativeSchema(conn, def, dialect, true);
             ChangeSetExecutor.Result after = executor.apply(conn,
                     changesForPhase(allChanges, SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA), options, dialect);
             plannedSql.get().addAll(after.plannedSql());
@@ -320,7 +325,7 @@ public class SchemaSynchronizer {
     }
 
     private DeclarativeResult applyDeclarativeSchema(Connection conn, SchemaDefinition def,
-                                                     DatabaseDialect dialect) throws Exception {
+                                                     DatabaseDialect dialect, boolean applyChanges) throws Exception {
         if (def.tables() == null || def.tables().isEmpty()) {
             return new DeclarativeResult(0, 0, 0, List.of());
         }
@@ -344,10 +349,14 @@ public class SchemaSynchronizer {
             if (!existingTables.contains(tableName)) {
                 if (tableDef.createSql() != null) {
                     NonDestructiveSqlPolicy.requireCreateTable(tableDef.createSql());
-                    execute(conn, tableDef.createSql());
-                    log.info("[SchemaSynchronizer] Created table: {}", tableName);
-                    tablesCreated++;
-                    existingTables.add(tableName);
+                    if (applyChanges) {
+                        execute(conn, tableDef.createSql());
+                        log.info("[SchemaSynchronizer] Created table: {}", tableName);
+                        tablesCreated++;
+                        existingTables.add(tableName);
+                    } else {
+                        continue;
+                    }
                 } else {
                     log.warn("[SchemaSynchronizer] Table '{}' missing but no createSql provided — skipping", tableName);
                     pendingSql.add("CREATE TABLE " + tableName
@@ -371,9 +380,11 @@ public class SchemaSynchronizer {
                                     "ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s %s",
                                     tableName, col.name(), col.definition()
                             );
-                            execute(conn, sql);
-                            log.info("[SchemaSynchronizer] Added column {}.{}", tableName, col.name());
-                            columnsAdded++;
+                            if (applyChanges) {
+                                execute(conn, sql);
+                                log.info("[SchemaSynchronizer] Added column {}.{}", tableName, col.name());
+                                columnsAdded++;
+                            }
                         } else {
                             pendingSql.add("ALTER TABLE " + tableName + " ADD COLUMN " + colName
                                     + " ...; -- pending: column definition is absent");
@@ -388,23 +399,18 @@ public class SchemaSynchronizer {
                         ColumnSpec target = ColumnDefinitionParser.parse(col.definition());
                         NonDestructiveAlterPlanner.Plan plan =
                                 NonDestructiveAlterPlanner.plan(tableName, col.name(), target, liveColumns.get(colName));
-                        if (dialect == DatabaseDialect.MARIADB && !plan.applySql().isEmpty()) {
-                            plan = new NonDestructiveAlterPlanner.Plan(
-                                    List.of("ALTER TABLE " + tableName + " MODIFY COLUMN " + col.name()
-                                            + " " + col.definition()), plan.pendingSql());
-                        }
-                        if (dialect == DatabaseDialect.MARIADB && !plan.pendingSql().isEmpty()) {
-                            plan = new NonDestructiveAlterPlanner.Plan(plan.applySql(), List.of(
-                                    "ALTER TABLE " + tableName + " MODIFY COLUMN " + col.name()
-                                            + " " + col.definition() + "; -- pending: unsafe type/nullability change"));
+                        if (dialect == DatabaseDialect.MARIADB) {
+                            plan = mariaDbColumnPlan(tableName, col.name(), col.definition(), plan);
                         }
                         for (String sql : plan.applySql()) {
                             if (sql.endsWith(" DROP NOT NULL") && livePrimaryKeyColumns.contains(colName)) {
                                 deferredNullabilitySql.add(terminated(sql));
                             } else {
-                                execute(conn, sql);
-                                log.info("[SchemaSynchronizer] Altered {}.{}: {}", tableName, col.name(), sql);
-                                columnsAltered++;
+                                if (applyChanges) {
+                                    execute(conn, sql);
+                                    log.info("[SchemaSynchronizer] Altered {}.{}: {}", tableName, col.name(), sql);
+                                    columnsAltered++;
+                                }
                             }
                         }
                         pendingSql.addAll(plan.pendingSql());
@@ -425,9 +431,10 @@ public class SchemaSynchronizer {
 
             reconcilePrimaryKey(meta, tableName, tableDef, pendingSql, dialect);
             pendingSql.addAll(deferredNullabilitySql);
-            reconcileIndexes(conn, meta, tableName, tableDef, pendingSql, dialect);
+            reconcileIndexes(conn, meta, tableName, tableDef, pendingSql, dialect, applyChanges);
 
-            if (dialect == DatabaseDialect.POSTGRESQL && PkIdentity.createSqlWantsIdIdentity(tableDef.createSql())) {
+            if (applyChanges && dialect == DatabaseDialect.POSTGRESQL
+                    && PkIdentity.createSqlWantsIdIdentity(tableDef.createSql())) {
                 repairIdIdentity(conn, tableName);
             }
         }
@@ -468,6 +475,20 @@ public class SchemaSynchronizer {
 
     private record DeclarativeResult(int tablesCreated, int columnsAdded, int columnsAltered,
                                      List<String> pendingSql) {}
+
+    static NonDestructiveAlterPlanner.Plan mariaDbColumnPlan(
+            String tableName, String columnName, String definition, NonDestructiveAlterPlanner.Plan plan) {
+        if (!plan.pendingSql().isEmpty()) {
+            return new NonDestructiveAlterPlanner.Plan(List.of(), List.of(
+                    "ALTER TABLE " + tableName + " MODIFY COLUMN " + columnName
+                            + " " + definition + "; -- pending: unsafe type/nullability change"));
+        }
+        if (!plan.applySql().isEmpty()) {
+            return new NonDestructiveAlterPlanner.Plan(List.of(
+                    "ALTER TABLE " + tableName + " MODIFY COLUMN " + columnName + " " + definition), List.of());
+        }
+        return plan;
+    }
 
     /** Identity / serial columns must not get DROP DEFAULT from nextval noise. */
     public static boolean shouldSkipAlter(String definition, LiveColumn live) {
@@ -561,28 +582,13 @@ public class SchemaSynchronizer {
 
     private void reconcileIndexes(Connection conn, DatabaseMetaData meta, String tableName,
                                   SchemaDefinition.TableDef tableDef, List<String> pendingSql,
-                                  DatabaseDialect dialect) throws SQLException {
+                                  DatabaseDialect dialect, boolean applyChanges) throws SQLException {
         Map<String, String> live = new HashMap<>();
         if (dialect == DatabaseDialect.MARIADB) {
-            try (var statement = conn.prepareStatement("SELECT index_name, non_unique, seq_in_index, column_name "
-                    + "FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = ? "
-                    + "ORDER BY index_name, seq_in_index")) {
-                statement.setString(1, tableName);
-                try (ResultSet rows = statement.executeQuery()) {
-                Map<String, TreeMap<Short, String>> columns = new HashMap<>();
-                Map<String, Boolean> unique = new HashMap<>();
-                while (rows.next()) {
-                    String name = rows.getString("index_name");
-                    String column = rows.getString("column_name");
-                    if (name == null || column == null || "PRIMARY".equalsIgnoreCase(name)) continue;
-                    name = SqlIdentifiers.requireIdentifier(name.toLowerCase(Locale.ROOT), "live index");
-                    columns.computeIfAbsent(name, ignored -> new TreeMap<>())
-                            .put(rows.getShort("seq_in_index"), column.toLowerCase(Locale.ROOT));
-                    unique.put(name, !rows.getBoolean("non_unique"));
-                }
-                columns.forEach((name, cols) -> live.put(name, "CREATE "
-                        + (unique.get(name) ? "UNIQUE " : "") + "INDEX " + name + " ON " + tableName
-                        + " (" + String.join(", ", cols.values()) + ")"));
+            for (String sql : SchemaSnapshotWriter.readMariaDbIndexes(conn, tableName)) {
+                IndexDefinition index = IndexDefinition.parse(sql);
+                if (live.put(index.name(), sql) != null) {
+                    throw new IllegalStateException("duplicate live index name: " + index.name());
                 }
             }
         } else {
@@ -614,7 +620,9 @@ public class SchemaSynchronizer {
                 expected.add(target.name());
                 String liveSql = live.get(target.name());
                 if (liveSql == null) {
-                    execute(conn, sql);
+                    if (applyChanges) {
+                        execute(conn, sql);
+                    }
                 } else if (!target.hasSameStructure(IndexDefinition.parse(liveSql))) {
                     addIndexReplacement(pendingSql, target, IndexDefinition.parse(liveSql), sql,
                             tableName, dialect);
