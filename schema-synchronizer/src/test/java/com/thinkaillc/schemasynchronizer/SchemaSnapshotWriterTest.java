@@ -17,13 +17,25 @@ import static org.mockito.Mockito.when;
 class SchemaSnapshotWriterTest {
 
     @Test
+    void mysqlIndexesOmitUnsupportedIfNotExists() throws Exception {
+        ResultSet row = indexRow("idx_items_label", "label");
+        when(row.wasNull()).thenReturn(true);
+        when(row.getString("collation")).thenReturn("A");
+
+        assertThat(SchemaSnapshotWriter.readMySqlFamilyIndexes(
+                connection(row), "items", DatabaseDialect.MYSQL))
+                .containsExactly("CREATE INDEX idx_items_label ON items (label)");
+    }
+
+    @Test
     void preservesMariaDbIndexPrefixAndDirection() throws Exception {
         ResultSet row = indexRow("idx_items_name", "name");
         when(row.getInt("sub_part")).thenReturn(12);
         when(row.wasNull()).thenReturn(false);
         when(row.getString("collation")).thenReturn("D");
 
-        assertThat(SchemaSnapshotWriter.readMariaDbIndexes(connection(row), "items"))
+        assertThat(SchemaSnapshotWriter.readMySqlFamilyIndexes(
+                connection(row), "items", DatabaseDialect.MARIADB))
                 .containsExactly("CREATE INDEX IF NOT EXISTS idx_items_name ON items (name(12) DESC)");
     }
 
@@ -31,7 +43,8 @@ class SchemaSnapshotWriterTest {
     void rejectsMariaDbExpressionIndexInsteadOfDiscardingIt() throws Exception {
         ResultSet row = indexRow("idx_items_expression", null);
 
-        assertThatThrownBy(() -> SchemaSnapshotWriter.readMariaDbIndexes(connection(row), "items"))
+        assertThatThrownBy(() -> SchemaSnapshotWriter.readMySqlFamilyIndexes(
+                connection(row), "items", DatabaseDialect.MARIADB))
                 .hasMessageContaining("expression index cannot be serialized safely");
     }
 
