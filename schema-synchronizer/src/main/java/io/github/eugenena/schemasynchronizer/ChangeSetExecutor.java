@@ -117,13 +117,10 @@ final class ChangeSetExecutor {
     void validateHistory(Connection conn, List<SchemaDefinition.ChangeSet> changes, SchemaSynchronizerOptions options,
                          DatabaseDialect dialect)
             throws Exception {
-        if (!historyExists(conn, options, dialect)) {
-            return;
-        }
         String history = dialect == DatabaseDialect.POSTGRESQL
                 ? SqlIdentifiers.qualified(options.schema(), options.historyTable())
                 : SqlIdentifiers.requireIdentifier(options.historyTable(), "history table");
-        Map<String, String> applied = readHistory(conn, history);
+        Map<String, String> applied = historyExists(conn, options, dialect) ? readHistory(conn, history) : Map.of();
         Map<String, String> expected = new HashMap<>();
         for (SchemaDefinition.ChangeSet change : changes) {
             expected.put(change.id(), checksum(change));
@@ -137,6 +134,21 @@ final class ChangeSetExecutor {
             if (!expectedChecksum.equals(entry.getValue())) {
                 throw new IllegalStateException("checksum mismatch for applied schema change '"
                         + entry.getKey() + "': committed changes are immutable");
+            }
+        }
+        if (dialect == DatabaseDialect.MARIADB) {
+            for (SchemaDefinition.ChangeSet change : changes) {
+                if (applied.containsKey(change.id())) {
+                    continue;
+                }
+                if (change.verificationSql() == null || change.verificationSql().isBlank()) {
+                    throw new IllegalArgumentException("unapplied MariaDB schema change requires verificationSql: "
+                            + change.id());
+                }
+                if (!isVerified(conn, change) && change.statements().size() != 1) {
+                    throw new IllegalArgumentException("unapplied MariaDB schema change must contain exactly one "
+                            + "statement so implicit DDL commits are recoverable: " + change.id());
+                }
             }
         }
     }
