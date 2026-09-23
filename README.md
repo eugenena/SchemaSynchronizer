@@ -50,8 +50,15 @@ The default is fail-closed: a missing definition, checksum drift, failed verific
 or pending destructive schema difference aborts startup.
 
 Current portability boundary: PostgreSQL 16+ with unquoted, lower-case identifiers.
-Other relational databases and quoted/mixed-case identifiers are rejected rather than
-handled approximately.
+MariaDB snapshot serialization is available as the first step toward MariaDB
+synchronization; MariaDB target execution remains fail-closed until its DDL, locking,
+and non-transactional recovery semantics are implemented. Quoted/mixed-case identifiers
+are rejected rather than handled approximately.
+
+Schema definitions declare both `formatVersion` and `dialect`. A definition can only be
+applied to the same database family that produced it; SchemaSynchronizer is not a
+cross-database migration or SQL-translation tool. Legacy definitions without those
+fields are interpreted as PostgreSQL format version 1.
 
 ## Install locally
 
