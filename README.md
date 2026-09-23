@@ -1,16 +1,18 @@
-# thinkai-shared
+# SchemaSynchronizer
 
-Reusable infrastructure libraries for Spring applications backed by PostgreSQL.
+Safe schema convergence for relational databases. PostgreSQL 16+ is the first and
+currently implemented dialect; the public API and project identity are intentionally
+database-neutral so additional dialects can be added without another rebrand.
 
 ## Modules
 
 | Module | Artifact | Purpose |
 |--------|----------|---------|
-| **schema-applier** | `com.thinkai:schema-applier` | Apply non-destructive schema diffs from `schema-definition.json` on startup |
+| **schema-synchronizer** | `io.github.eugenena:schema-synchronizer` | Apply non-destructive schema diffs from `schema-definition.json` on startup |
 
-## schema-applier contract
+## schema-synchronizer contract
 
-SchemaApplier has two complementary layers:
+SchemaSynchronizer has two complementary layers:
 
 1. `tables` is a serialized target-state snapshot. It converges tables, columns,
    defaults, safe type widenings, nullability relaxations, and indexes.
@@ -21,7 +23,7 @@ SchemaApplier has two complementary layers:
    from the declarative snapshot.
 
 Every invocation is transactional and guarded by a PostgreSQL advisory lock. Applied
-change IDs and SHA-256 checksums are stored in `thinkai_schema_history`. Editing an
+change IDs and SHA-256 checksums are stored in `schema_synchronizer_history`. Editing an
 applied change fails startup. A change may include a read-only `verificationSql` query;
 this both verifies a fresh application and safely adopts an already-existing Flyway
 change only when PostgreSQL proves the expected object is present.
@@ -38,28 +40,36 @@ widenings, `NOT NULL` → nullable, and safety-checked ordered change sets.
 arbitrary type changes, type narrowing, and inferred `NULL` → `NOT NULL`. A versioned
 change set may set `NOT NULL` after an explicit backfill. Unknown SQL is rejected.
 
-SchemaApplier never executes destructive or unsafe reconciliation. It returns the
-ordered statements in `SchemaApplyResult.pendingSql()` and prints a copyable manual
+SchemaSynchronizer never executes destructive or unsafe reconciliation. It returns the
+ordered statements in `SchemaSynchronizationResult.pendingSql()` and prints a copyable manual
 transaction (`BEGIN`, schema-scoped `search_path`, statements, `COMMIT`) for an operator
-to review and run separately. Set `thinkai.schema.fail-on-pending=false` only when the
+to review and run separately. Set `schema-synchronizer.fail-on-pending=false` only when the
 application may start while that manual work remains outstanding.
 
 The default is fail-closed: a missing definition, checksum drift, failed verification,
 or pending destructive schema difference aborts startup.
 
-Current portability boundary: PostgreSQL 16+ with unquoted, lower-case identifiers.
-Other relational databases and quoted/mixed-case identifiers are rejected rather than
-handled approximately.
+Current support: PostgreSQL 16+ and MariaDB 10.3+ with unquoted identifiers. MariaDB
+uses a connection-scoped named lock and idempotent operations because its DDL may
+implicitly commit; pending manual DDL is therefore printed as individually reviewed
+statements rather than represented as an atomic transaction. Quoted identifiers are
+rejected rather than handled approximately. MySQL is detected but remains fail-closed
+until its independent compatibility suite is implemented.
+
+Schema definitions declare both `formatVersion` and `dialect`. A definition can only be
+applied to the same database family that produced it; SchemaSynchronizer is not a
+cross-database migration or SQL-translation tool. Legacy definitions without those
+fields are interpreted as PostgreSQL format version 1.
 
 ## Install locally
 
 ```bash
-cd thinkai-shared
+cd SchemaSynchronizer
 mvn clean install
 ```
 
 CI publishes tagged builds and manually dispatched builds to GitHub Packages at
-`https://maven.pkg.github.com/eugenena/thinkai-shared`. Consumers outside the local
+`https://maven.pkg.github.com/eugenena/SchemaSynchronizer`. Consumers outside the local
 machine must configure that repository and a GitHub Packages credential in Maven
 settings, then pin the published version rather than relying on a mutable local JAR.
 
@@ -67,24 +77,24 @@ Consuming application:
 
 ```xml
 <dependency>
-  <groupId>com.thinkai</groupId>
-  <artifactId>schema-applier</artifactId>
+  <groupId>io.github.eugenena</groupId>
+  <artifactId>schema-synchronizer</artifactId>
   <version>0.2.0-SNAPSHOT</version>
 </dependency>
 ```
 
-Spring Boot auto-configuration runs SchemaApplier after the DataSource exists and
+Spring Boot auto-configuration runs SchemaSynchronizer after the DataSource exists and
 registers it as a database initializer so JPA validation waits for it. Configuration:
 
 ```properties
-thinkai.schema.enabled=true
-thinkai.schema.resource=/schema-definition.json
-thinkai.schema.schema=public
-thinkai.schema.history-table=thinkai_schema_history
-thinkai.schema.advisory-lock-id=7249031147
-thinkai.schema.dry-run=false
-thinkai.schema.fail-on-pending=true
-thinkai.schema.require-definition=true
+schema-synchronizer.enabled=true
+schema-synchronizer.resource=/schema-definition.json
+schema-synchronizer.schema=public
+schema-synchronizer.history-table=schema_synchronizer_history
+schema-synchronizer.advisory-lock-id=7249031147
+schema-synchronizer.dry-run=false
+schema-synchronizer.fail-on-pending=true
+schema-synchronizer.require-definition=true
 spring.jpa.hibernate.ddl-auto=validate
 ```
 
@@ -118,16 +128,31 @@ Example definition (statements are intentionally one JDBC statement per entry):
 }
 ```
 
-Generate or refresh the declarative snapshot after changing a local PostgreSQL schema:
+### Standalone utilities
+
+Serialize a source database to a schema definition:
 
 ```bash
-SCHEMA_DB_PASSWORD='local-password' mvn -pl schema-applier exec:java \
-  -Dexec.mainClass=com.thinkai.schema.SchemaSerializer \
+SCHEMA_DB_PASSWORD='local-password' mvn -pl schema-synchronizer exec:java \
+  -Dexec.mainClass=io.github.eugenena.schemasynchronizer.SchemaSerializer \
   -Dexec.args="jdbc:postgresql://localhost:5432/app user - public src/main/resources/schema-definition.json"
 ```
 
-The serializer preserves the hand-authored `changes` array. It does not attempt to
+The snapshot writer preserves the hand-authored `changes` array. It does not attempt to
 invent backfills or reconstruct the intent of constraints, functions, and triggers.
+
+Synchronize a target database from the serialized definition:
+
+```bash
+SCHEMA_DB_PASSWORD='target-password' mvn -pl schema-synchronizer exec:java \
+  -Dexec.mainClass=io.github.eugenena.schemasynchronizer.SchemaSynchronizer \
+  -Dexec.args="jdbc:postgresql://localhost:5432/target target_user - schema-definition.json public schema_synchronizer_history"
+```
+
+Both utilities accept the password directly in the third argument, but `-` plus
+`SCHEMA_DB_PASSWORD` is recommended so credentials do not appear in the process list or
+shell history. The synchronizer fails closed if the definition is missing, verification
+fails, or destructive/unsafe differences require manual execution.
 
 ### Flyway cutover
 
