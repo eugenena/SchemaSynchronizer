@@ -256,9 +256,12 @@ SchemaSerializer <jdbc-url> <user> <password-or--> <schema> <output-path>
 | `output-path` | Definition file to create or update |
 
 The serializer captures tables, columns, primary keys, defaults, nullability, and
-indexes. It does not invent changes for backfills, foreign keys, check constraints,
-functions, triggers, extensions, comments, or grants. Express those explicitly in
-the `changes` array.
+indexes. PostgreSQL `UNIQUE` constraints are emitted as equivalent unique indexes,
+preserving enforcement on the target. PostgreSQL `EXCLUDE` constraints cannot be
+represented as ordinary indexes, so serialization stops with an actionable error
+instead of silently weakening the target schema; express them in the `changes` array.
+The serializer does not invent changes for backfills, foreign keys, check constraints,
+functions, triggers, extensions, comments, or grants.
 
 ### SchemaSynchronizer
 
