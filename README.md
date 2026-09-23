@@ -20,9 +20,10 @@ Use it as:
 |---|---|---|
 | PostgreSQL 16+ | Available | Transactional DDL and advisory locking |
 | MariaDB 10.3+ | Available | Named locking; DDL may commit implicitly |
+| MySQL 8.0+ | Available | Separate dialect; named locking and implicit DDL commits |
 | MySQL | Planned | Detected today, but fails closed until its compatibility suite is complete |
 
-PostgreSQL and MariaDB are the first dialect implementations, not a closed list.
+PostgreSQL, MariaDB, and MySQL are the first dialect implementations, not a closed list.
 SchemaSynchronizer is designed to add more relational database dialects, each with
 its own metadata, SQL-generation, locking, safety, and compatibility behavior.
 
@@ -97,7 +98,7 @@ cd SchemaSynchronizer
 mvn clean install
 ```
 
-This installs `com.thinkaillc:schema-synchronizer:0.2.0-SNAPSHOT` in your
+This installs `com.thinkaillc:schema-synchronizer:1.0.0` in your
 local Maven repository.
 
 ### 2. Serialize a source database
@@ -124,6 +125,10 @@ mvn -pl schema-synchronizer exec:java \
   -Dexec.mainClass=com.thinkaillc.schemasynchronizer.SchemaSerializer \
   -Dexec.args="jdbc:mariadb://localhost:3306/source_app app_user - source_app schema-definition.json"
 ```
+
+MySQL uses the same argument shape with a `jdbc:mysql:` URL. Its serialized
+definition declares `"dialect": "mysql"`; MariaDB and MySQL definitions are not
+interchanged implicitly.
 
 Review the generated file before committing it. If the file already exists, the
 serializer preserves its hand-authored `changes` array.
@@ -155,34 +160,36 @@ the definition. The process exits with an error when manual work is required.
 
 ## Add the library to an application
 
-Until a release is available from Maven Central, run `mvn clean install` locally
-or consume a published build from GitHub Packages:
+Add the Maven Central release to an application:
 
 ```xml
 <dependency>
   <groupId>com.thinkaillc</groupId>
   <artifactId>schema-synchronizer</artifactId>
-  <version>0.2.0-SNAPSHOT</version>
+  <version>1.0.0</version>
 </dependency>
 ```
 
-For GitHub Packages, add this repository to the consuming POM:
-
-```xml
-<repositories>
-  <repository>
-    <id>github-schema-synchronizer</id>
-    <url>https://maven.pkg.github.com/eugenena/SchemaSynchronizer</url>
-  </repository>
-</repositories>
-```
-
-GitHub Packages requires a GitHub credential in Maven `settings.xml`, including
-for public packages. Applications should pin a released version instead of relying
-on a mutable snapshot.
-
-The library includes PostgreSQL and MariaDB JDBC drivers at runtime. Applications
+The library includes PostgreSQL, MariaDB, and MySQL JDBC drivers at runtime. Applications
 can override their versions through dependency management.
+
+## Release process for maintainers
+
+GitHub Actions is optional. A release can be published locally after the
+`com.thinkaillc` namespace is verified in Central Portal:
+
+1. Import the release PGP private key and publish its public key.
+2. Put the Central Portal user-token username and password under server id
+   `central` in Maven `settings.xml`.
+3. Export the signing-key passphrase as `MAVEN_GPG_PASSPHRASE`.
+4. Run `mvn --batch-mode --no-transfer-progress -Prelease clean deploy`. The
+   command validates, publishes, and waits for Central to report the deployment as
+   published.
+5. Create the signed `v1.0.0` Git tag and GitHub release from the same commit.
+
+The release profile attaches source and Javadoc archives, signs every artifact,
+and publishes a Central Portal bundle. Central releases are immutable; never reuse
+a published version number.
 
 ## CLI reference
 
@@ -200,7 +207,7 @@ SchemaSerializer <jdbc-url> <user> <password-or--> <schema> <output-path>
 | `jdbc-url` | JDBC URL for an available dialect |
 | `user` | Database username |
 | `password-or--` | Password, or `-` to read `SCHEMA_DB_PASSWORD` |
-| `schema` | Dialect-specific schema namespace (a database/catalog in MariaDB) |
+| `schema` | Dialect-specific schema namespace (a database/catalog in MariaDB and MySQL) |
 | `output-path` | Definition file to create or update |
 
 The serializer captures tables, columns, primary keys, defaults, nullability, and
@@ -266,7 +273,7 @@ SchemaSynchronizer registers as a database initializer and completes before JPA
 schema validation. Keep `ddl-auto=validate`; do not let JPA and SchemaSynchronizer
 both mutate the schema.
 
-MariaDB DDL can commit implicitly, so `dry-run` cannot provide PostgreSQL-style
+MariaDB and MySQL DDL can commit implicitly, so `dry-run` cannot provide PostgreSQL-style
 rollback guarantees. Validate new definitions against a disposable database first.
 
 ## Java API
@@ -407,12 +414,12 @@ Each item in `statements` must contain exactly one JDBC statement. Definitions a
 trusted application artifacts, not untrusted user input: the SQL policy prevents
 accidental destructive DDL, but it is not a SQL sandbox.
 
-Because MariaDB DDL may commit implicitly, every unapplied MariaDB change set must
+Because MariaDB and MySQL DDL may commit implicitly, every unapplied change set for either dialect must
 provide `verificationSql`. If verification is false, the change set must contain
 exactly one statement. This lets a retry distinguish “the statement committed but
 the history insert failed” from “the statement still needs to run,” without
 replaying the first half of a multi-statement operation. Use multiple ordered change
-sets when a MariaDB operation requires several statements.
+sets when a MariaDB or MySQL operation requires several statements.
 
 ## Safety model
 

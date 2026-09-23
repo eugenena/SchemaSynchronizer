@@ -26,6 +26,10 @@ class DatabaseDialectTest {
 
         when(metadata.getDatabaseProductName()).thenReturn("MySQL");
         assertThat(DatabaseDialect.detect(metadata)).isEqualTo(DatabaseDialect.MYSQL);
+
+        assertThat(DatabaseDialect.MARIADB.isMySqlFamily()).isTrue();
+        assertThat(DatabaseDialect.MYSQL.isMySqlFamily()).isTrue();
+        assertThat(DatabaseDialect.POSTGRESQL.isMySqlFamily()).isFalse();
     }
 
     @Test

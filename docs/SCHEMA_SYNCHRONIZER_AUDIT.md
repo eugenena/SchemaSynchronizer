@@ -43,7 +43,8 @@ PostgreSQL 16 verification suite passes.
 
 ## Deliberate boundaries
 
-- This release is PostgreSQL-only. It deliberately rejects other database products.
+- This release supports PostgreSQL, MariaDB, and MySQL through separately detected
+  and integration-tested dialects.
 - Definitions are trusted, version-controlled application artifacts. The SQL policy
   is defense in depth, not a sandbox for hostile SQL. A `SELECT` can call a volatile
   user-defined function, so change authors must keep verification functions
@@ -61,9 +62,7 @@ PostgreSQL 16 verification suite passes.
   transaction and the transaction-scoped advisory lock remains held until the caller
   commits or rolls back.
 
-## Publication blocker
+## Publication status
 
-The repository does not yet contain a `LICENSE` file. No public release should be
-described as open source until the owner selects and adds a license (for example,
-Apache-2.0 or MIT). License selection is a product/legal decision and was not guessed
-by this audit.
+Apache-2.0 licensing, Maven Central metadata, source and Javadoc artifacts, PGP
+signing, and Central Portal bundle publication are configured for the `1.0.0` release.
