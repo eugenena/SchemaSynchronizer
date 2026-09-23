@@ -10,6 +10,15 @@
   <packaging>pom</packaging>
   <name>SchemaSynchronizer</name>
   <description>Safe schema synchronization for relational databases</description>
+  <url>https://github.com/eugenena/SchemaSynchronizer</url>
+
+  <licenses>
+    <license>
+      <name>Apache License, Version 2.0</name>
+      <url>https://www.apache.org/licenses/LICENSE-2.0.txt</url>
+      <distribution>repo</distribution>
+    </license>
+  </licenses>
 
   <modules>
     <module>schema-synchronizer</module>
