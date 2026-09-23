@@ -8,7 +8,9 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.util.List;
@@ -29,13 +31,14 @@ class SchemaSynchronizerMySqlIntegrationTest {
     }
 
     @Test
-    void createsReplaysWidensIndexesAndReportsDestructiveDrift() throws Exception {
+    void createsSerializesReplaysWidensIndexesAndReportsDestructiveDrift(@TempDir Path tempDir) throws Exception {
         SchemaSynchronizer synchronizer = synchronizer();
         SchemaDefinition initial = definition(List.of(
                 new SchemaDefinition.ColumnDef("id", "BIGINT NOT NULL AUTO_INCREMENT"),
                 new SchemaDefinition.ColumnDef("label", "VARCHAR(40) NOT NULL")));
 
         try (Connection connection = connection()) {
+            assertThat(DatabaseDialect.detect(connection.getMetaData())).isEqualTo(DatabaseDialect.MYSQL);
             SchemaSynchronizationResult first = synchronizer.synchronizeWithResult(connection, initial);
             assertThat(first.tablesCreated()).isEqualTo(1);
         }
@@ -54,6 +57,21 @@ class SchemaSynchronizerMySqlIntegrationTest {
         }
         try (Connection connection = connection()) {
             assertThat(synchronizer.synchronizeWithResult(connection, additive).changed()).isFalse();
+        }
+
+        Path snapshot = tempDir.resolve("schema-definition.json");
+        SchemaSnapshotWriter.main(new String[]{
+                System.getProperty("schema.test.mysql.jdbc.url"),
+                System.getProperty("schema.test.mysql.jdbc.user"),
+                System.getProperty("schema.test.mysql.jdbc.password"),
+                catalog(),
+                snapshot.toString()
+        });
+        SchemaDefinition serialized = new ObjectMapper().readValue(snapshot.toFile(), SchemaDefinition.class);
+        assertThat(serialized.declaredDialect()).isEqualTo(DatabaseDialect.MYSQL);
+        assertThat(serialized.tables()).containsKey("mysql_items");
+
+        try (Connection connection = connection()) {
             assertThat(synchronizer.synchronizeWithResult(connection, initial).pendingSql())
                     .anyMatch(sql -> sql.contains("DROP COLUMN notes"));
         }
@@ -70,13 +88,16 @@ class SchemaSynchronizerMySqlIntegrationTest {
     }
 
     private SchemaSynchronizer synchronizer() throws Exception {
-        String catalog;
-        try (Connection connection = connection()) {
-            catalog = connection.getCatalog();
-        }
+        String catalog = catalog();
         return new SchemaSynchronizer(new ObjectMapper(), null, "",
                 new SchemaSynchronizerOptions(catalog, "schema_synchronizer_history", 7_249_031_147L,
                         false, false, true));
+    }
+
+    private String catalog() throws Exception {
+        try (Connection connection = connection()) {
+            return connection.getCatalog();
+        }
     }
 
     private Connection connection() throws Exception {
