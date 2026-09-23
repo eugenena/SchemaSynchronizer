@@ -15,7 +15,7 @@ public record SchemaSynchronizerOptions(
     }
 
     public SchemaSynchronizerOptions {
-        schema = SqlIdentifiers.requireIdentifier(schema, "schema");
+        schema = SqlIdentifiers.requireIdentifierPreservingCase(schema, "schema");
         historyTable = SqlIdentifiers.requireIdentifier(historyTable, "history table");
     }
 }

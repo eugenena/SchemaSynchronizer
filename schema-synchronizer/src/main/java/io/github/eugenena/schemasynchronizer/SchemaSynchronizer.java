@@ -72,7 +72,8 @@ public class SchemaSynchronizer {
 
         String password = readPassword(args[2]);
         Path schemaFile = Path.of(args[3]);
-        String schema = SqlIdentifiers.requireIdentifier(args.length >= 5 ? args[4] : "public", "schema");
+        String schema = SqlIdentifiers.requireIdentifierPreservingCase(
+                args.length >= 5 ? args[4] : "public", "schema");
         String historyTable = SqlIdentifiers.requireIdentifier(
                 args.length >= 6 ? args[5] : "schema_synchronizer_history", "history table");
         ObjectMapper mapper = new ObjectMapper();
@@ -163,6 +164,9 @@ public class SchemaSynchronizer {
             throw new IllegalStateException("Unsupported schema format version: " + def.effectiveFormatVersion());
         }
         requireImplementedDialect(targetDialect);
+        if (targetDialect == DatabaseDialect.MARIADB) {
+            return synchronizeMariaDb(conn, def, targetDialect);
+        }
         boolean previousAutoCommit = conn.getAutoCommit();
         boolean ownsTransaction = previousAutoCommit;
         Savepoint savepoint = null;
@@ -181,13 +185,15 @@ public class SchemaSynchronizer {
             }
             executeControl(conn, "SET LOCAL search_path TO " + options.schema());
             executeControl(conn, "SELECT pg_advisory_xact_lock(" + options.advisoryLockId() + ")");
-            executor.validateHistory(conn, allChanges, options);
+            executor.validateHistory(conn, allChanges, options, targetDialect);
             ChangeSetExecutor.Result beforeChanges = executor.apply(conn,
-                    changesForPhase(allChanges, SchemaDefinition.ChangeSet.Phase.BEFORE_SCHEMA), options);
+                    changesForPhase(allChanges, SchemaDefinition.ChangeSet.Phase.BEFORE_SCHEMA), options,
+                    targetDialect);
             plannedSql.get().addAll(beforeChanges.plannedSql());
-            DeclarativeResult declarative = applyDeclarativeSchema(conn, def);
+            DeclarativeResult declarative = applyDeclarativeSchema(conn, def, targetDialect);
             ChangeSetExecutor.Result afterChanges = executor.apply(conn,
-                    changesForPhase(allChanges, SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA), options);
+                    changesForPhase(allChanges, SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA), options,
+                    targetDialect);
             plannedSql.get().addAll(afterChanges.plannedSql());
             if (options.failOnPending() && !declarative.pendingSql().isEmpty()) {
                 throw new IllegalStateException("unsafe or destructive schema differences require manual resolution: "
@@ -229,9 +235,56 @@ public class SchemaSynchronizer {
     }
 
     private void requireImplementedDialect(DatabaseDialect dialect) {
-        if (dialect != DatabaseDialect.POSTGRESQL) {
+        if (dialect != DatabaseDialect.POSTGRESQL && dialect != DatabaseDialect.MARIADB) {
             throw new IllegalStateException("Synchronization for " + dialect.id()
                     + " is not implemented yet; serialization and target synchronization must use a supported dialect");
+        }
+    }
+
+    private SchemaSynchronizationResult synchronizeMariaDb(Connection conn, SchemaDefinition def,
+                                                            DatabaseDialect dialect) throws Exception {
+        validateDeclarativeDefinition(def);
+        ChangeSetExecutor executor = new ChangeSetExecutor();
+        List<SchemaDefinition.ChangeSet> allChanges = executor.validate(def.changes());
+        plannedSql.set(new ArrayList<>());
+        if (conn.getCatalog() != null && !conn.getCatalog().equalsIgnoreCase(options.schema())) {
+            throw new IllegalStateException("Connected MariaDB catalog '" + conn.getCatalog()
+                    + "' does not match configured schema '" + options.schema() + "'");
+        }
+        boolean locked = false;
+        try {
+            try (var statement = conn.prepareStatement("SELECT GET_LOCK(?, 30)")) {
+                statement.setString(1, "schema_synchronizer_" + options.schema());
+                try (var row = statement.executeQuery()) {
+                    locked = row.next() && row.getInt(1) == 1;
+                }
+            }
+            if (!locked) {
+                throw new IllegalStateException("Could not acquire MariaDB schema synchronization lock");
+            }
+            executor.validateHistory(conn, allChanges, options, dialect);
+            ChangeSetExecutor.Result before = executor.apply(conn,
+                    changesForPhase(allChanges, SchemaDefinition.ChangeSet.Phase.BEFORE_SCHEMA), options, dialect);
+            plannedSql.get().addAll(before.plannedSql());
+            DeclarativeResult declarative = applyDeclarativeSchema(conn, def, dialect);
+            ChangeSetExecutor.Result after = executor.apply(conn,
+                    changesForPhase(allChanges, SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA), options, dialect);
+            plannedSql.get().addAll(after.plannedSql());
+            if (options.failOnPending() && !declarative.pendingSql().isEmpty()) {
+                throw new IllegalStateException("unsafe or destructive schema differences require manual resolution: "
+                        + String.join(" | ", declarative.pendingSql()));
+            }
+            return new SchemaSynchronizationResult(before.applied() + after.applied(), declarative.tablesCreated(),
+                    declarative.columnsAdded(), declarative.columnsAltered(), List.copyOf(plannedSql.get()),
+                    declarative.pendingSql());
+        } finally {
+            plannedSql.remove();
+            if (locked) {
+                try (var statement = conn.prepareStatement("SELECT RELEASE_LOCK(?)")) {
+                    statement.setString(1, "schema_synchronizer_" + options.schema());
+                    statement.executeQuery().close();
+                }
+            }
         }
     }
 
@@ -266,13 +319,14 @@ public class SchemaSynchronizer {
         }
     }
 
-    private DeclarativeResult applyDeclarativeSchema(Connection conn, SchemaDefinition def) throws Exception {
+    private DeclarativeResult applyDeclarativeSchema(Connection conn, SchemaDefinition def,
+                                                     DatabaseDialect dialect) throws Exception {
         if (def.tables() == null || def.tables().isEmpty()) {
             return new DeclarativeResult(0, 0, 0, List.of());
         }
 
         DatabaseMetaData meta = conn.getMetaData();
-        Set<String> existingTables = getExistingTables(meta);
+        Set<String> existingTables = getExistingTables(meta, dialect);
 
         int tablesCreated = 0;
         int columnsAdded = 0;
@@ -284,7 +338,7 @@ public class SchemaSynchronizer {
             SqlIdentifiers.requireIdentifier(tableName, "table");
             SchemaDefinition.TableDef tableDef = entry.getValue();
             Set<String> livePrimaryKeyColumns = existingTables.contains(tableName)
-                    ? getLivePrimaryKeyColumns(meta, tableName) : Set.of();
+                    ? getLivePrimaryKeyColumns(meta, tableName, dialect) : Set.of();
             List<String> deferredNullabilitySql = new ArrayList<>();
 
             if (!existingTables.contains(tableName)) {
@@ -303,7 +357,7 @@ public class SchemaSynchronizer {
             }
 
             if (tableDef.columns() != null) {
-                Map<String, LiveColumn> liveColumns = getLiveColumns(meta, tableName);
+                Map<String, LiveColumn> liveColumns = getLiveColumns(meta, tableName, dialect);
                 Set<String> targetColumns = new HashSet<>();
 
                 for (SchemaDefinition.ColumnDef col : tableDef.columns()) {
@@ -334,6 +388,16 @@ public class SchemaSynchronizer {
                         ColumnSpec target = ColumnDefinitionParser.parse(col.definition());
                         NonDestructiveAlterPlanner.Plan plan =
                                 NonDestructiveAlterPlanner.plan(tableName, col.name(), target, liveColumns.get(colName));
+                        if (dialect == DatabaseDialect.MARIADB && !plan.applySql().isEmpty()) {
+                            plan = new NonDestructiveAlterPlanner.Plan(
+                                    List.of("ALTER TABLE " + tableName + " MODIFY COLUMN " + col.name()
+                                            + " " + col.definition()), plan.pendingSql());
+                        }
+                        if (dialect == DatabaseDialect.MARIADB && !plan.pendingSql().isEmpty()) {
+                            plan = new NonDestructiveAlterPlanner.Plan(plan.applySql(), List.of(
+                                    "ALTER TABLE " + tableName + " MODIFY COLUMN " + col.name()
+                                            + " " + col.definition() + "; -- pending: unsafe type/nullability change"));
+                        }
                         for (String sql : plan.applySql()) {
                             if (sql.endsWith(" DROP NOT NULL") && livePrimaryKeyColumns.contains(colName)) {
                                 deferredNullabilitySql.add(terminated(sql));
@@ -359,11 +423,11 @@ public class SchemaSynchronizer {
                 }
             }
 
-            reconcilePrimaryKey(meta, tableName, tableDef, pendingSql);
+            reconcilePrimaryKey(meta, tableName, tableDef, pendingSql, dialect);
             pendingSql.addAll(deferredNullabilitySql);
-            reconcileIndexes(conn, tableName, tableDef, pendingSql);
+            reconcileIndexes(conn, meta, tableName, tableDef, pendingSql, dialect);
 
-            if (PkIdentity.createSqlWantsIdIdentity(tableDef.createSql())) {
+            if (dialect == DatabaseDialect.POSTGRESQL && PkIdentity.createSqlWantsIdIdentity(tableDef.createSql())) {
                 repairIdIdentity(conn, tableName);
             }
         }
@@ -385,12 +449,19 @@ public class SchemaSynchronizer {
             log.warn("║  Destructive or unsafe diffs vs schema-definition.json          ║");
             log.warn("║  Run these manually if you intend them:                         ║");
             log.warn("╚══════════════════════════════════════════════════════════════════╝");
-            log.warn("    BEGIN;");
-            log.warn("    SET LOCAL search_path TO {};", options.schema());
+            if (dialect == DatabaseDialect.POSTGRESQL) {
+                log.warn("    BEGIN;");
+                log.warn("    SET LOCAL search_path TO {};", options.schema());
+            } else {
+                log.warn("    USE {};", options.schema());
+                log.warn("    -- MariaDB DDL may auto-commit; execute each reviewed statement separately.");
+            }
             for (String sql : pendingSql) {
                 log.warn("    {}", sql);
             }
-            log.warn("    COMMIT;");
+            if (dialect == DatabaseDialect.POSTGRESQL) {
+                log.warn("    COMMIT;");
+            }
         }
         return new DeclarativeResult(tablesCreated, columnsAdded, columnsAltered, List.copyOf(pendingSql));
     }
@@ -405,6 +476,7 @@ public class SchemaSynchronizer {
         }
         String upper = definition.toUpperCase(Locale.ROOT);
         if (upper.contains("BIGSERIAL") || upper.matches("(?s).*\\bSERIAL\\b.*")
+                || upper.contains("AUTO_INCREMENT")
                 || (upper.contains("GENERATED") && upper.contains("IDENTITY"))) {
             return true;
         }
@@ -487,9 +559,33 @@ public class SchemaSynchronizer {
         }
     }
 
-    private void reconcileIndexes(Connection conn, String tableName, SchemaDefinition.TableDef tableDef,
-                                  List<String> pendingSql) throws SQLException {
+    private void reconcileIndexes(Connection conn, DatabaseMetaData meta, String tableName,
+                                  SchemaDefinition.TableDef tableDef, List<String> pendingSql,
+                                  DatabaseDialect dialect) throws SQLException {
         Map<String, String> live = new HashMap<>();
+        if (dialect == DatabaseDialect.MARIADB) {
+            try (var statement = conn.prepareStatement("SELECT index_name, non_unique, seq_in_index, column_name "
+                    + "FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = ? "
+                    + "ORDER BY index_name, seq_in_index")) {
+                statement.setString(1, tableName);
+                try (ResultSet rows = statement.executeQuery()) {
+                Map<String, TreeMap<Short, String>> columns = new HashMap<>();
+                Map<String, Boolean> unique = new HashMap<>();
+                while (rows.next()) {
+                    String name = rows.getString("index_name");
+                    String column = rows.getString("column_name");
+                    if (name == null || column == null || "PRIMARY".equalsIgnoreCase(name)) continue;
+                    name = SqlIdentifiers.requireIdentifier(name.toLowerCase(Locale.ROOT), "live index");
+                    columns.computeIfAbsent(name, ignored -> new TreeMap<>())
+                            .put(rows.getShort("seq_in_index"), column.toLowerCase(Locale.ROOT));
+                    unique.put(name, !rows.getBoolean("non_unique"));
+                }
+                columns.forEach((name, cols) -> live.put(name, "CREATE "
+                        + (unique.get(name) ? "UNIQUE " : "") + "INDEX " + name + " ON " + tableName
+                        + " (" + String.join(", ", cols.values()) + ")"));
+                }
+            }
+        } else {
         try (var stmt = conn.prepareStatement(
                 "SELECT indexes.indexname, indexes.indexdef "
                         + "FROM pg_indexes indexes "
@@ -510,6 +606,7 @@ public class SchemaSynchronizer {
                 }
             }
         }
+        }
         Set<String> expected = new HashSet<>();
         if (tableDef.indexes() != null) {
             for (String sql : tableDef.indexes()) {
@@ -519,9 +616,11 @@ public class SchemaSynchronizer {
                 if (liveSql == null) {
                     execute(conn, sql);
                 } else if (!target.hasSameStructure(IndexDefinition.parse(liveSql))) {
-                    addIndexReplacement(pendingSql, target, IndexDefinition.parse(liveSql), sql);
+                    addIndexReplacement(pendingSql, target, IndexDefinition.parse(liveSql), sql,
+                            tableName, dialect);
                 } else if (!target.hasEquivalentPredicate(IndexDefinition.parse(liveSql))) {
-                    addIndexReplacement(pendingSql, target, IndexDefinition.parse(liveSql), sql);
+                    addIndexReplacement(pendingSql, target, IndexDefinition.parse(liveSql), sql,
+                            tableName, dialect);
                 } else if (!target.canonicalSql().equals(IndexDefinition.parse(liveSql).canonicalSql())) {
                     log.info("[SchemaSynchronizer] PostgreSQL normalized equivalent predicate casts for {}.{}",
                             tableName, target.name());
@@ -530,21 +629,27 @@ public class SchemaSynchronizer {
         }
         for (String liveName : live.keySet().stream().sorted().toList()) {
             if (!expected.contains(liveName)) {
-                pendingSql.add("DROP INDEX IF EXISTS " + liveName + "; -- table=" + tableName);
+                pendingSql.add(dialect == DatabaseDialect.MARIADB
+                        ? "DROP INDEX " + liveName + " ON " + tableName + ";"
+                        : "DROP INDEX IF EXISTS " + liveName + "; -- table=" + tableName);
             }
         }
     }
 
     private void addIndexReplacement(List<String> pendingSql, IndexDefinition target,
-                                     IndexDefinition live, String createSql) {
+                                     IndexDefinition live, String createSql, String tableName,
+                                     DatabaseDialect dialect) {
         pendingSql.add("-- replace index definition drift for " + target.name()
                 + "; live: " + live.canonicalSql());
-        pendingSql.add("DROP INDEX IF EXISTS " + target.name() + ";");
+        pendingSql.add(dialect == DatabaseDialect.MARIADB
+                ? "DROP INDEX " + target.name() + " ON " + tableName + ";"
+                : "DROP INDEX IF EXISTS " + target.name() + ";");
         pendingSql.add(terminated(createSql));
     }
 
     private void reconcilePrimaryKey(DatabaseMetaData meta, String tableName,
-                                     SchemaDefinition.TableDef tableDef, List<String> pendingSql)
+                                     SchemaDefinition.TableDef tableDef, List<String> pendingSql,
+                                     DatabaseDialect dialect)
             throws SQLException {
         if (tableDef.createSql() == null) {
             return;
@@ -552,7 +657,8 @@ public class SchemaSynchronizer {
         List<String> expected = primaryKeyColumns(tableDef.createSql());
         TreeMap<Short, String> orderedLive = new TreeMap<>();
         String constraintName = null;
-        try (ResultSet rows = meta.getPrimaryKeys(null, options.schema(), tableName)) {
+        try (ResultSet rows = meta.getPrimaryKeys(dialect == DatabaseDialect.POSTGRESQL ? null : mariaCatalog(meta),
+                dialect == DatabaseDialect.POSTGRESQL ? options.schema() : null, tableName)) {
             while (rows.next()) {
                 short sequence = rows.getShort("KEY_SEQ");
                 String column = SqlIdentifiers.requireIdentifier(rows.getString("COLUMN_NAME"), "primary-key column");
@@ -579,7 +685,8 @@ public class SchemaSynchronizer {
                 pendingSql.add("-- pending: primary key is absent from definition for " + tableName
                         + ", but JDBC did not report its constraint name");
             } else {
-                pendingSql.add("ALTER TABLE " + tableName + " DROP CONSTRAINT " + constraintName
+                pendingSql.add("ALTER TABLE " + tableName + (dialect == DatabaseDialect.MARIADB
+                        ? " DROP PRIMARY KEY" : " DROP CONSTRAINT " + constraintName)
                         + "; -- pending: primary key absent from definition");
             }
         } else if (live.isEmpty()) {
@@ -591,16 +698,19 @@ public class SchemaSynchronizer {
                         + "; live=" + live + "; JDBC did not report the constraint name");
             } else {
                 pendingSql.add("-- replace drifted primary key on " + tableName + "; live=" + live);
-                pendingSql.add("ALTER TABLE " + tableName + " DROP CONSTRAINT " + constraintName + ";");
+                pendingSql.add("ALTER TABLE " + tableName + (dialect == DatabaseDialect.MARIADB
+                        ? " DROP PRIMARY KEY;" : " DROP CONSTRAINT " + constraintName + ";"));
                 pendingSql.add("ALTER TABLE " + tableName + " ADD PRIMARY KEY ("
                         + String.join(", ", expected) + ");");
             }
         }
     }
 
-    private Set<String> getLivePrimaryKeyColumns(DatabaseMetaData meta, String tableName) throws SQLException {
+    private Set<String> getLivePrimaryKeyColumns(DatabaseMetaData meta, String tableName,
+                                                 DatabaseDialect dialect) throws SQLException {
         Set<String> columns = new HashSet<>();
-        try (ResultSet rows = meta.getPrimaryKeys(null, options.schema(), tableName)) {
+        try (ResultSet rows = meta.getPrimaryKeys(dialect == DatabaseDialect.POSTGRESQL ? null : mariaCatalog(meta),
+                dialect == DatabaseDialect.POSTGRESQL ? options.schema() : null, tableName)) {
             while (rows.next()) {
                 columns.add(SqlIdentifiers.requireIdentifier(
                         rows.getString("COLUMN_NAME"), "primary-key column"));
@@ -648,9 +758,10 @@ public class SchemaSynchronizer {
         return pending;
     }
 
-    private Set<String> getExistingTables(DatabaseMetaData meta) throws SQLException {
+    private Set<String> getExistingTables(DatabaseMetaData meta, DatabaseDialect dialect) throws SQLException {
         Set<String> tables = new HashSet<>();
-        try (ResultSet rs = meta.getTables(null, options.schema(), "%", new String[]{"TABLE"})) {
+        try (ResultSet rs = meta.getTables(dialect == DatabaseDialect.POSTGRESQL ? null : mariaCatalog(meta),
+                dialect == DatabaseDialect.POSTGRESQL ? options.schema() : null, "%", new String[]{"TABLE"})) {
             while (rs.next()) {
                 tables.add(rs.getString("TABLE_NAME").toLowerCase(Locale.ROOT));
             }
@@ -658,9 +769,12 @@ public class SchemaSynchronizer {
         return tables;
     }
 
-    Map<String, LiveColumn> getLiveColumns(DatabaseMetaData meta, String tableName) throws SQLException {
+    Map<String, LiveColumn> getLiveColumns(DatabaseMetaData meta, String tableName,
+                                           DatabaseDialect dialect) throws SQLException {
         Map<String, LiveColumn> columns = new HashMap<>();
-        try (ResultSet rs = meta.getColumns(null, options.schema(), tableName.toLowerCase(Locale.ROOT), "%")) {
+        try (ResultSet rs = meta.getColumns(dialect == DatabaseDialect.POSTGRESQL ? null : mariaCatalog(meta),
+                dialect == DatabaseDialect.POSTGRESQL ? options.schema() : null,
+                tableName.toLowerCase(Locale.ROOT), "%")) {
             while (rs.next()) {
                 String name = rs.getString("COLUMN_NAME").toLowerCase(Locale.ROOT);
                 String typeName = rs.getString("TYPE_NAME");
@@ -669,6 +783,9 @@ public class SchemaSynchronizer {
                 boolean decimalDigitsNull = rs.wasNull();
                 boolean notNull = "NO".equalsIgnoreCase(rs.getString("IS_NULLABLE"));
                 String colDefault = rs.getString("COLUMN_DEF");
+                if (dialect == DatabaseDialect.MARIADB && "NULL".equalsIgnoreCase(colDefault)) {
+                    colDefault = null;
+                }
                 Integer length = null;
                 Integer scale = null;
                 String normalized = ColumnDefinitionParser.normalizeType(typeName);
@@ -678,13 +795,18 @@ public class SchemaSynchronizer {
                 } else if ("NUMERIC".equals(normalized) && size > 0 && size <= 1_000) {
                     length = size;
                     scale = decimalDigitsNull ? null : decimalDigits;
-                } else if ("VECTOR".equals(normalized)) {
+                } else if (dialect == DatabaseDialect.POSTGRESQL && "VECTOR".equals(normalized)) {
                     length = readVectorDimension(meta.getConnection(), tableName, name);
                 }
                 columns.put(name, new LiveColumn(normalized, length, scale, notNull, colDefault));
             }
         }
         return columns;
+    }
+
+    private String mariaCatalog(DatabaseMetaData metadata) throws SQLException {
+        Connection connection = metadata.getConnection();
+        return connection != null && connection.getCatalog() != null ? connection.getCatalog() : options.schema();
     }
 
     private int readVectorDimension(Connection conn, String tableName, String columnName) throws SQLException {
