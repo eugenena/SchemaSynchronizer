@@ -21,7 +21,8 @@ Use it as:
 | PostgreSQL 16+ | Available | Transactional DDL and advisory locking |
 | MariaDB 10.3+ | Available | Named locking; DDL may commit implicitly |
 | MySQL 8.0+ | Available | Separate dialect; named locking and implicit DDL commits |
-| MySQL | Planned | Detected today, but fails closed until its compatibility suite is complete |
+| Percona Server 8.4 | Compatible | Certified against the MySQL dialect |
+| TiDB 8.5 LTS | Compatible | Certified against the MySQL dialect |
 
 PostgreSQL, MariaDB, and MySQL are the first dialect implementations, not a closed list.
 SchemaSynchronizer is designed to add more relational database dialects, each with
@@ -129,6 +130,11 @@ mvn -pl schema-synchronizer exec:java \
 MySQL uses the same argument shape with a `jdbc:mysql:` URL. Its serialized
 definition declares `"dialect": "mysql"`; MariaDB and MySQL definitions are not
 interchanged implicitly.
+
+Percona Server and TiDB use the MySQL dialect and Connector/J URL shape. Their
+database-specific release contract can be reproduced with
+`bash scripts/verify-mysql-compatible.sh`; compatibility does not imply support for
+vendor extensions outside SchemaSynchronizer's documented schema model.
 
 Review the generated file before committing it. If the file already exists, the
 serializer preserves its hand-authored `changes` array.
