@@ -6,13 +6,17 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RUN_ID="$$"
 PERCONA_CONTAINER="schemasync-percona-$RUN_ID"
 TIDB_CONTAINER="schemasync-tidb-$RUN_ID"
+NETWORK="schemasync-mysql-compatible-$RUN_ID"
 
 cleanup() {
   docker rm -f "$PERCONA_CONTAINER" "$TIDB_CONTAINER" >/dev/null 2>&1 || true
+  docker network rm "$NETWORK" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
-docker run -d --name "$PERCONA_CONTAINER" \
+docker network create "$NETWORK" >/dev/null
+
+docker run -d --name "$PERCONA_CONTAINER" --network "$NETWORK" \
   -e MYSQL_DATABASE=schema_synchronizer_test \
   -e MYSQL_USER=schema_sync \
   -e MYSQL_PASSWORD=schema_sync \
@@ -20,7 +24,7 @@ docker run -d --name "$PERCONA_CONTAINER" \
   -p 127.0.0.1::3306 \
   percona/percona-server:8.4 >/dev/null
 
-docker run -d --name "$TIDB_CONTAINER" \
+docker run -d --name "$TIDB_CONTAINER" --network "$NETWORK" \
   -p 127.0.0.1::4000 \
   pingcap/tidb:v8.5.4 >/dev/null
 
@@ -41,7 +45,9 @@ for attempt in {1..90}; do
 done
 
 for attempt in {1..90}; do
-  if (echo >/dev/tcp/127.0.0.1/"$TIDB_PORT") >/dev/null 2>&1; then
+  if docker exec "$PERCONA_CONTAINER" mysql \
+      -h "$TIDB_CONTAINER" -P 4000 -uroot -e "SELECT 1" \
+      >/dev/null 2>&1; then
     break
   fi
   if [[ "$attempt" == 90 ]]; then
