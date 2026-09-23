@@ -2,6 +2,8 @@
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Java](https://img.shields.io/badge/Java-21%2B-orange.svg)](https://www.oracle.com/java/)
+[![Maven Central](https://img.shields.io/maven-central/v/com.thinkaillc/schema-synchronizer.svg)](https://central.sonatype.com/artifact/com.thinkaillc/schema-synchronizer/1.0.0)
+[![Javadocs](https://javadoc.io/badge2/com.thinkaillc/schema-synchronizer/javadoc.svg)](https://javadoc.io/doc/com.thinkaillc/schema-synchronizer)
 
 SchemaSynchronizer keeps a relational database aligned with a version-controlled
 schema definition. It applies additive and otherwise safe changes automatically,
@@ -13,6 +15,23 @@ Use it as:
 - two command-line utilities that serialize a source schema and synchronize a target;
 - a Spring Boot database initializer that runs before JPA validation; or
 - a small Java API over an existing JDBC connection.
+
+## Start here
+
+| Goal | Guide |
+|---|---|
+| Add SchemaSynchronizer to a Spring Boot application | [Five-minute Spring Boot quick start](docs/QUICK_START_SPRING_BOOT.md) |
+| Serialize or synchronize a database from the command line | [CLI guide](docs/CLI.md) |
+| Understand or author `schema-definition.json` | [Schema definition reference](docs/SCHEMA_DEFINITION.md) |
+| Prepare a production deployment | [Operations and safety runbook](docs/OPERATIONS.md) |
+| Move an application away from Flyway or another migration tool | [Migration guide](docs/MIGRATING_FROM_MIGRATIONS.md) |
+| Diagnose an error or unexpected pending SQL | [Troubleshooting](docs/TROUBLESHOOTING.md) |
+| Understand database-specific behavior | [Database dialects](docs/DATABASE_DIALECTS.md) |
+| Add support for another relational database | [Dialect contribution guide](docs/CONTRIBUTING_A_DIALECT.md) |
+
+The [Javadocs](https://javadoc.io/doc/com.thinkaillc/schema-synchronizer) cover the
+public Java API. See [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow
+and [SECURITY.md](SECURITY.md) for private vulnerability reporting.
 
 ## Current dialect support
 
@@ -87,11 +106,31 @@ For comparison, Flyway documents its
 as ordered, checksum-tracked migrations applied once. This distinction is about the
 operating model, not a claim that one approach is universally better.
 
+## Quick start: Spring Boot
+
+SchemaSynchronizer requires Java 21 or later. Add the Maven Central release:
+
+```xml
+<dependency>
+  <groupId>com.thinkaillc</groupId>
+  <artifactId>schema-synchronizer</artifactId>
+  <version>1.0.0</version>
+</dependency>
+```
+
+Put `schema-definition.json` in `src/main/resources`, set
+`spring.jpa.hibernate.ddl-auto=validate`, and start the application. Safe differences
+are applied before Hibernate validates the schema; unsafe differences stop startup
+and are printed as SQL for operator review.
+
+Follow the [five-minute quick start](docs/QUICK_START_SPRING_BOOT.md) for a complete
+working definition and configuration.
+
 ## Quick start: command line
 
 SchemaSynchronizer requires Java 21 and Maven 3.9 or later.
 
-### 1. Build and install locally
+### 1. Clone and build the current CLI distribution
 
 ```bash
 git clone https://github.com/eugenena/SchemaSynchronizer.git
@@ -99,8 +138,9 @@ cd SchemaSynchronizer
 mvn clean install
 ```
 
-This installs `com.thinkaillc:schema-synchronizer:1.0.0` in your
-local Maven repository.
+The library itself is available from Maven Central. The 1.0.0 command-line entry
+points are not packaged as a self-contained executable, so CLI use currently runs
+them from the source checkout with Maven.
 
 ### 2. Serialize a source database
 
@@ -495,8 +535,8 @@ mvn verify \
 
 ## Author
 
-SchemaSynchronizer was created and is maintained by
-[Eugene Naoumov](https://github.com/eugenena).
+SchemaSynchronizer was created by [Eugene Naoumov](https://github.com/eugenena),
+is maintained by Eugene and ThinkAI LLC, and is copyright ThinkAI LLC.
 
 ## License
 

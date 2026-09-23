@@ -1,4 +1,4 @@
-// Copyright 2026 Eugene Naoumov
+// Copyright 2026 ThinkAI LLC
 // SPDX-License-Identifier: Apache-2.0
 
 package com.thinkaillc.schemasynchronizer;
