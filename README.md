@@ -479,6 +479,11 @@ mvn verify \
   -Dschema.test.mariadb.jdbc.password="$SCHEMA_DB_PASSWORD"
 ```
 
+## Author
+
+SchemaSynchronizer was created and is maintained by
+[Eugene Naoumov](https://github.com/eugenena).
+
 ## License
 
 SchemaSynchronizer is licensed under the [Apache License 2.0](LICENSE). You may
