@@ -17,6 +17,22 @@ import static org.mockito.Mockito.when;
 class SchemaSnapshotWriterTest {
 
     @Test
+    void postgresIndexIsPortableAcrossSchemas() {
+        assertThat(SchemaSnapshotWriter.portablePostgresIndex(
+                "CREATE UNIQUE INDEX idx_accounts_email ON source_schema.accounts USING btree (email)"))
+                .isEqualTo("CREATE UNIQUE INDEX IF NOT EXISTS idx_accounts_email ON accounts (email)");
+    }
+
+    @Test
+    void postgresPartialIndexPreservesPredicate() {
+        assertThat(SchemaSnapshotWriter.portablePostgresIndex(
+                "CREATE INDEX idx_active_accounts ON source_schema.accounts USING btree (email) "
+                        + "WHERE (status = 'ACTIVE'::text)"))
+                .isEqualTo("CREATE INDEX IF NOT EXISTS idx_active_accounts ON accounts (email) "
+                        + "WHERE (status = 'ACTIVE'::text)");
+    }
+
+    @Test
     void mysqlIndexesOmitUnsupportedIfNotExists() throws Exception {
         ResultSet row = indexRow("idx_items_label", "label");
         when(row.wasNull()).thenReturn(true);
