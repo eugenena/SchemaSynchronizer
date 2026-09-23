@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Added task-oriented adoption guides for Spring Boot, CLI use, schema authoring,
+  database dialects, production operations, migration, and troubleshooting.
+- Added contributor, security, issue, and pull-request guidance.
+- Added Maven Central and Javadocs discovery links.
+- Aligned copyright notices with ThinkAI LLC ownership while retaining Eugene
+  Naoumov as creator and maintainer.
+
 ## 1.0.0 — 2026-09-23
 
 First public release.
