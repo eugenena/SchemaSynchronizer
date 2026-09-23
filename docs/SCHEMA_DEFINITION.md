@@ -25,7 +25,9 @@ Each table contains:
 - `indexes`: idempotent native `CREATE INDEX` statements.
 
 The table key, the target in `createSql`, and the targets in index SQL must agree.
-Use ordinary unquoted identifiers. Quoted and mixed-case identifiers are rejected.
+Use ordinary unquoted identifiers. Table and column names are normalized to
+lowercase; quoted identifiers are rejected. Avoid mixed-case spelling even when it
+would normalize successfully, because the definition targets the lowercase object.
 
 The declarative layer owns ordinary tables in the configured schema. A live table,
 column, index, or primary key absent from the definition is reported as pending
