@@ -7,10 +7,13 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
+import org.junit.jupiter.api.io.TempDir;
 import org.postgresql.ds.PGSimpleDataSource;
 
 import javax.sql.DataSource;
+import java.nio.file.Path;
 import java.sql.Connection;
+import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -24,6 +27,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 @EnabledIfSystemProperty(named = "schema.test.jdbc.url", matches = ".+")
 class SchemaSynchronizerPostgresIntegrationTest {
     private final List<String> cleanupSchemas = new ArrayList<>();
+
+    @TempDir
+    Path tempDirectory;
 
     @AfterEach
     void removeTestSchemas() throws Exception {
@@ -69,6 +75,69 @@ class SchemaSynchronizerPostgresIntegrationTest {
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessageContaining("checksum mismatch");
         }
+    }
+
+    @Test
+    void serializedDefinitionReplaysIntoDifferentSchema() throws Exception {
+        DataSource dataSource = dataSource();
+        String sourceSchema = uniqueSchema("serialize_source");
+        String targetSchema = uniqueSchema("serialize_target");
+        createSchema(dataSource, sourceSchema);
+        createSchema(dataSource, targetSchema);
+        try (Connection connection = dataSource.getConnection(); var statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE " + sourceSchema
+                    + ".accounts (id BIGINT PRIMARY KEY, email VARCHAR(320) NOT NULL UNIQUE, display_name TEXT)");
+            statement.execute("CREATE INDEX idx_accounts_display_name ON "
+                    + sourceSchema + ".accounts (display_name)");
+        }
+
+        Path definitionPath = tempDirectory.resolve("schema-definition.json");
+        SchemaSnapshotWriter.main(new String[]{
+                System.getProperty("schema.test.jdbc.url"),
+                System.getProperty("schema.test.jdbc.user", ""),
+                System.getProperty("schema.test.jdbc.password", ""),
+                sourceSchema,
+                definitionPath.toString()
+        });
+        SchemaDefinition definition = new ObjectMapper().readValue(definitionPath.toFile(), SchemaDefinition.class);
+
+        assertThat(definition.tables().get("accounts").indexes())
+                .containsExactly(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS accounts_email_key ON accounts (email)",
+                        "CREATE INDEX IF NOT EXISTS idx_accounts_display_name ON accounts (display_name)");
+        try (Connection connection = dataSource.getConnection()) {
+            SchemaSynchronizationResult result = synchronizer(dataSource, targetSchema, false)
+                    .synchronizeWithResult(connection, definition);
+            assertThat(result.pendingSql()).isEmpty();
+            assertThat(tableExists(connection, targetSchema, "accounts")).isTrue();
+            statement(connection, "INSERT INTO " + targetSchema + ".accounts (id, email) VALUES (1, 'a@example.com')");
+            assertThatThrownBy(() -> statement(connection, "INSERT INTO " + targetSchema
+                    + ".accounts (id, email) VALUES (2, 'a@example.com')"))
+                    .isInstanceOf(SQLException.class);
+        }
+    }
+
+    @Test
+    void serializerFailsClosedForPostgresExcludeConstraint() throws Exception {
+        DataSource dataSource = dataSource();
+        String sourceSchema = uniqueSchema("serialize_exclude");
+        createSchema(dataSource, sourceSchema);
+        try (Connection connection = dataSource.getConnection(); var statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE " + sourceSchema
+                    + ".reservations (slot int4range, EXCLUDE USING gist (slot WITH &&))");
+        }
+
+        Path definitionPath = tempDirectory.resolve("exclude-schema-definition.json");
+        assertThatThrownBy(() -> SchemaSnapshotWriter.main(new String[]{
+                System.getProperty("schema.test.jdbc.url"),
+                System.getProperty("schema.test.jdbc.user", ""),
+                System.getProperty("schema.test.jdbc.password", ""),
+                sourceSchema,
+                definitionPath.toString()
+        }))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("EXCLUDE constraint")
+                .hasMessageContaining("ordered change set");
     }
 
     @Test
@@ -450,6 +519,12 @@ class SchemaSynchronizerPostgresIntegrationTest {
         try (var statement = connection.createStatement(); var rows = statement.executeQuery(sql)) {
             rows.next();
             return rows.getLong(1);
+        }
+    }
+
+    private void statement(Connection connection, String sql) throws SQLException {
+        try (var statement = connection.createStatement()) {
+            statement.execute(sql);
         }
     }
 

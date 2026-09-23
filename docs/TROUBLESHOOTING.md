@@ -55,11 +55,11 @@ names are normalized to lowercase, while quoted identifiers are rejected. Use
 lowercase spelling explicitly so the target object is unambiguous. Rename a quoted
 or mixed-case live object, or manage it outside the synchronized schema.
 
-## The CLI cannot be run with `java -jar`
+## The CLI reports `Unable to access jarfile`
 
-Version 1.0.0 publishes the library, sources, and Javadocs but not a self-contained
-CLI distribution. Run the entry points from a source checkout as described in
-[CLI.md](CLI.md).
+Confirm the downloaded filename and working directory, then run the executable JAR
+directly. The library JAR and CLI JAR are separate artifacts; use
+`schema-synchronizer-cli-<version>-standalone.jar` as described in [CLI.md](CLI.md).
 
 If the problem remains, open a GitHub issue with the database product/version,
 SchemaSynchronizer version, redacted definition, full exception, and minimal
