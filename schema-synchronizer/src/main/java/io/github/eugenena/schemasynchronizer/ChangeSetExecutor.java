@@ -1,3 +1,6 @@
+// Copyright 2026 Eugene Naoumov
+// SPDX-License-Identifier: Apache-2.0
+
 package io.github.eugenena.schemasynchronizer;
 
 import java.nio.charset.StandardCharsets;
