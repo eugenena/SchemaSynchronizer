@@ -51,8 +51,9 @@ PostgreSQL 16 verification suite passes.
   is defense in depth, not a sandbox for hostile SQL. A `SELECT` can call a volatile
   user-defined function, so change authors must keep verification functions
   side-effect-free.
-- Only unquoted lower-case identifiers are supported. Quoted or mixed-case names are
-  rejected to avoid ambiguous catalog matching.
+- Only ordinary unquoted identifiers are supported. Definition table and column
+  names are normalized to lowercase, while quoted identifiers are rejected. Authors
+  should use lowercase spelling explicitly to avoid ambiguous catalog matching.
 - Index uniqueness, keys/expressions, ordering, operator classes, included columns,
   and partial predicates are enforced. A narrow canonicalizer recognizes PostgreSQL's
   equivalent text-array cast renderings; every other predicate difference fails closed

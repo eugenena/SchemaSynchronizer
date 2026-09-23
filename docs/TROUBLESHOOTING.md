@@ -48,10 +48,12 @@ The declarative layer owns ordinary tables in its configured schema. Move extens
 owned or externally managed objects to another schema, or represent the object in
 the definition if SchemaSynchronizer should own it.
 
-## Quoted or mixed-case identifiers fail
+## Identifier casing is unexpected
 
-Version 1.0.0 supports ordinary unquoted identifiers. Rename the object or manage it
-outside the synchronized schema; do not rely on approximate matching.
+Version 1.0.0 supports ordinary unquoted identifiers. Definition table and column
+names are normalized to lowercase, while quoted identifiers are rejected. Use
+lowercase spelling explicitly so the target object is unambiguous. Rename a quoted
+or mixed-case live object, or manage it outside the synchronized schema.
 
 ## The CLI cannot be run with `java -jar`
 
