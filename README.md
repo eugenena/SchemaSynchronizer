@@ -48,6 +48,43 @@ not executed; they are returned in `pendingSql()` for manual review.
 The defaults are fail-closed. A missing definition, dialect mismatch, checksum
 drift, failed verification query, or pending destructive change stops startup.
 
+## Why SchemaSynchronizer instead of a migration tool?
+
+SchemaSynchronizer and tools such as Flyway solve related problems with different
+models. Flyway's classic workflow records incremental, versioned scripts and applies
+each pending migration once in version order. SchemaSynchronizer starts from the
+desired schema state, inspects the database that actually exists, and converges safe
+differences on every run. Explicit change sets complement that desired state when an
+operation cannot be inferred safely.
+
+| Concern | SchemaSynchronizer | Versioned migration tools |
+|---|---|---|
+| Primary source of truth | Current desired schema plus explicit exceptional changes | Ordered history of migration scripts |
+| Existing database drift | Compares live metadata and repairs supported safe differences | Normally applies migrations missing from the history table |
+| New environment | Applies the current definition and its required change ledger | Replays migrations or starts from a maintained baseline |
+| Destructive differences | Produces SQL for human review; never auto-applies them | Executes destructive SQL when an authored migration contains it |
+| Routine additive changes | Inferred from the desired state | Require a new migration script or generated migration |
+| Historical operations and data changes | Ordered, checksummed change sets | Ordered, checksummed migrations |
+
+SchemaSynchronizer is a good fit when:
+
+- applications should repair supported additive drift at startup or deployment;
+- teams prefer maintaining the current schema state over a growing chain of routine
+  additive migrations;
+- destructive reconciliation must always cross a manual-review boundary; or
+- many installations may begin from different safe subsets of the desired schema.
+
+A versioned migration tool remains a better fit when every transition must be
+authored and reviewed explicitly, existing deployment infrastructure already relies
+on migration versions, or database changes need features outside the currently
+implemented dialect contract. The approaches can coexist during adoption; see
+[Moving from a migration tool](#moving-from-a-migration-tool).
+
+For comparison, Flyway documents its
+[versioned migrations](https://documentation.red-gate.com/fd/versioned-migrations-273973333.html)
+as ordered, checksum-tracked migrations applied once. This distinction is about the
+operating model, not a claim that one approach is universally better.
+
 ## Quick start: command line
 
 SchemaSynchronizer requires Java 21 and Maven 3.9 or later.
