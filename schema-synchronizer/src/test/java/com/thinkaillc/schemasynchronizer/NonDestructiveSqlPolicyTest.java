@@ -9,6 +9,13 @@ import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class NonDestructiveSqlPolicyTest {
+
+    @Test
+    void mysqlAllowsCreateIndexWithoutUnsupportedIfNotExistsClause() {
+        assertThatCode(() -> NonDestructiveSqlPolicy.requireCreateIndex(
+                "CREATE INDEX idx_items_name ON items (name)", false))
+                .doesNotThrowAnyException();
+    }
     @Test
     void acceptsAdditivePostgresOperationsAndBackfills() {
         assertThatCode(() -> NonDestructiveSqlPolicy.requireSafe(

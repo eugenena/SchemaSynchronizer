@@ -52,13 +52,17 @@ public final class NonDestructiveSqlPolicy {
     }
 
     public static void requireCreateIndex(String sql) {
+        requireCreateIndex(sql, true);
+    }
+
+    static void requireCreateIndex(String sql, boolean requireIfNotExists) {
         requireSafe(sql);
         requireSingleStatement(sql, "index definition");
         if (!executableSql(sql).toUpperCase(Locale.ROOT)
                 .matches("(?s)^CREATE\\s+(UNIQUE\\s+)?INDEX\\b.*")) {
             throw new IllegalArgumentException("index definition must contain one CREATE INDEX statement");
         }
-        if (!executableSql(sql).toUpperCase(Locale.ROOT)
+        if (requireIfNotExists && !executableSql(sql).toUpperCase(Locale.ROOT)
                 .matches("(?s)^CREATE\\s+(UNIQUE\\s+)?INDEX\\s+IF\\s+NOT\\s+EXISTS\\b.*")) {
             throw new IllegalArgumentException("index definition must use IF NOT EXISTS");
         }
