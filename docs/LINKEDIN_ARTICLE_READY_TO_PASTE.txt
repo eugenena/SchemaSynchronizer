@@ -1,0 +1,178 @@
+SchemaSynchronizer: Database Evolution Without Surrendering the Desired State
+
+I recently open-sourced a project called SchemaSynchronizer.
+
+It began as infrastructure I needed for my own products. Those applications were evolving quickly, and their databases had to evolve with them. I wanted deployments to handle routine schema changes automatically, but I did not want an application startup process to silently delete data, narrow a column, or make an irreversible decision on my behalf.
+
+The usual answer is a migration chain: write migration 001, then 002, then 003, and replay the complete history in order. Tools such as Flyway and Liquibase solve that problem well.
+
+But a migration history and a schema definition answer different questions.
+
+A migration history asks: How did we get here?
+
+A desired-state definition asks: What must the database look like now?
+
+SchemaSynchronizer is built around the second question.
+
+
+THE DESIGN GOAL
+
+The project reads a version-controlled JSON definition, inspects the live database through JDBC, computes the difference, and brings the database toward the declared state.
+
+The important part is not merely generating SQL. The important part is deciding what software may do without an operator and what must remain a human decision.
+
+SchemaSynchronizer divides schema evolution into three categories:
+
+1. Safe additive changes are automatic.
+
+Creating a missing table, adding a nullable column, creating an index, widening a compatible type, or relaxing nullability can be applied directly.
+
+2. Destructive or ambiguous changes are reported, not executed.
+
+Dropping a table or column, narrowing a type, replacing a primary key, or rebuilding a drifted index is returned as explicit, reviewable SQL.
+
+3. Operations that carry business meaning are intentional change sets.
+
+Foreign keys, check constraints, data backfills, functions, triggers, and similar operations can be expressed as ordered, checksummed changes with verification queries.
+
+This boundary is central to the project. “Automatic” should never mean “unaccountable.”
+
+
+WHY NOT JUST COMPARE SCHEMAS AND EXECUTE EVERYTHING?
+
+Because two syntactically different database states are not always safely interchangeable.
+
+Changing VARCHAR(40) to VARCHAR(100) is usually safe. Changing it back may truncate data.
+
+Adding a nullable column is straightforward. Adding a non-null column to a table with existing rows may require a default, a backfill, or domain-specific logic.
+
+A missing index may be created automatically, while replacing an index can affect locking, query performance, and production availability.
+
+The synchronizer has to be conservative when it cannot prove safety. In those cases it produces the SQL an operator would need, but it does not cross the approval boundary.
+
+That gives teams automation for routine work without pretending every database decision can be inferred from metadata.
+
+
+HOW IT WORKS
+
+A schema definition declares tables, columns, indexes, and ordered changes in one version-controlled document.
+
+At deployment time, SchemaSynchronizer compares that definition with the target database.
+
+• Safe missing objects are created.
+
+• Compatible columns are widened automatically.
+
+• Unsafe differences are collected into a manual SQL plan.
+
+• Ordered change sets are tracked by checksum.
+
+• Verification queries can prove that an existing change is already present.
+
+• Dry-run mode can inspect the complete plan before a release.
+
+The result is useful for both new environments and databases that have evolved over time.
+
+
+LIBRARY, SPRING BOOT INTEGRATION, AND STANDALONE CLI
+
+I wanted the project to support more than one operating model.
+
+Java applications can call it directly through the API. Spring Boot projects can enable synchronization during startup through auto-configuration and explicit startup policies. Teams that do not want schema work inside the application process can use the standalone CLI in deployment jobs or operator workflows.
+
+The CLI has two principal jobs:
+
+• serialize reads a source database and produces a portable desired-state document.
+
+• sync compares a definition with a target database and applies or reports changes.
+
+Credentials can be supplied without placing passwords directly in process arguments, and the CLI returns stable exit statuses for automation.
+
+
+DATABASE SUPPORT
+
+The current release supports independently detected dialects for:
+
+• PostgreSQL
+
+• MariaDB
+
+• MySQL
+
+The MySQL contract is also exercised against Percona Server and TiDB. These are compatibility targets rather than an assertion that every feature of those databases is identical.
+
+Dialect support is deliberately explicit. Database products share SQL vocabulary, but they differ in metadata behavior, identifier limits, type rendering, DDL transaction semantics, and index syntax.
+
+A trustworthy synchronization tool must model those differences instead of hiding them behind a generic “SQL database” label.
+
+SQL Server and Oracle are natural future additions, especially for enterprise use. But I would rather add a dialect with a reproducible integration contract than advertise untested compatibility.
+
+
+LESSONS FROM TURNING INTERNAL CODE INTO AN OPEN-SOURCE PROJECT
+
+Extracting a library from working applications required more than moving classes into a new repository.
+
+Internal names and assumptions had to be removed. Package coordinates needed a stable identity. Documentation had to explain the product to someone who had never seen the original applications. Database behavior needed integration tests, not only mocks.
+
+The release also needed source and Javadoc artifacts, cryptographic signatures, checksums, licensing, and reproducible publication through Maven Central.
+
+The most valuable work was often at the boundaries:
+
+• Preserving transaction ownership when the caller already owns a transaction.
+
+• Serializing indexes without carrying a source schema into a different target schema.
+
+• Distinguishing primary-key, unique, and exclusion-constraint indexes.
+
+• Preventing ambiguous multi-DataSource Spring configuration.
+
+• Detecting drift without automatically performing destructive repair.
+
+• Making verification queries fail closed when their result is ambiguous.
+
+These details are easy to miss in a prototype and essential in a tool that changes a database.
+
+
+WHERE SCHEMASYNCHRONIZER FITS
+
+SchemaSynchronizer is not an attempt to replace every migration tool.
+
+Choose a migration-first tool when the ordered historical path is the primary artifact, every transition must be authored explicitly, or an established migration ecosystem already fits the team.
+
+SchemaSynchronizer is useful when:
+
+• The desired schema should be visible in one version-controlled document.
+
+• Routine additive evolution should require little ceremony.
+
+• Destructive work must always cross an operator-review boundary.
+
+• Schema drift should be detected against the current intended state.
+
+• The same schema contract must be applied to new and existing environments.
+
+The two approaches can also coexist during migration from a historical system. The important decision is which artifact owns the schema from that point forward.
+
+
+OPEN SOURCE AND NEXT STEPS
+
+SchemaSynchronizer is available under the Apache License 2.0. The library is published through Maven Central, and the repository includes API guidance, CLI documentation, schema-authoring references, production operations guidance, and migration advice.
+
+My next priorities are practical adoption feedback, more real-world schema cases, and additional database dialects backed by the same integration standard as the existing ones.
+
+I built SchemaSynchronizer because I wanted database automation that is helpful without being reckless:
+
+Automate what can be proven safe.
+
+Make uncertainty visible.
+
+Leave irreversible decisions with the operator.
+
+
+Project:
+https://github.com/eugenena/SchemaSynchronizer
+
+Maven Central:
+https://central.sonatype.com/artifact/com.thinkaillc/schema-synchronizer
+
+#Java #OpenSource #Databases #PostgreSQL #MySQL #SpringBoot #DevTools #SoftwareEngineering
