@@ -12,6 +12,17 @@
   <description>Safe schema synchronization for relational databases</description>
   <url>https://github.com/eugenena/SchemaSynchronizer</url>
 
+  <developers>
+    <developer>
+      <name>Eugene Naoumov</name>
+      <url>https://github.com/eugenena</url>
+      <roles>
+        <role>Creator</role>
+        <role>Maintainer</role>
+      </roles>
+    </developer>
+  </developers>
+
   <licenses>
     <license>
       <name>Apache License, Version 2.0</name>
