@@ -222,7 +222,14 @@ public class SchemaSnapshotWriter {
             return readMySqlFamilyIndexes(conn, tableName, dialect);
         }
         List<String> indexes = new ArrayList<>();
-        String sql = "SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = ? AND tablename = ?";
+        String sql = "SELECT pg_get_indexdef(index_class.oid) AS indexdef "
+                + "FROM pg_class table_class "
+                + "JOIN pg_namespace namespace ON namespace.oid = table_class.relnamespace "
+                + "JOIN pg_index index_meta ON index_meta.indrelid = table_class.oid "
+                + "JOIN pg_class index_class ON index_class.oid = index_meta.indexrelid "
+                + "LEFT JOIN pg_constraint constraint_meta ON constraint_meta.conindid = index_class.oid "
+                + "WHERE namespace.nspname = ? AND table_class.relname = ? "
+                + "AND constraint_meta.oid IS NULL ORDER BY index_class.relname";
         try (var stmt = conn.prepareStatement(sql)) {
             stmt.setString(1, schema);
             stmt.setString(2, tableName);
@@ -230,14 +237,18 @@ public class SchemaSnapshotWriter {
                 while (rs.next()) {
                     String indexdef = rs.getString("indexdef");
                     if (indexdef != null) {
-                        // Strip leading "CREATE [UNIQUE] INDEX " and re-emit with IF NOT EXISTS
-                        String result = indexdef.replaceFirst("^CREATE (UNIQUE )?INDEX ", "CREATE $1INDEX IF NOT EXISTS ");
-                        indexes.add(result);
+                        indexes.add(portablePostgresIndex(indexdef));
                     }
                 }
             }
         }
         return indexes;
+    }
+
+    static String portablePostgresIndex(String indexDefinition) {
+        IndexDefinition parsed = IndexDefinition.parse(indexDefinition);
+        return parsed.canonicalSql().replaceFirst(
+                "^CREATE (UNIQUE )?INDEX ", "CREATE $1INDEX IF NOT EXISTS ");
     }
 
     static List<String> readMySqlFamilyIndexes(Connection conn, String tableName, DatabaseDialect dialect)
