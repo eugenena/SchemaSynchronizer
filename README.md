@@ -173,6 +173,23 @@ Add the Maven Central release to an application:
 The library includes PostgreSQL, MariaDB, and MySQL JDBC drivers at runtime. Applications
 can override their versions through dependency management.
 
+## Release process for maintainers
+
+GitHub Actions is optional. A release can be published locally after the
+`com.thinkaillc` namespace is verified in Central Portal:
+
+1. Import the release PGP private key and publish its public key.
+2. Put the Central Portal user-token username and password under server id
+   `central` in Maven `settings.xml`.
+3. Export the signing-key passphrase as `MAVEN_GPG_PASSPHRASE`.
+4. Run `mvn --batch-mode --no-transfer-progress -Prelease clean deploy`.
+5. Review and publish the validated deployment in Central Portal.
+6. Create the signed `v1.0.0` Git tag and GitHub release from the same commit.
+
+The release profile attaches source and Javadoc archives, signs every artifact,
+and uploads a Central Portal bundle. Central releases are immutable; never reuse a
+published version number.
+
 ## CLI reference
 
 ### SchemaSerializer
