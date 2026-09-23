@@ -46,6 +46,7 @@ class SchemaSynchronizerTest {
         synchronizer = new SchemaSynchronizer(objectMapper, dataSource);
         lenient().when(dataSource.getConnection()).thenReturn(connection);
         lenient().when(connection.getMetaData()).thenReturn(metaData);
+        lenient().when(metaData.getDatabaseProductName()).thenReturn("PostgreSQL");
         lenient().when(connection.getAutoCommit()).thenReturn(true);
         lenient().when(metaData.getTables(null, "public", "schema_synchronizer_history", new String[]{"TABLE"}))
                 .thenReturn(historyTablesRs);

@@ -13,6 +13,7 @@ import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.util.*;
 import java.util.stream.Collectors;
 import org.slf4j.Logger;
@@ -80,19 +81,26 @@ public class SchemaSnapshotWriter {
 
         log.info("[SchemaSnapshotWriter] Connecting to {}", url);
         try (Connection conn = DriverManager.getConnection(url, user, password)) {
-            Map<String, Object> tables = buildSnapshot(conn.getMetaData(), conn, schema);
-            writeJson(tables, outputPath);
+            DatabaseDialect dialect = DatabaseDialect.detect(conn.getMetaData());
+            log.info("[SchemaSnapshotWriter] Detected {} {}", dialect.id(),
+                    conn.getMetaData().getDatabaseProductVersion());
+            Map<String, Object> tables = buildSnapshot(conn.getMetaData(), conn, schema, dialect);
+            writeJson(tables, outputPath, dialect);
         }
 
         log.info("[SchemaSnapshotWriter] Done → {}", outputPath.toAbsolutePath());
         log.info("[SchemaSnapshotWriter] Review the diff, then commit schema-definition.json.");
     }
 
-    private static Map<String, Object> buildSnapshot(DatabaseMetaData meta, Connection conn, String schema)
+    private static Map<String, Object> buildSnapshot(DatabaseMetaData meta, Connection conn, String schema,
+                                                     DatabaseDialect dialect)
             throws Exception {
         Map<String, Object> tables = new TreeMap<>();
 
-        try (ResultSet rs = meta.getTables(null, schema, "%", new String[]{"TABLE"})) {
+        String catalog = dialect == DatabaseDialect.POSTGRESQL ? null : schema;
+        String schemaPattern = dialect == DatabaseDialect.POSTGRESQL ? schema : null;
+
+        try (ResultSet rs = meta.getTables(catalog, schemaPattern, "%", new String[]{"TABLE"})) {
             while (rs.next()) {
                 String tableName = rs.getString("TABLE_NAME").toLowerCase();
                 if (EXCLUDE.contains(tableName)) continue;
@@ -101,7 +109,7 @@ public class SchemaSnapshotWriter {
                 List<String> pkCols = new ArrayList<>();
                 List<Map<String, Object>> pendingCols = new ArrayList<>();
 
-                try (ResultSet cols = meta.getColumns(null, schema, tableName, "%")) {
+                try (ResultSet cols = meta.getColumns(catalog, schemaPattern, tableName, "%")) {
                     while (cols.next()) {
                         String colName  = cols.getString("COLUMN_NAME").toLowerCase();
                         String typeName = cols.getString("TYPE_NAME").toUpperCase();
@@ -112,7 +120,7 @@ public class SchemaSnapshotWriter {
                         String colDefault = cols.getString("COLUMN_DEF");
                         boolean autoInc = "YES".equalsIgnoreCase(cols.getString("IS_AUTOINCREMENT"));
 
-                        if ("VECTOR".equals(typeName)) {
+                        if (dialect == DatabaseDialect.POSTGRESQL && "VECTOR".equals(typeName)) {
                             size = readVectorDimension(conn, schema, tableName, colName);
                         }
 
@@ -128,7 +136,7 @@ public class SchemaSnapshotWriter {
                     }
                 }
 
-                try (ResultSet pk = meta.getPrimaryKeys(null, schema, tableName)) {
+                try (ResultSet pk = meta.getPrimaryKeys(catalog, schemaPattern, tableName)) {
                     while (pk.next()) {
                         pkCols.add(pk.getString("COLUMN_NAME").toLowerCase());
                     }
@@ -145,7 +153,7 @@ public class SchemaSnapshotWriter {
                     boolean autoInc = Boolean.TRUE.equals(pending.get("autoInc"));
                     boolean isPk = pkCols.contains(colName);
 
-                    String colDef = buildDefinition(typeName, size, scale, nullable, colDefault);
+                    String colDef = buildDefinition(typeName, size, scale, nullable, colDefault, autoInc, dialect);
 
                     Map<String, String> col = new LinkedHashMap<>();
                     col.put("name", colName);
@@ -155,15 +163,20 @@ public class SchemaSnapshotWriter {
                     Map<String, String> rawCol = new LinkedHashMap<>();
                     rawCol.put("name", colName);
                     rawCol.put("type", buildCreateType(
-                            typeName, size, scale, nullable, colDefault, autoInc, isPk));
+                            typeName, size, scale, nullable, colDefault, autoInc, isPk, dialect));
                     rawColumns.add(rawCol);
                 }
 
-                List<String> indexes = readIndexes(conn, schema, tableName);
-                String createSql = PkIdentity.restoreCreateSql(buildCreateSql(tableName, rawColumns, pkCols));
+                List<String> indexes = readIndexes(meta, conn, schema, tableName, dialect);
+                String createSql = buildCreateSql(tableName, rawColumns, pkCols);
+                if (dialect == DatabaseDialect.POSTGRESQL) {
+                    createSql = PkIdentity.restoreCreateSql(createSql);
+                }
                 for (Map<String, String> col : columns) {
-                    col.put("definition", PkIdentity.restoreIdColumnDefinition(
-                            col.get("name"), col.get("definition"), createSql));
+                    if (dialect == DatabaseDialect.POSTGRESQL) {
+                        col.put("definition", PkIdentity.restoreIdColumnDefinition(
+                                col.get("name"), col.get("definition"), createSql));
+                    }
                 }
 
                 Map<String, Object> tableDef = new LinkedHashMap<>();
@@ -197,7 +210,11 @@ public class SchemaSnapshotWriter {
                 + schema + "." + tableName + "." + colName);
     }
 
-    private static List<String> readIndexes(Connection conn, String schema, String tableName) throws Exception {
+    private static List<String> readIndexes(DatabaseMetaData meta, Connection conn, String schema, String tableName,
+                                            DatabaseDialect dialect) throws Exception {
+        if (dialect != DatabaseDialect.POSTGRESQL) {
+            return readJdbcIndexes(meta, schema, tableName);
+        }
         List<String> indexes = new ArrayList<>();
         String sql = "SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = ? AND tablename = ?";
         try (var stmt = conn.prepareStatement(sql)) {
@@ -217,6 +234,31 @@ public class SchemaSnapshotWriter {
         return indexes;
     }
 
+    private static List<String> readJdbcIndexes(DatabaseMetaData meta, String catalog, String tableName)
+            throws SQLException {
+        record IndexParts(boolean unique, SortedMap<Short, String> columns) {}
+        Map<String, IndexParts> byName = new TreeMap<>();
+        try (ResultSet rows = meta.getIndexInfo(catalog, null, tableName, false, false)) {
+            while (rows.next()) {
+                String name = rows.getString("INDEX_NAME");
+                String column = rows.getString("COLUMN_NAME");
+                if (name == null || column == null || "PRIMARY".equalsIgnoreCase(name)) {
+                    continue;
+                }
+                boolean unique = !rows.getBoolean("NON_UNIQUE");
+                short position = rows.getShort("ORDINAL_POSITION");
+                IndexParts parts = byName.computeIfAbsent(name,
+                        ignored -> new IndexParts(unique, new TreeMap<>()));
+                parts.columns().put(position, column.toLowerCase(Locale.ROOT));
+            }
+        }
+        List<String> indexes = new ArrayList<>();
+        byName.forEach((name, parts) -> indexes.add("CREATE " + (parts.unique() ? "UNIQUE " : "")
+                + "INDEX " + name.toLowerCase(Locale.ROOT) + " ON " + tableName + " ("
+                + String.join(", ", parts.columns().values()) + ")"));
+        return indexes;
+    }
+
     private static String buildCreateSql(String tableName, List<Map<String, String>> columns, List<String> pkCols) {
         if (columns.isEmpty()) return null;
         String cols = columns.stream()
@@ -230,7 +272,10 @@ public class SchemaSnapshotWriter {
 
     private static String buildCreateType(String typeName, int size, Integer scale, String nullable,
                                           String columnDefault,
-                                          boolean autoIncrement, boolean primaryKey) {
+                                          boolean autoIncrement, boolean primaryKey, DatabaseDialect dialect) {
+        if (dialect != DatabaseDialect.POSTGRESQL) {
+            return buildDefinition(typeName, size, scale, nullable, columnDefault, autoIncrement, dialect);
+        }
         if (PkIdentity.isSequenceBackedInteger(typeName, columnDefault, autoIncrement)) {
             return PkIdentity.createType(typeName, nullable, columnDefault, autoIncrement, primaryKey);
         }
@@ -255,7 +300,7 @@ public class SchemaSnapshotWriter {
      * are PKs and are never added via ALTER TABLE.
      */
     private static String buildDefinition(String typeName, int size, Integer scale, String nullable,
-                                          String columnDefault) {
+                                          String columnDefault, boolean autoIncrement, DatabaseDialect dialect) {
         String base = switch (typeName) {
             case "VARCHAR", "CHARACTER VARYING" ->
                     size > 0 && size < 10_000 ? "VARCHAR(" + size + ")" + nullable : "TEXT" + nullable;
@@ -271,7 +316,10 @@ public class SchemaSnapshotWriter {
             default -> typeName + nullable;
         };
         if (columnDefault != null && !columnDefault.contains("nextval(")) {
-            return base + " DEFAULT " + columnDefault;
+            base += " DEFAULT " + columnDefault;
+        }
+        if (dialect != DatabaseDialect.POSTGRESQL && autoIncrement) {
+            base += " AUTO_INCREMENT";
         }
         return base;
     }
@@ -284,7 +332,8 @@ public class SchemaSnapshotWriter {
                 : "NUMERIC(" + precision + "," + scale + ")";
     }
 
-    private static void writeJson(Map<String, Object> tables, Path outputPath) throws Exception {
+    private static void writeJson(Map<String, Object> tables, Path outputPath, DatabaseDialect dialect)
+            throws Exception {
         ObjectMapper mapper = new ObjectMapper().enable(SerializationFeature.INDENT_OUTPUT);
         JsonNode preservedChanges = null;
         if (outputPath.toFile().isFile()) {
@@ -295,6 +344,8 @@ public class SchemaSnapshotWriter {
                 "AUTO-GENERATED by SchemaSnapshotWriter — do not edit by hand. " +
                 "The serializer preserves the hand-authored ordered changes array. " +
                 "Used by SchemaSynchronizer on every startup to verify and fix the live DB additively.");
+        root.put("formatVersion", SchemaDefinition.CURRENT_FORMAT_VERSION);
+        root.put("dialect", dialect.id());
         root.set("tables", mapper.valueToTree(tables));
         if (preservedChanges != null) {
             root.set("changes", preservedChanges);

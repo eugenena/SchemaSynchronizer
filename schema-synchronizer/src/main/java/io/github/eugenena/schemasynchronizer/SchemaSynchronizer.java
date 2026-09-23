@@ -154,7 +154,15 @@ public class SchemaSynchronizer {
     }
 
     public SchemaSynchronizationResult synchronizeWithResult(Connection conn, SchemaDefinition def) throws Exception {
-        requirePostgres(conn);
+        DatabaseDialect targetDialect = DatabaseDialect.detect(conn.getMetaData());
+        if (def.declaredDialect() != targetDialect) {
+            throw new IllegalStateException("Schema dialect '" + def.declaredDialect().id()
+                    + "' cannot be applied to " + targetDialect.id() + " target");
+        }
+        if (def.effectiveFormatVersion() > SchemaDefinition.CURRENT_FORMAT_VERSION) {
+            throw new IllegalStateException("Unsupported schema format version: " + def.effectiveFormatVersion());
+        }
+        requireImplementedDialect(targetDialect);
         boolean previousAutoCommit = conn.getAutoCommit();
         boolean ownsTransaction = previousAutoCommit;
         Savepoint savepoint = null;
@@ -220,10 +228,10 @@ public class SchemaSynchronizer {
         }
     }
 
-    private void requirePostgres(Connection conn) throws SQLException {
-        String product = conn.getMetaData().getDatabaseProductName();
-        if (product != null && !product.toLowerCase(Locale.ROOT).contains("postgresql")) {
-            throw new IllegalStateException("SchemaSynchronizer supports PostgreSQL only; connected to " + product);
+    private void requireImplementedDialect(DatabaseDialect dialect) {
+        if (dialect != DatabaseDialect.POSTGRESQL) {
+            throw new IllegalStateException("Synchronization for " + dialect.id()
+                    + " is not implemented yet; serialization and target synchronization must use a supported dialect");
         }
     }
 

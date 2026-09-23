@@ -12,10 +12,25 @@ import java.util.Map;
  * changes are logged as pending manual SQL.
  */
 @JsonIgnoreProperties(ignoreUnknown = true)
-public record SchemaDefinition(Map<String, TableDef> tables, List<ChangeSet> changes) {
+public record SchemaDefinition(Integer formatVersion, String dialect,
+                               Map<String, TableDef> tables, List<ChangeSet> changes) {
+
+    public static final int CURRENT_FORMAT_VERSION = 2;
+
+    public SchemaDefinition(Map<String, TableDef> tables, List<ChangeSet> changes) {
+        this(null, null, tables, changes);
+    }
 
     public SchemaDefinition(Map<String, TableDef> tables) {
-        this(tables, List.of());
+        this(null, null, tables, List.of());
+    }
+
+    public DatabaseDialect declaredDialect() {
+        return DatabaseDialect.parse(dialect);
+    }
+
+    public int effectiveFormatVersion() {
+        return formatVersion == null ? 1 : formatVersion;
     }
 
     @JsonIgnoreProperties(ignoreUnknown = true)
