@@ -24,6 +24,10 @@ credential handling, and release packaging.
   column sizes before insertion.
 - Added primary-key, explicit-index, orphan-index, and orphan-table reconciliation.
   Constraint-owned PostgreSQL indexes are excluded from orphan detection.
+- Preserved destructive reconciliation as an operator-only workflow: ordered manual
+  SQL is returned in `pendingSql` and logged as a schema-scoped transaction, including
+  executable replacement sequences for drifted indexes and primary keys. Live primary-
+  key nullability dependencies are ordered safely instead of auto-applied prematurely.
 - Added exact `NUMERIC(precision, scale)`, `CHAR(length)`, and `vector(dimension)`
   introspection. Numeric changes now reject loss of integer or fractional capacity,
   and vector dimension changes remain manual.
@@ -46,6 +50,10 @@ PostgreSQL 16 verification suite passes.
   side-effect-free.
 - Only unquoted lower-case identifiers are supported. Quoted or mixed-case names are
   rejected to avoid ambiguous catalog matching.
+- Index uniqueness, keys/expressions, ordering, operator classes, included columns,
+  and partial predicates are enforced. A narrow canonicalizer recognizes PostgreSQL's
+  equivalent text-array cast renderings; every other predicate difference fails closed
+  and produces a manual drop/recreate plan.
 - The declarative layer owns all ordinary tables in its configured schema. Extension-
   owned or externally managed tables should live in another schema; otherwise they
   are intentionally reported as pending orphans.

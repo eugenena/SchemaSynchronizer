@@ -38,6 +38,12 @@ widenings, `NOT NULL` → nullable, and safety-checked ordered change sets.
 arbitrary type changes, type narrowing, and inferred `NULL` → `NOT NULL`. A versioned
 change set may set `NOT NULL` after an explicit backfill. Unknown SQL is rejected.
 
+SchemaApplier never executes destructive or unsafe reconciliation. It returns the
+ordered statements in `SchemaApplyResult.pendingSql()` and prints a copyable manual
+transaction (`BEGIN`, schema-scoped `search_path`, statements, `COMMIT`) for an operator
+to review and run separately. Set `thinkai.schema.fail-on-pending=false` only when the
+application may start while that manual work remains outstanding.
+
 The default is fail-closed: a missing definition, checksum drift, failed verification,
 or pending destructive schema difference aborts startup.
 
