@@ -171,11 +171,19 @@ class SchemaSynchronizerTest {
     }
 
     @Test
-    void removesUnsupportedIfNotExistsFromMySqlCreateIndex() {
+    void removesUnsupportedIfNotExistsFromEnginesThatRejectIt() {
         assertThat(SchemaSynchronizer.mysqlCompatibleIndexSql(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_items_label ON items (label)",
                 DatabaseDialect.MYSQL))
                 .isEqualTo("CREATE UNIQUE INDEX idx_items_label ON items (label)");
+        assertThat(SchemaSynchronizer.dialectCompatibleIndexSql(
+                "CREATE INDEX IF NOT EXISTS idx_items_label ON items (label)",
+                DatabaseDialect.SQLSERVER))
+                .isEqualTo("CREATE INDEX idx_items_label ON items (label)");
+        assertThat(SchemaSynchronizer.dialectCompatibleIndexSql(
+                "CREATE INDEX IF NOT EXISTS idx_items_label ON items (label)",
+                DatabaseDialect.ORACLE))
+                .isEqualTo("CREATE INDEX idx_items_label ON items (label)");
         assertThat(SchemaSynchronizer.mysqlCompatibleIndexSql(
                 "CREATE INDEX IF NOT EXISTS idx_items_label ON items (label)",
                 DatabaseDialect.MARIADB))
@@ -187,12 +195,58 @@ class SchemaSynchronizerTest {
     }
 
     @Test
+    void buildsDialectSpecificAddColumnAndAlterSql() {
+        assertThat(SchemaSynchronizer.addColumnSql("items", "notes", "VARCHAR(255)", DatabaseDialect.SQLSERVER))
+                .isEqualTo("ALTER TABLE items ADD notes VARCHAR(255)");
+        assertThat(SchemaSynchronizer.addColumnSql("items", "notes", "VARCHAR2(255)", DatabaseDialect.ORACLE))
+                .isEqualTo("ALTER TABLE items ADD (notes VARCHAR2(255))");
+
+        NonDestructiveAlterPlanner.Plan widen = new NonDestructiveAlterPlanner.Plan(
+                List.of("ALTER TABLE items ALTER COLUMN label TYPE VARCHAR(100)"),
+                List.of());
+        assertThat(SchemaSynchronizer.sqlServerColumnPlan(
+                "items", "label", "VARCHAR(100) NOT NULL", widen).applySql())
+                .containsExactly("ALTER TABLE items ALTER COLUMN label VARCHAR(100) NOT NULL");
+        assertThat(SchemaSynchronizer.oracleColumnPlan(
+                "items", "label", "VARCHAR2(100) NOT NULL", widen).applySql())
+                .containsExactly("ALTER TABLE items MODIFY (label VARCHAR2(100))");
+
+        NonDestructiveAlterPlanner.Plan defaultOnly = new NonDestructiveAlterPlanner.Plan(
+                List.of("ALTER TABLE items ALTER COLUMN status SET DEFAULT 'NEW'"),
+                List.of());
+        NonDestructiveAlterPlanner.Plan sqlServerDefault =
+                SchemaSynchronizer.sqlServerColumnPlan("items", "status", "VARCHAR(50) DEFAULT 'NEW'", defaultOnly);
+        assertThat(sqlServerDefault.applySql()).isEmpty();
+        assertThat(sqlServerDefault.pendingSql()).isNotEmpty();
+
+        NonDestructiveAlterPlanner.Plan dropNotNull = new NonDestructiveAlterPlanner.Plan(
+                List.of("ALTER TABLE items ALTER COLUMN label DROP NOT NULL"),
+                List.of());
+        assertThat(SchemaSynchronizer.sqlServerColumnPlan(
+                "items", "label", "VARCHAR(40)", dropNotNull).applySql())
+                .containsExactly("ALTER TABLE items ALTER COLUMN label VARCHAR(40) NULL");
+        assertThat(SchemaSynchronizer.oracleColumnPlan(
+                "items", "label", "VARCHAR2(40)", dropNotNull).applySql())
+                .containsExactly("ALTER TABLE items MODIFY (label VARCHAR2(40) NULL)");
+
+        NonDestructiveAlterPlanner.Plan dropDefault = new NonDestructiveAlterPlanner.Plan(
+                List.of("ALTER TABLE items ALTER COLUMN status DROP DEFAULT"),
+                List.of());
+        assertThat(SchemaSynchronizer.oracleColumnPlan(
+                "items", "status", "VARCHAR2(50)", dropDefault).applySql())
+                .containsExactly("ALTER TABLE items MODIFY (status VARCHAR2(50) DEFAULT NULL)");
+    }
+
+    @Test
     void ignoresOnlyMigrationAndOwnHistorySchemaNoise() {
         assertThat(SchemaSynchronizer.isIgnorableSchemaTable("flyway_schema_history")).isTrue();
         assertThat(SchemaSynchronizer.isIgnorableSchemaTable("schema_synchronizer_history")).isTrue();
+        assertThat(SchemaSynchronizer.isIgnorableSchemaTable("spt_monitor")).isTrue();
+        assertThat(SchemaSynchronizer.isIgnorableSchemaTable("msreplication_options")).isTrue();
         assertThat(SchemaSynchronizer.isIgnorableSchemaTable("thinkai_schema_business_data")).isFalse();
         assertThat(SchemaSynchronizer.isIgnorableSchemaTable("scheduler_lock")).isFalse();
         assertThat(SchemaSynchronizer.isIgnorableSchemaTable("work_items")).isFalse();
+        assertThat(SchemaSynchronizer.isIgnorableSchemaTable("system_events")).isFalse();
         assertThat(SchemaSynchronizer.isIgnorableSchemaIndex("flyway_schema_history_pk")).isTrue();
         assertThat(SchemaSynchronizer.isIgnorableSchemaIndex("flyway_business_idx")).isFalse();
         assertThat(SchemaSynchronizer.isIgnorableSchemaIndex("scheduler_lock_pkey")).isFalse();

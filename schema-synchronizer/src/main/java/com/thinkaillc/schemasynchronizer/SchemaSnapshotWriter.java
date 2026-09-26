@@ -54,7 +54,15 @@ public class SchemaSnapshotWriter {
     private static final Logger log = LoggerFactory.getLogger(SchemaSnapshotWriter.class);
 
     /** Tables to exclude from snapshot (system / internal tables). */
-    private static final Set<String> EXCLUDE = Set.of("flyway_schema_history", "schema_synchronizer_history");
+    private static final Set<String> EXCLUDE = Set.of(
+            "flyway_schema_history",
+            "schema_synchronizer_history",
+            "msreplication_options",
+            "spt_fallback_db",
+            "spt_fallback_dev",
+            "spt_fallback_usg",
+            "spt_monitor",
+            "spt_values");
 
     public static void main(String[] args) throws Exception {
         if (args.length > 0 && "--restore-json".equals(args[0])) {
@@ -100,27 +108,31 @@ public class SchemaSnapshotWriter {
             throws Exception {
         Map<String, Object> tables = new TreeMap<>();
 
-        String catalog = dialect == DatabaseDialect.POSTGRESQL ? null : conn.getCatalog();
-        String schemaPattern = dialect == DatabaseDialect.POSTGRESQL ? schema : null;
+        String catalog = dialect.metadataCatalog(conn, schema);
+        String schemaPattern = dialect.metadataSchemaPattern(schema);
 
         try (ResultSet rs = meta.getTables(catalog, schemaPattern, "%", new String[]{"TABLE"})) {
             while (rs.next()) {
-                String tableName = rs.getString("TABLE_NAME").toLowerCase();
-                if (EXCLUDE.contains(tableName)) continue;
+                String tableName = rs.getString("TABLE_NAME").toLowerCase(Locale.ROOT);
+                if (EXCLUDE.contains(tableName) || SchemaSynchronizer.isIgnorableSchemaTable(tableName)) {
+                    continue;
+                }
+                String metadataTable = dialect.metadataObjectName(tableName);
 
                 List<Map<String, String>> columns = new ArrayList<>();
                 List<String> pkCols = new ArrayList<>();
                 List<Map<String, Object>> pendingCols = new ArrayList<>();
 
-                try (ResultSet cols = meta.getColumns(catalog, schemaPattern, tableName, "%")) {
+                try (ResultSet cols = meta.getColumns(catalog, schemaPattern, metadataTable, "%")) {
                     while (cols.next()) {
+                        // Oracle JDBC exposes COLUMN_DEF as LONG — read it before any other column.
+                        String colDefault = cols.getString("COLUMN_DEF");
                         String colName  = cols.getString("COLUMN_NAME").toLowerCase();
                         String typeName = cols.getString("TYPE_NAME").toUpperCase();
                         int size        = cols.getInt("COLUMN_SIZE");
                         int scale       = cols.getInt("DECIMAL_DIGITS");
                         boolean scaleNull = cols.wasNull();
                         String nullable = "YES".equals(cols.getString("IS_NULLABLE")) ? "" : " NOT NULL";
-                        String colDefault = cols.getString("COLUMN_DEF");
                         if (dialect != DatabaseDialect.POSTGRESQL && "NULL".equalsIgnoreCase(colDefault)) {
                             colDefault = null;
                         }
@@ -142,7 +154,7 @@ public class SchemaSnapshotWriter {
                     }
                 }
 
-                try (ResultSet pk = meta.getPrimaryKeys(catalog, schemaPattern, tableName)) {
+                try (ResultSet pk = meta.getPrimaryKeys(catalog, schemaPattern, metadataTable)) {
                     while (pk.next()) {
                         pkCols.add(pk.getString("COLUMN_NAME").toLowerCase());
                     }
@@ -174,7 +186,7 @@ public class SchemaSnapshotWriter {
                 }
 
                 List<String> indexes = readIndexes(meta, conn, schema, tableName, dialect);
-                String createSql = buildCreateSql(tableName, rawColumns, pkCols);
+                String createSql = buildCreateSql(tableName, rawColumns, pkCols, dialect);
                 if (dialect == DatabaseDialect.POSTGRESQL) {
                     createSql = PkIdentity.restoreCreateSql(createSql);
                 }
@@ -218,9 +230,17 @@ public class SchemaSnapshotWriter {
 
     private static List<String> readIndexes(DatabaseMetaData meta, Connection conn, String schema, String tableName,
                                             DatabaseDialect dialect) throws Exception {
-        if (dialect != DatabaseDialect.POSTGRESQL) {
+        if (dialect == DatabaseDialect.POSTGRESQL) {
+            return readPostgresIndexes(conn, schema, tableName);
+        }
+        if (dialect.isMySqlFamily()) {
             return readMySqlFamilyIndexes(conn, tableName, dialect);
         }
+        return readJdbcIndexes(meta, dialect, dialect.metadataCatalog(conn, schema),
+                dialect.metadataSchemaPattern(schema), tableName);
+    }
+
+    private static List<String> readPostgresIndexes(Connection conn, String schema, String tableName) throws Exception {
         List<String> indexes = new ArrayList<>();
         String sql = "SELECT index_class.relname AS indexname, "
                 + "pg_get_indexdef(index_class.oid) AS indexdef, constraint_meta.contype AS constraint_type "
@@ -239,7 +259,6 @@ public class SchemaSnapshotWriter {
                 while (rs.next()) {
                     String constraintType = rs.getString("constraint_type");
                     if ("p".equals(constraintType)) {
-                        // buildCreateSql already restores the primary key.
                         continue;
                     }
                     if ("x".equals(constraintType)) {
@@ -254,6 +273,60 @@ public class SchemaSnapshotWriter {
                 }
             }
         }
+        return indexes;
+    }
+
+    static List<String> readJdbcIndexes(DatabaseMetaData meta, DatabaseDialect dialect, String catalog,
+                                        String schemaPattern, String tableName) throws SQLException {
+        String metadataTable = dialect.metadataObjectName(tableName);
+        Set<String> primaryKeyIndexes = new HashSet<>();
+        try (ResultSet rows = meta.getPrimaryKeys(catalog, schemaPattern, metadataTable)) {
+            while (rows.next()) {
+                String pkName = rows.getString("PK_NAME");
+                if (pkName != null && !pkName.isBlank()) {
+                    primaryKeyIndexes.add(pkName.toLowerCase(Locale.ROOT));
+                }
+            }
+        }
+        record IndexParts(boolean unique, SortedMap<Short, String> columns) {}
+        Map<String, IndexParts> byName = new TreeMap<>();
+        try (ResultSet rows = meta.getIndexInfo(catalog, schemaPattern, metadataTable, false, false)) {
+            while (rows.next()) {
+                String name = rows.getString("INDEX_NAME");
+                short type = rows.getShort("TYPE");
+                if (name == null || type == DatabaseMetaData.tableIndexStatistic) {
+                    continue;
+                }
+                if (primaryKeyIndexes.contains(name.toLowerCase(Locale.ROOT))) {
+                    continue;
+                }
+                String column = rows.getString("COLUMN_NAME");
+                if (column == null) {
+                    continue;
+                }
+                name = SqlIdentifiers.requireIdentifier(name.toLowerCase(Locale.ROOT), "index");
+                column = SqlIdentifiers.requireIdentifier(column.toLowerCase(Locale.ROOT), "index column");
+                boolean unique = !rows.getBoolean("NON_UNIQUE");
+                short position = rows.getShort("ORDINAL_POSITION");
+                String direction = rows.getString("ASC_OR_DESC");
+                String columnSql = column + ("D".equalsIgnoreCase(direction) ? " DESC" : "");
+                IndexParts parts = byName.computeIfAbsent(name, ignored -> new IndexParts(unique, new TreeMap<>()));
+                if (parts.unique() != unique) {
+                    throw new SQLException(dialect.id() + " returned inconsistent uniqueness for index: " + name);
+                }
+                parts.columns().put(position, columnSql);
+            }
+        }
+        List<String> indexes = new ArrayList<>();
+        String canonicalTable = tableName.toLowerCase(Locale.ROOT);
+        byName.forEach((name, parts) -> {
+            if (parts.columns().isEmpty()) {
+                return;
+            }
+            indexes.add("CREATE " + (parts.unique() ? "UNIQUE " : "")
+                    + "INDEX " + name + " ON " + canonicalTable + " ("
+                    + String.join(", ", parts.columns().values()) + ")");
+        });
         return indexes;
     }
 
@@ -308,7 +381,8 @@ public class SchemaSnapshotWriter {
         return indexes;
     }
 
-    private static String buildCreateSql(String tableName, List<Map<String, String>> columns, List<String> pkCols) {
+    private static String buildCreateSql(String tableName, List<Map<String, String>> columns, List<String> pkCols,
+                                         DatabaseDialect dialect) {
         if (columns.isEmpty()) return null;
         String cols = columns.stream()
                 .map(c -> c.get("name") + " " + c.get("type"))
@@ -316,7 +390,8 @@ public class SchemaSnapshotWriter {
         if (!pkCols.isEmpty()) {
             cols += ", PRIMARY KEY (" + String.join(", ", pkCols) + ")";
         }
-        return "CREATE TABLE IF NOT EXISTS " + tableName + " (" + cols + ")";
+        String ifNotExists = dialect.supportsCreateTableIfNotExists() ? " IF NOT EXISTS" : "";
+        return "CREATE TABLE" + ifNotExists + " " + tableName + " (" + cols + ")";
     }
 
     private static String buildCreateType(String typeName, int size, Integer scale, String nullable,
@@ -351,15 +426,17 @@ public class SchemaSnapshotWriter {
     private static String buildDefinition(String typeName, int size, Integer scale, String nullable,
                                           String columnDefault, boolean autoIncrement, DatabaseDialect dialect) {
         String base = switch (typeName) {
-            case "VARCHAR", "CHARACTER VARYING" ->
-                    size > 0 && size < 10_000 ? "VARCHAR(" + size + ")" + nullable : "TEXT" + nullable;
+            case "VARCHAR", "CHARACTER VARYING", "VARCHAR2" ->
+                    portableVarchar(size, nullable, dialect, false);
+            case "NVARCHAR", "NVARCHAR2" ->
+                    portableVarchar(size, nullable, dialect, true);
             case "TEXT", "JSONB", "JSON", "BYTEA",
                  "TIMESTAMPTZ", "TIMESTAMP WITH TIME ZONE",
                  "TIMESTAMP", "DATE", "BOOLEAN", "BIGINT",
-                 "INTEGER", "INT4", "INT8", "BIGSERIAL", "SERIAL",
+                 "INTEGER", "INT", "INT4", "INT8", "BIGSERIAL", "SERIAL",
                  "FLOAT4", "FLOAT8", "DOUBLE PRECISION" ->
                     typeName + nullable;
-            case "NUMERIC", "DECIMAL" -> numericType(size, scale) + nullable;
+            case "NUMERIC", "DECIMAL", "NUMBER" -> numericType(size, scale) + nullable;
             case "INT2" -> "SMALLINT" + nullable;
             case "VECTOR" -> "vector(" + size + ")" + nullable;
             default -> typeName + nullable;
@@ -367,10 +444,33 @@ public class SchemaSnapshotWriter {
         if (columnDefault != null && !columnDefault.contains("nextval(")) {
             base += " DEFAULT " + columnDefault;
         }
-        if (dialect != DatabaseDialect.POSTGRESQL && autoIncrement) {
-            base += " AUTO_INCREMENT";
+        if (autoIncrement) {
+            if (dialect.isMySqlFamily()) {
+                base += " AUTO_INCREMENT";
+            } else if (dialect == DatabaseDialect.SQLSERVER) {
+                base += " IDENTITY(1,1)";
+            } else if (dialect == DatabaseDialect.ORACLE) {
+                base += " GENERATED BY DEFAULT AS IDENTITY";
+            }
         }
         return base;
+    }
+
+    private static String portableVarchar(int size, String nullable, DatabaseDialect dialect, boolean national) {
+        String type = national ? "NVARCHAR" : "VARCHAR";
+        if (dialect == DatabaseDialect.SQLSERVER && (size <= 0 || size >= 10_000)) {
+            return type + "(MAX)" + nullable;
+        }
+        if (dialect == DatabaseDialect.ORACLE && national) {
+            return (size > 0 && size < 10_000 ? "NVARCHAR2(" + size + ")" : "NVARCHAR2(2000)") + nullable;
+        }
+        if (dialect == DatabaseDialect.ORACLE && !national) {
+            return (size > 0 && size < 10_000 ? "VARCHAR2(" + size + ")" : "VARCHAR2(4000)") + nullable;
+        }
+        if (size > 0 && size < 10_000) {
+            return type + "(" + size + ")" + nullable;
+        }
+        return national ? type + "(MAX)" + nullable : "TEXT" + nullable;
     }
 
     private static String numericType(int precision, Integer scale) {
