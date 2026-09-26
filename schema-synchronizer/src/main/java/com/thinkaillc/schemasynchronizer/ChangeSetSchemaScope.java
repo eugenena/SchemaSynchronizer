@@ -28,11 +28,18 @@ final class ChangeSetSchemaScope {
             "(?i)\\bIN\\s+SCHEMA\\s+" + IDENT);
 
     private static final Pattern EXTENSION_OR_COMMENT_SCHEMA = Pattern.compile(
-            "(?i)\\b(?:CREATE\\s+EXTENSION\\b[^;]*?\\bSCHEMA"
-                    + "|COMMENT\\s+ON\\s+SCHEMA"
-                    + "|GRANT\\b[^;]*?\\bON\\s+SCHEMA"
-                    + "|COMMENT\\s+ON\\s+DATABASE)\\s+"
+            "(?i)\\b(?:CREATE\\s+EXTENSION\\b[^;]*?\\bSCHEMA\\s+"
+                    + "|COMMENT\\s+ON\\s+SCHEMA\\s+"
+                    + "|GRANT\\b[^;]*?\\bON\\s+SCHEMA(?:\\s*::\\s*|\\s+)"
+                    + "|COMMENT\\s+ON\\s+DATABASE\\s+)"
                     + IDENT);
+
+    /** MySQL/MariaDB / SQL Server grant targets that escape schema.object matching. */
+    private static final Pattern UNSAFE_GRANT_TARGET = Pattern.compile(
+            "(?i)\\bGRANT\\b[^;]*\\bON\\s+(?:TABLE\\s+)?"
+                    + "(?:\\*\\s*\\.\\s*\\*"                          // *.*
+                    + "|\\S+\\s*\\.\\s*\\*"                           // otherdb.* / `other`.*
+                    + "|DATABASE\\s*::)");                            // DATABASE::evil
 
     /** Session namespace mutators that would defeat schema binding for unqualified DDL. */
     private static final Pattern SESSION_NAMESPACE = Pattern.compile(
@@ -60,6 +67,11 @@ final class ChangeSetSchemaScope {
         // Mask only comments and ordinary string literals so "schema"."table",
         // [schema].[table], and `schema`.`table` remain visible for binding checks.
         String scannable = maskStringsAndComments(sql);
+        if (UNSAFE_GRANT_TARGET.matcher(scannable).find()) {
+            throw new IllegalArgumentException(
+                    "schema change SQL must not GRANT on global/foreign wildcards (*.*, db.*, DATABASE::): "
+                            + summarize(sql));
+        }
         rejectForeignSchema(QUALIFIED.matcher(scannable), allowed, configuredNamespace, sql,
                 "targets namespace");
         rejectForeignSchema(IN_SCHEMA.matcher(scannable), allowed, configuredNamespace, sql,

@@ -133,7 +133,7 @@ jobs:
           -Dschema.test.mysql.jdbc.url=jdbc:mysql://localhost:3307/schema_synchronizer_test
           -Dschema.test.mysql.jdbc.user=schema_sync
           -Dschema.test.mysql.jdbc.password=schema_sync
-          -Dschema.test.sqlserver.jdbc.url=jdbc:sqlserver://localhost:1433;databaseName=master;encrypt=false;trustServerCertificate=true
+          "-Dschema.test.sqlserver.jdbc.url=jdbc:sqlserver://localhost:1433;databaseName=master;encrypt=false;trustServerCertificate=true"
           -Dschema.test.sqlserver.jdbc.user=sa
           -Dschema.test.sqlserver.jdbc.password=Schema_Sync_Test_1
         env:

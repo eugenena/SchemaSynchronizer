@@ -61,13 +61,9 @@ class SchemaSynchronizerOracleIntegrationTest {
         }
 
         Path snapshot = tempDir.resolve("schema-definition.json");
-        SchemaSnapshotWriter.main(new String[]{
-                System.getProperty("schema.test.oracle.jdbc.url"),
-                System.getProperty("schema.test.oracle.jdbc.user"),
-                System.getProperty("schema.test.oracle.jdbc.password"),
-                schema(),
-                snapshot.toString()
-        });
+        try (Connection connection = connection()) {
+            SchemaSnapshotWriter.writeSnapshot(connection, schema(), snapshot);
+        }
         SchemaDefinition serialized = new ObjectMapper().readValue(snapshot.toFile(), SchemaDefinition.class);
         assertThat(serialized.declaredDialect()).isEqualTo(DatabaseDialect.ORACLE);
         assertThat(serialized.tables()).containsKey("oracle_items");

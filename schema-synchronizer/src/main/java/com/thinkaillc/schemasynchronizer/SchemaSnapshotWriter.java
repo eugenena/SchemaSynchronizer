@@ -99,6 +99,21 @@ public class SchemaSnapshotWriter {
         log.info("[SchemaSnapshotWriter] Review the diff, then commit schema-definition.json.");
     }
 
+    /**
+     * Programmatic serialize path for tests and library callers (no argv password).
+     */
+    public static void writeSnapshot(Connection conn, String schema, Path outputPath) throws Exception {
+        if (conn == null) {
+            throw new IllegalArgumentException("connection is required");
+        }
+        String scoped = SqlIdentifiers.requireIdentifierPreservingCase(
+                schema, "schema", SqlIdentifiers.EXTENDED_MAX_LENGTH);
+        DatabaseDialect dialect = DatabaseDialect.detect(conn.getMetaData());
+        Map<String, Object> tables = buildSnapshot(conn.getMetaData(), conn,
+                scoped.toLowerCase(Locale.ROOT), dialect);
+        writeJson(tables, outputPath, dialect);
+    }
+
     private static Map<String, Object> buildSnapshot(DatabaseMetaData meta, Connection conn, String schema,
                                                      DatabaseDialect dialect)
             throws Exception {
@@ -275,15 +290,19 @@ public class SchemaSnapshotWriter {
     static List<String> readJdbcIndexes(DatabaseMetaData meta, DatabaseDialect dialect, String catalog,
                                         String schemaPattern, String tableName) throws SQLException {
         String metadataTable = dialect.metadataObjectName(tableName);
-        Set<String> primaryKeyIndexes = new HashSet<>();
+        Set<String> skipIndexes = new HashSet<>();
         try (ResultSet rows = meta.getPrimaryKeys(catalog, schemaPattern, metadataTable)) {
             while (rows.next()) {
                 String pkName = rows.getString("PK_NAME");
                 if (pkName != null && !pkName.isBlank()) {
-                    primaryKeyIndexes.add(pkName.toLowerCase(Locale.ROOT));
+                    skipIndexes.add(pkName.toLowerCase(Locale.ROOT));
                 }
             }
         }
+        skipIndexes.addAll(uniqueConstraintIndexNames(meta.getConnection(), dialect, catalog, schemaPattern,
+                metadataTable));
+        skipIndexes.addAll(complexSqlServerIndexNames(meta.getConnection(), dialect, catalog, schemaPattern,
+                metadataTable));
         record IndexParts(boolean unique, SortedMap<Short, String> columns) {}
         Map<String, IndexParts> byName = new TreeMap<>();
         try (ResultSet rows = meta.getIndexInfo(catalog, schemaPattern, metadataTable, false, false)) {
@@ -293,15 +312,16 @@ public class SchemaSnapshotWriter {
                 if (name == null || type == DatabaseMetaData.tableIndexStatistic) {
                     continue;
                 }
-                if (primaryKeyIndexes.contains(name.toLowerCase(Locale.ROOT))) {
+                if (skipIndexes.contains(name.toLowerCase(Locale.ROOT))) {
                     continue;
                 }
                 String column = rows.getString("COLUMN_NAME");
                 if (column == null) {
                     continue;
                 }
-                name = SqlIdentifiers.requireIdentifier(name.toLowerCase(Locale.ROOT), "index");
-                column = SqlIdentifiers.requireIdentifier(column.toLowerCase(Locale.ROOT), "index column");
+                int max = dialect.maxIdentifierLength();
+                name = SqlIdentifiers.requireIdentifier(name.toLowerCase(Locale.ROOT), "index", max);
+                column = SqlIdentifiers.requireIdentifier(column.toLowerCase(Locale.ROOT), "index column", max);
                 boolean unique = !rows.getBoolean("NON_UNIQUE");
                 short position = rows.getShort("ORDINAL_POSITION");
                 String direction = rows.getString("ASC_OR_DESC");
@@ -324,6 +344,88 @@ public class SchemaSnapshotWriter {
                     + String.join(", ", parts.columns().values()) + ")");
         });
         return indexes;
+    }
+
+    /**
+     * Index names that back UNIQUE constraints (not free-standing CREATE UNIQUE INDEX).
+     * Excluding them avoids false "drop index" drift when the constraint is managed via CREATE TABLE
+     * or change sets.
+     */
+    static Set<String> uniqueConstraintIndexNames(Connection conn, DatabaseDialect dialect, String catalog,
+                                                  String schemaPattern, String tableName) throws SQLException {
+        if (conn == null || (dialect != DatabaseDialect.SQLSERVER && dialect != DatabaseDialect.ORACLE)) {
+            return Set.of();
+        }
+        Set<String> names = new HashSet<>();
+        if (dialect == DatabaseDialect.SQLSERVER) {
+            String sql = "SELECT kc.name FROM sys.key_constraints kc "
+                    + "INNER JOIN sys.tables t ON t.object_id = kc.parent_object_id "
+                    + "INNER JOIN sys.schemas s ON s.schema_id = t.schema_id "
+                    + "WHERE kc.type = 'UQ' AND t.name = ? AND s.name = ?";
+            try (var statement = conn.prepareStatement(sql)) {
+                statement.setString(1, tableName);
+                statement.setString(2, schemaPattern == null ? "dbo" : schemaPattern);
+                try (ResultSet rows = statement.executeQuery()) {
+                    while (rows.next()) {
+                        String name = rows.getString(1);
+                        if (name != null) {
+                            names.add(name.toLowerCase(Locale.ROOT));
+                        }
+                    }
+                }
+            }
+            return names;
+        }
+        String sql = "SELECT constraint_name FROM all_constraints "
+                + "WHERE constraint_type = 'U' AND table_name = ? AND owner = ?";
+        try (var statement = conn.prepareStatement(sql)) {
+            statement.setString(1, tableName.toUpperCase(Locale.ROOT));
+            statement.setString(2, schemaPattern == null
+                    ? tableName.toUpperCase(Locale.ROOT)
+                    : schemaPattern.toUpperCase(Locale.ROOT));
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    String name = rows.getString(1);
+                    if (name != null) {
+                        names.add(name.toLowerCase(Locale.ROOT));
+                    }
+                }
+            }
+        }
+        return names;
+    }
+
+    /**
+     * SQL Server indexes with FILTER predicates or INCLUDE columns cannot be reconstructed from
+     * {@link DatabaseMetaData#getIndexInfo}; omit them so serialize/sync does not invent incomplete DDL.
+     */
+    static Set<String> complexSqlServerIndexNames(Connection conn, DatabaseDialect dialect, String catalog,
+                                                  String schemaPattern, String tableName) throws SQLException {
+        if (conn == null || dialect != DatabaseDialect.SQLSERVER) {
+            return Set.of();
+        }
+        Set<String> names = new HashSet<>();
+        String sql = "SELECT i.name FROM sys.indexes i "
+                + "INNER JOIN sys.tables t ON t.object_id = i.object_id "
+                + "INNER JOIN sys.schemas s ON s.schema_id = t.schema_id "
+                + "WHERE t.name = ? AND s.name = ? AND i.name IS NOT NULL "
+                + "AND (i.has_filter = 1 OR EXISTS ("
+                + "SELECT 1 FROM sys.index_columns ic "
+                + "WHERE ic.object_id = i.object_id AND ic.index_id = i.index_id "
+                + "AND ic.is_included_column = 1))";
+        try (var statement = conn.prepareStatement(sql)) {
+            statement.setString(1, tableName);
+            statement.setString(2, schemaPattern == null ? "dbo" : schemaPattern);
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    String name = rows.getString(1);
+                    if (name != null) {
+                        names.add(name.toLowerCase(Locale.ROOT));
+                    }
+                }
+            }
+        }
+        return names;
     }
 
     static String portablePostgresIndex(String indexDefinition) {

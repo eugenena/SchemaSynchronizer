@@ -71,13 +71,9 @@ class SchemaSynchronizerSqlServerIntegrationTest {
         }
 
         Path snapshot = tempDir.resolve("schema-definition.json");
-        SchemaSnapshotWriter.main(new String[]{
-                jdbcUrl(),
-                System.getProperty("schema.test.sqlserver.jdbc.user"),
-                System.getProperty("schema.test.sqlserver.jdbc.password"),
-                "dbo",
-                snapshot.toString()
-        });
+        try (Connection connection = connection()) {
+            SchemaSnapshotWriter.writeSnapshot(connection, "dbo", snapshot);
+        }
         SchemaDefinition serialized = new ObjectMapper().readValue(snapshot.toFile(), SchemaDefinition.class);
         assertThat(serialized.declaredDialect()).isEqualTo(DatabaseDialect.SQLSERVER);
         assertThat(serialized.tables()).containsKey("sqlserver_items");
