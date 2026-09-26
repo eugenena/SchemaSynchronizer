@@ -245,7 +245,7 @@ public class SchemaSynchronizer {
         String previousSearchPath = null;
         ChangeSetExecutor executor = new ChangeSetExecutor();
         validateDeclarativeDefinition(def, dialect);
-        List<SchemaDefinition.ChangeSet> allChanges = executor.validate(def.changes(), options);
+        List<SchemaDefinition.ChangeSet> allChanges = executor.validate(def.changes(), options, dialect);
         plannedSql.set(new ArrayList<>());
         Exception primaryFailure = null;
         String lockToken = null;
@@ -333,13 +333,14 @@ public class SchemaSynchronizer {
                                                                       DatabaseDialect dialect) throws Exception {
         validateDeclarativeDefinition(def, dialect);
         ChangeSetExecutor executor = new ChangeSetExecutor();
-        List<SchemaDefinition.ChangeSet> allChanges = executor.validate(def.changes(), options);
+        List<SchemaDefinition.ChangeSet> allChanges = executor.validate(def.changes(), options, dialect);
         plannedSql.set(new ArrayList<>());
         if (dialect.usesCatalogNamespace()
                 && conn.getCatalog() != null
-                && !conn.getCatalog().equalsIgnoreCase(options.schema())) {
+                && !conn.getCatalog().equals(options.schema())) {
             throw new IllegalStateException("Connected " + dialect.id() + " catalog '" + conn.getCatalog()
-                    + "' does not match configured schema '" + options.schema() + "'");
+                    + "' does not match configured schema '" + options.schema()
+                    + "' (compared case-sensitively; configure the catalog exactly as the server reports it)");
         }
         if (dialect == DatabaseDialect.ORACLE) {
             requireOracleSchema(conn, options.schema());
@@ -772,7 +773,7 @@ public class SchemaSynchronizer {
                             + " has FILTER/INCLUDE (or similar) and cannot be compared to the declared "
                             + "definition; manage replacement via change sets");
                     pendingSql.add(dropIndexSql(dialect, target.name(), tableName));
-                    pendingSql.add(terminated(sql));
+                    pendingSql.add(terminated(dialectCompatibleIndexSql(sql, dialect)));
                 } else if (!target.hasSameStructure(IndexDefinition.parse(liveSql))) {
                     addIndexReplacement(pendingSql, target, IndexDefinition.parse(liveSql), sql,
                             tableName, dialect);
@@ -803,8 +804,9 @@ public class SchemaSynchronizer {
         return switch (dialect) {
             case MYSQL, MARIADB, SQLSERVER ->
                     "DROP INDEX " + indexName + " ON " + tableName + ";";
-            case POSTGRESQL, ORACLE ->
-                    "DROP INDEX IF EXISTS " + indexName + ";";
+            case POSTGRESQL -> "DROP INDEX IF EXISTS " + indexName + ";";
+            // DROP INDEX IF EXISTS is 23ai+; 19c/21c reject it.
+            case ORACLE -> "DROP INDEX " + indexName + ";";
         };
     }
 
@@ -814,7 +816,7 @@ public class SchemaSynchronizer {
         pendingSql.add("-- replace index definition drift for " + target.name()
                 + "; live: " + live.canonicalSql());
         pendingSql.add(dropIndexSql(dialect, target.name(), tableName));
-        pendingSql.add(terminated(createSql));
+        pendingSql.add(terminated(dialectCompatibleIndexSql(createSql, dialect)));
     }
 
     private void reconcilePrimaryKey(DatabaseMetaData meta, String tableName,

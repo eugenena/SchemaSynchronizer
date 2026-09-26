@@ -1,5 +1,24 @@
 # Greptile lessons
 
+## 2026-09-26 — PR #12 — identifier case folding and per-version DDL syntax
+
+- **Bug:** Scope binding lowercased every namespace comparison, so `appdb.*` / `appdb.t`
+  passed with `AppDB` configured on case-sensitive MySQL; the MySQL catalog bind check
+  used `equalsIgnoreCase`; Oracle index remediation emitted `DROP INDEX IF EXISTS`
+  (23ai-only; 19c/21c reject it); index replacement pending SQL echoed declared
+  `CREATE INDEX IF NOT EXISTS` to Oracle/SQL Server; `ON DATABASE::x` was compared to a
+  schema name instead of being rejected.
+- **Missed because:** The fix round was re-reviewed only against its claimed fixes, and
+  the final commit skipped the independent re-review entirely. No test matrix covered
+  identifier case per dialect or asserted generated DDL for every dialect.
+- **Prevention:** Identifier comparisons go through `ChangeSetSchemaScope.canonical`
+  (PG lower, Oracle upper, quoted exact, MySQL/MariaDB/SQL Server exact). Every emitted
+  DDL helper has an all-dialects loop test
+  (`SchemaSynchronizerTest#dropIndexSqlIsDialectAware`,
+  `#pendingIndexRecreateSqlIsExecutableOnEveryDialect`,
+  `ChangeSetSchemaScopeTest#mysqlCatalogComparisonIsCaseExact` and siblings).
+  `CONTRIBUTING.md` now requires both for new SQL-emitting or name-comparing code.
+
 ## 2026-09-26 — PR #12 — Oracle/SQL Server release + public-repo hygiene
 
 - **Bug:** Unquoted SQL Server JDBC URLs in CI; ITs still passed argv passwords after

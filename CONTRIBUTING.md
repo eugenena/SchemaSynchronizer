@@ -33,6 +33,12 @@ properties are documented in [README.md](README.md#testing-and-development).
 - Update user documentation for public behavior changes.
 - Preserve fail-closed behavior and the manual boundary for destructive changes.
 - Do not weaken SQL validation to accommodate one input shape.
+- Code that emits SQL (executed or reported as pending) needs a test that loops over
+  every `DatabaseDialect` and asserts syntax valid on the oldest supported version of
+  each (for example, Oracle 19c has no `IF [NOT] EXISTS`).
+- Code that compares schema, catalog, or object names must follow the dialect's
+  identifier folding (`ChangeSetSchemaScope.canonical`), never `equalsIgnoreCase` or
+  `toLowerCase` on both sides; test mixed-case configured names per dialect.
 - Do not edit already released change-set examples in ways that encourage checksum
   mutation.
 
