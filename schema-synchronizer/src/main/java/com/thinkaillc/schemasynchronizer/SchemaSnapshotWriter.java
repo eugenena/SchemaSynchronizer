@@ -426,8 +426,11 @@ public class SchemaSnapshotWriter {
                     portableVarchar(size, nullable, dialect, false);
             case "NVARCHAR", "NVARCHAR2" ->
                     portableVarchar(size, nullable, dialect, true);
+            case "VARBINARY", "BINARY" ->
+                    portableVarbinary(size, nullable, dialect);
             case "TEXT", "JSONB", "JSON", "BYTEA",
                  "TIMESTAMPTZ", "TIMESTAMP WITH TIME ZONE",
+                 "TIMESTAMP WITH LOCAL TIME ZONE",
                  "TIMESTAMP", "DATE", "BOOLEAN", "BIGINT",
                  "INTEGER", "INT", "INT4", "INT8", "BIGSERIAL", "SERIAL",
                  "FLOAT4", "FLOAT8", "DOUBLE PRECISION" ->
@@ -467,6 +470,20 @@ public class SchemaSnapshotWriter {
             return type + "(" + size + ")" + nullable;
         }
         return national ? type + "(MAX)" + nullable : "TEXT" + nullable;
+    }
+
+    private static String portableVarbinary(int size, String nullable, DatabaseDialect dialect) {
+        // JDBC reports VARBINARY(MAX) COLUMN_SIZE as Integer.MAX_VALUE / 2^31-1.
+        if (dialect == DatabaseDialect.SQLSERVER && (size <= 0 || size >= 10_000)) {
+            return "VARBINARY(MAX)" + nullable;
+        }
+        if (size > 0 && size < 10_000) {
+            return "VARBINARY(" + size + ")" + nullable;
+        }
+        if (dialect == DatabaseDialect.POSTGRESQL) {
+            return "BYTEA" + nullable;
+        }
+        return "VARBINARY(MAX)" + nullable;
     }
 
     private static String numericType(int precision, Integer scale) {

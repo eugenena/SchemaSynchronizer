@@ -12,6 +12,9 @@ import java.util.regex.Pattern;
  */
 public final class ColumnDefinitionParser {
 
+    /** Sentinel length for SQL Server {@code (MAX)} / unbounded portable forms. */
+    public static final int MAX_LENGTH = -1;
+
     private static final Pattern DEFAULT = Pattern.compile(
             "\\s+DEFAULT\\s+(.+)$", Pattern.CASE_INSENSITIVE);
     private static final Pattern NOT_NULL = Pattern.compile(
@@ -22,8 +25,12 @@ public final class ColumnDefinitionParser {
             "\\s+(?:GENERATED\\s+(?:BY\\s+DEFAULT|ALWAYS)\\s+AS\\s+IDENTITY(?:\\s*\\([^)]*\\))?|"
                     + "IDENTITY(?:\\s*\\(\\s*\\d+\\s*,\\s*\\d+\\s*\\))?)",
             Pattern.CASE_INSENSITIVE);
+    /** ojdbc reports {@code TIMESTAMP(6) WITH TIME ZONE} as TYPE_NAME. */
+    private static final Pattern TIMESTAMP_TZ = Pattern.compile(
+            "^(TIMESTAMP(?:\\(\\d+\\))?\\s+WITH\\s+(?:LOCAL\\s+)?TIME\\s+ZONE)\\b(.*)$",
+            Pattern.CASE_INSENSITIVE);
     private static final Pattern TYPE_LEN = Pattern.compile(
-            "^([A-Za-z][A-Za-z0-9_\\s]*?)(?:\\((\\d+)(?:\\s*,\\s*(\\d+))?\\))?$",
+            "^([A-Za-z][A-Za-z0-9_\\s]*?)(?:\\((MAX|\\d+)(?:\\s*,\\s*(\\d+))?\\))?$",
             Pattern.CASE_INSENSITIVE);
     private static final Pattern PG_CAST = Pattern.compile("::[A-Za-z][A-Za-z0-9_\\s]*$");
 
@@ -39,32 +46,66 @@ public final class ColumnDefinitionParser {
         String rest = definition.trim();
         rest = AUTO_INCREMENT.matcher(rest).replaceFirst("").trim();
         rest = IDENTITY.matcher(rest).replaceFirst("").trim();
+        // Greedy DEFAULT …$ would swallow a trailing constraint NOT NULL
+        // ("TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL"). Peel that constraint only when
+        // it sits outside single-quoted literals so defaults like 'is NOT NULL' stay intact.
+        boolean notNull = false;
         String defaultExpr = null;
         Matcher defM = DEFAULT.matcher(rest);
         if (defM.find()) {
             defaultExpr = defM.group(1).trim();
             rest = rest.substring(0, defM.start()).trim();
+            int peel = indexOfTrailingConstraintNotNull(defaultExpr);
+            if (peel >= 0) {
+                notNull = true;
+                defaultExpr = defaultExpr.substring(0, peel).trim();
+            }
         }
-        boolean notNull = false;
         Matcher nn = NOT_NULL.matcher(rest);
         if (nn.find()) {
             notNull = true;
-            rest = rest.substring(0, nn.start()).trim();
+            rest = (rest.substring(0, nn.start()) + rest.substring(nn.end())).trim();
+        }
+        Matcher tz = TIMESTAMP_TZ.matcher(rest);
+        if (tz.matches()) {
+            String leftover = tz.group(2) == null ? "" : tz.group(2).trim();
+            if (!leftover.isEmpty()) {
+                throw new IllegalArgumentException("unparseable column type: " + definition);
+            }
+            return new ColumnSpec("TIMESTAMPTZ", null, null, notNull, defaultExpr);
         }
         Matcher tm = TYPE_LEN.matcher(rest);
         if (!tm.matches()) {
             throw new IllegalArgumentException("unparseable column type: " + definition);
         }
         String rawType = tm.group(1).trim();
-        Integer length = tm.group(2) != null ? Integer.parseInt(tm.group(2)) : null;
-        Integer scale = tm.group(3) != null ? Integer.parseInt(tm.group(3)) : null;
-        if (scale != null && !"NUMERIC".equals(normalizeType(rawType))) {
+        Integer length = null;
+        Integer scale = null;
+        if (tm.group(2) != null) {
+            if ("MAX".equalsIgnoreCase(tm.group(2))) {
+                length = MAX_LENGTH;
+            } else {
+                length = Integer.parseInt(tm.group(2));
+            }
+        }
+        if (tm.group(3) != null) {
+            if (length != null && length == MAX_LENGTH) {
+                throw new IllegalArgumentException("MAX types cannot have a scale: " + definition);
+            }
+            scale = Integer.parseInt(tm.group(3));
+        }
+        String normalized = normalizeType(rawType);
+        if (length != null && length == MAX_LENGTH
+                && !"VARCHAR".equals(normalized) && !"VARBINARY".equals(normalized)) {
+            throw new IllegalArgumentException("MAX length is only valid for VARCHAR/VARBINARY: " + definition);
+        }
+        if (scale != null && !"NUMERIC".equals(normalized)) {
             throw new IllegalArgumentException("scale is supported only for NUMERIC: " + definition);
         }
         if (scale != null && scale > length) {
             throw new IllegalArgumentException("NUMERIC scale exceeds precision: " + definition);
         }
-        return new ColumnSpec(normalizeType(rawType), length, scale, notNull, defaultExpr);
+        return new ColumnSpec(normalized, length, scale, notNull, defaultExpr);
     }
 
     public static String normalizeDefault(String defaultExpr) {
@@ -97,8 +138,10 @@ public final class ColumnDefinitionParser {
             case "DECIMAL", "NUMERIC", "NUMBER" -> "NUMERIC";
             case "FLOAT4", "REAL" -> "REAL";
             case "FLOAT8", "DOUBLE PRECISION", "DOUBLE" -> "DOUBLE PRECISION";
-            case "TIMESTAMP WITH TIME ZONE", "TIMESTAMPTZ" -> "TIMESTAMPTZ";
+            case "TIMESTAMP WITH TIME ZONE", "TIMESTAMPTZ",
+                 "TIMESTAMP WITH LOCAL TIME ZONE" -> "TIMESTAMPTZ";
             case "TIMESTAMP WITHOUT TIME ZONE", "TIMESTAMP" -> "TIMESTAMP";
+            case "VARBINARY", "BINARY" -> "VARBINARY";
             case "BIGSERIAL" -> "BIGINT"; // compare as bigint for widen checks
             case "SERIAL" -> "INTEGER";
             default -> t;
@@ -122,5 +165,45 @@ public final class ColumnDefinitionParser {
             case "DOUBLE PRECISION" -> 2;
             default -> -1;
         };
+    }
+
+    /** Effective length for widen/narrow compares; {@link #MAX_LENGTH} is unbounded. */
+    public static int effectiveLength(Integer length) {
+        if (length == null || length == MAX_LENGTH) {
+            return Integer.MAX_VALUE;
+        }
+        return length;
+    }
+
+    /**
+     * Index of a trailing {@code NOT NULL} constraint in a DEFAULT expression, or {@code -1}.
+     * Ignores {@code NOT NULL} inside single-quoted literals ({@code ''}-escaped).
+     */
+    static int indexOfTrailingConstraintNotNull(String defaultExpr) {
+        if (defaultExpr == null || defaultExpr.isEmpty()) {
+            return -1;
+        }
+        Matcher trailing = Pattern.compile("\\s+NOT\\s+NULL\\s*$", Pattern.CASE_INSENSITIVE)
+                .matcher(defaultExpr);
+        if (!trailing.find()) {
+            return -1;
+        }
+        return isInsideSingleQuotes(defaultExpr, trailing.start()) ? -1 : trailing.start();
+    }
+
+    /** True when {@code index} falls inside a single-quoted SQL literal. */
+    static boolean isInsideSingleQuotes(String text, int index) {
+        boolean inQuote = false;
+        for (int i = 0; i < index; i++) {
+            if (text.charAt(i) != '\'') {
+                continue;
+            }
+            if (inQuote && i + 1 < text.length() && text.charAt(i + 1) == '\'') {
+                i++;
+                continue;
+            }
+            inQuote = !inQuote;
+        }
+        return inQuote;
     }
 }

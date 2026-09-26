@@ -62,8 +62,11 @@ final class DialectSupport {
         return switch (dialect) {
             case POSTGRESQL -> "ALTER TABLE " + qualifiedHistory
                     + " ADD COLUMN IF NOT EXISTS applied_by VARCHAR(200)";
-            case MARIADB, MYSQL -> "ALTER TABLE " + qualifiedHistory
+            // MariaDB accepts IF NOT EXISTS; MySQL 8/9 does not — catch duplicate column instead.
+            case MARIADB -> "ALTER TABLE " + qualifiedHistory
                     + " ADD COLUMN IF NOT EXISTS applied_by VARCHAR(200)";
+            case MYSQL -> "ALTER TABLE " + qualifiedHistory
+                    + " ADD COLUMN applied_by VARCHAR(200)";
             case SQLSERVER -> "IF COL_LENGTH(N'" + escapeSqlServerLiteral(qualifiedHistory)
                     + "', N'applied_by') IS NULL ALTER TABLE " + qualifiedHistory
                     + " ADD applied_by VARCHAR(200) NULL";
@@ -71,6 +74,58 @@ final class DialectSupport {
                     + " ADD applied_by VARCHAR2(200)'; "
                     + "EXCEPTION WHEN OTHERS THEN IF SQLCODE != -1430 THEN RAISE; END IF; END;";
         };
+    }
+
+    /**
+     * True when {@code error} is a duplicate-column failure for the dialect
+     * (idempotent history {@code applied_by} migration).
+     */
+    static boolean isDuplicateColumn(DatabaseDialect dialect, SQLException error) {
+        if (error == null) {
+            return false;
+        }
+        for (Throwable current = error; current != null; current = nextSqlFailure(current)) {
+            if (!(current instanceof SQLException sql)) {
+                continue;
+            }
+            String state = sql.getSQLState();
+            int code = sql.getErrorCode();
+            switch (dialect) {
+                case MYSQL, MARIADB -> {
+                    // 1060 = ER_DUP_FIELDNAME
+                    if (code == 1060 || "42S21".equals(state)) {
+                        return true;
+                    }
+                }
+                case POSTGRESQL -> {
+                    // 42701 = duplicate_column
+                    if ("42701".equals(state)) {
+                        return true;
+                    }
+                }
+                case SQLSERVER -> {
+                    // 2705 = Column names in each table must be unique
+                    if (code == 2705) {
+                        return true;
+                    }
+                }
+                case ORACLE -> {
+                    // ORA-01430 = column being added already exists
+                    if (code == 1430) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    /** Prefer {@link SQLException#getNextException()}, then {@link Throwable#getCause()}. */
+    private static Throwable nextSqlFailure(Throwable current) {
+        if (current instanceof SQLException sql && sql.getNextException() != null) {
+            return sql.getNextException();
+        }
+        return current.getCause();
     }
 
     /**
