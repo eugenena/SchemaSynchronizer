@@ -27,14 +27,14 @@ applications normally sync the committed file onto their single datasource.
 2. Offline check:
 
    ```bash
-   java -jar schema-synchronizer-cli-1.3.1-standalone.jar validate schema-definition.json
+   java -jar schema-synchronizer-cli-1.4.0-standalone.jar validate schema-definition.json
    ```
 
 3. Preview against a disposable database:
 
    ```bash
    export SCHEMA_DB_PASSWORD='…'
-   java -jar schema-synchronizer-cli-1.3.1-standalone.jar dry-run \
+   java -jar schema-synchronizer-cli-1.4.0-standalone.jar dry-run \
      jdbc:postgresql://localhost:5432/app_scratch app_user - \
      schema-definition.json public
    ```

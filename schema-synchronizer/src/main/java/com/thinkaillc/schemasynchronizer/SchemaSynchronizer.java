@@ -63,9 +63,9 @@ public class SchemaSynchronizer {
      * SchemaSynchronizer &lt;jdbc-url&gt; &lt;user&gt; &lt;password-or--&gt; &lt;schema-file&gt;
      *     [schema] [history-table]
      * </pre>
-     * Use {@code -} for the password to read {@code SCHEMA_DB_PASSWORD}. The optional
-     * schema and history table default to {@code public} and
-     * {@code schema_synchronizer_history}.
+     * Use {@code -} for the password to read {@code SCHEMA_DB_PASSWORD}. Literal
+     * passwords on the command line are rejected. The optional schema and history
+     * table default to {@code public} and {@code schema_synchronizer_history}.
      */
     public static void main(String[] args) throws Exception {
         runFromArgs(args, false);
@@ -73,8 +73,9 @@ public class SchemaSynchronizer {
 
     /**
      * Dry-run entry point with the same arguments as {@link #main(String[])}.
-     * Plans work without committing DDL (PostgreSQL); MariaDB/MySQL may still commit
-     * implicit DDL — rehearse against a disposable instance.
+     * Plans work without executing DDL. Dialects where
+     * {@link DatabaseDialect#supportsTransactionalDryRun()} is true also roll back
+     * any transactional control work; others only skip statement execution.
      */
     public static void dryRunMain(String[] args) throws Exception {
         runFromArgs(args, true);
@@ -105,7 +106,7 @@ public class SchemaSynchronizer {
                     + "<password-or--> <schema-file> [schema] [history-table]");
         }
 
-        String password = readPassword(args[2]);
+        String password = CliCredentials.requirePasswordFromEnv(args[2]);
         Path schemaFile = Path.of(args[3]);
         String schema = SqlIdentifiers.requireIdentifierPreservingCase(
                 args.length >= 5 ? args[4] : "public", "schema");
@@ -128,18 +129,6 @@ public class SchemaSynchronizer {
                 log.info("[SchemaSynchronizer] Planned statements: {}", result.plannedSql().size());
             }
         }
-    }
-
-    private static String readPassword(String argument) {
-        if (!"-".equals(argument)) {
-            return argument;
-        }
-        String password = System.getenv("SCHEMA_DB_PASSWORD");
-        if (password == null) {
-            throw new IllegalArgumentException(
-                    "SCHEMA_DB_PASSWORD must be set when the password argument is '-'");
-        }
-        return password;
     }
 
     private static SchemaDefinition readDefinition(ObjectMapper mapper, Path schemaFile) throws IOException {
@@ -207,10 +196,45 @@ public class SchemaSynchronizer {
                     + maxId + " characters (schema='" + options.schema() + "', history='"
                     + options.historyTable() + "')");
         }
+        rejectMisleadingDefaultSchema(targetDialect, options.schema());
+        if (options.dryRun() && !targetDialect.supportsTransactionalDryRun()) {
+            log.warn("[SchemaSynchronizer] Dry-run on {} skips statement execution and verificationSql, "
+                            + "but this dialect does not support transactional dry-run rollback "
+                            + "(DatabaseDialect.supportsTransactionalDryRun()=false). "
+                            + "Use a disposable instance for rehearsals that must touch the database.",
+                    targetDialect.id());
+        }
         if (targetDialect.ddlMayCommitImplicitly()) {
             return synchronizeImplicitDdlDialect(conn, def, targetDialect);
         }
+        if (!targetDialect.supportsTransactionalDryRun() && options.dryRun()) {
+            // Defensive: transactional path assumes rollback is meaningful.
+            log.warn("[SchemaSynchronizer] Entering transactional sync path on {} without "
+                    + "supportsTransactionalDryRun; dry-run will still attempt rollback", targetDialect.id());
+        }
         return synchronizeTransactionalDialect(conn, def, targetDialect);
+    }
+
+    /** Boot and CLI often leave schema=public; SQL Server/Oracle need dbo / connected user. */
+    private static void rejectMisleadingDefaultSchema(DatabaseDialect dialect, String schema) {
+        if (!"public".equalsIgnoreCase(schema)) {
+            return;
+        }
+        if (dialect == DatabaseDialect.SQLSERVER) {
+            throw new IllegalArgumentException(
+                    "SQL Server schema must not be 'public'; set schema-synchronizer.schema=dbo "
+                            + "(or the application schema name)");
+        }
+        if (dialect == DatabaseDialect.ORACLE) {
+            throw new IllegalArgumentException(
+                    "Oracle schema must not be 'public'; set schema-synchronizer.schema to the "
+                            + "connected user/schema name");
+        }
+        if (dialect.isMySqlFamily()) {
+            throw new IllegalArgumentException(
+                    dialect.id() + " uses the database/catalog as its namespace; set "
+                            + "schema-synchronizer.schema to the catalog name (not 'public')");
+        }
     }
 
     private SchemaSynchronizationResult synchronizeTransactionalDialect(Connection conn, SchemaDefinition def,
@@ -255,6 +279,10 @@ public class SchemaSynchronizer {
                         + String.join(" | ", declarative.pendingSql()));
             }
             if (options.dryRun()) {
+                if (!dialect.supportsTransactionalDryRun()) {
+                    throw new IllegalStateException(dialect.id()
+                            + " does not support transactional dry-run rollback");
+                }
                 rollback(conn, ownsTransaction, savepoint);
             } else if (ownsTransaction) {
                 conn.commit();

@@ -33,8 +33,8 @@ import org.slf4j.LoggerFactory;
  *     -Dexec.args="jdbc:postgresql://localhost:5432/app app_user - public src/main/resources/schema-definition.json" \
  *     -Dexec.classpathScope=compile
  * </pre>
- * The {@code -} password argument reads {@code SCHEMA_DB_PASSWORD}, keeping the
- * credential out of process arguments. Or use {@code scripts/serialize-schema.sh}.
+ * The {@code -} password argument is required and reads {@code SCHEMA_DB_PASSWORD}
+ * (literal passwords on argv are rejected). Or use {@code scripts/serialize-schema.sh}.
  *
  * <p>The generated file is committed to source control and used by {@link SchemaSynchronizer}
  * on every startup to verify and fix the production schema additively.
@@ -76,17 +76,13 @@ public class SchemaSnapshotWriter {
 
         if (args.length != 5) {
             throw new IllegalArgumentException(
-                    "Usage: SchemaSnapshotWriter <jdbc-url> <user> <password> <schema> <output-path> "
+                    "Usage: SchemaSnapshotWriter <jdbc-url> <user> - <schema> <output-path> "
                             + "or SchemaSnapshotWriter --restore-json [output-path]");
         }
 
         String url = args[0];
         String user = args[1];
-        String password = "-".equals(args[2]) ? System.getenv("SCHEMA_DB_PASSWORD") : args[2];
-        if (password == null) {
-            throw new IllegalArgumentException(
-                    "SCHEMA_DB_PASSWORD must be set when the password argument is '-'");
-        }
+        String password = CliCredentials.requirePasswordFromEnv(args[2]);
         String schema = SqlIdentifiers.requireIdentifier(args[3], "schema");
         Path outputPath = Paths.get(args[4]);
 
