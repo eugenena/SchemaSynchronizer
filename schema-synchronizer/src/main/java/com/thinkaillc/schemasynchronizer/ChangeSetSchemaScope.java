@@ -34,12 +34,20 @@ final class ChangeSetSchemaScope {
                     + "|COMMENT\\s+ON\\s+DATABASE\\s+)"
                     + IDENT);
 
-    /** MySQL/MariaDB / SQL Server grant targets that escape schema.object matching. */
-    private static final Pattern UNSAFE_GRANT_TARGET = Pattern.compile(
-            "(?i)\\bGRANT\\b[^;]*\\bON\\s+(?:TABLE\\s+)?"
-                    + "(?:\\*\\s*\\.\\s*\\*"                          // *.*
-                    + "|\\S+\\s*\\.\\s*\\*"                           // otherdb.* / `other`.*
-                    + "|DATABASE\\s*::)");                            // DATABASE::evil
+    /**
+     * Every {@code ON [TABLE] db.*} / {@code ON *.*} occurrence (matched independently so a
+     * later in-scope grant cannot hide an earlier foreign one).
+     */
+    private static final Pattern GRANT_ON_DB_STAR = Pattern.compile(
+            "(?i)\\bON\\s+(?:TABLE\\s+)?(?:"
+                    + "(\\*)\\s*\\.\\s*\\*"
+                    + "|(?:\"([^\"]+)\"|\\[([^\\]]+)\\]|`([^`]+)`|([A-Za-z_][A-Za-z0-9_]*))"
+                    + "\\s*\\.\\s*\\*)");
+
+    private static final Pattern GRANT_DATABASE_COLON = Pattern.compile(
+            "(?i)\\bON\\s+DATABASE\\s*::\\s*" + IDENT);
+
+    private static final Pattern GRANT_KEYWORD = Pattern.compile("(?i)\\bGRANT\\b");
 
     /** Session namespace mutators that would defeat schema binding for unqualified DDL. */
     private static final Pattern SESSION_NAMESPACE = Pattern.compile(
@@ -67,11 +75,7 @@ final class ChangeSetSchemaScope {
         // Mask only comments and ordinary string literals so "schema"."table",
         // [schema].[table], and `schema`.`table` remain visible for binding checks.
         String scannable = maskStringsAndComments(sql);
-        if (UNSAFE_GRANT_TARGET.matcher(scannable).find()) {
-            throw new IllegalArgumentException(
-                    "schema change SQL must not GRANT on global/foreign wildcards (*.*, db.*, DATABASE::): "
-                            + summarize(sql));
-        }
+        rejectUnsafeGrants(scannable, allowed, configuredNamespace, sql);
         rejectForeignSchema(QUALIFIED.matcher(scannable), allowed, configuredNamespace, sql,
                 "targets namespace");
         rejectForeignSchema(IN_SCHEMA.matcher(scannable), allowed, configuredNamespace, sql,
@@ -83,6 +87,7 @@ final class ChangeSetSchemaScope {
         if (scannable.toUpperCase(Locale.ROOT)
                 .matches("(?s)^CREATE\\s+(OR\\s+REPLACE\\s+)?(FUNCTION|TRIGGER|PROCEDURE)\\b.*")) {
             String body = NonDestructiveSqlPolicy.routineBodyForScan(sql);
+            rejectUnsafeGrants(body, allowed, configuredNamespace, sql);
             rejectForeignSchema(QUALIFIED.matcher(body), allowed, configuredNamespace, sql,
                     "targets namespace inside routine body");
             rejectForeignSchema(IN_SCHEMA.matcher(body), allowed, configuredNamespace, sql,
@@ -95,6 +100,48 @@ final class ChangeSetSchemaScope {
                                 + summarize(sql));
             }
         }
+    }
+
+    private static void rejectUnsafeGrants(String scannable, String allowed, String configuredNamespace,
+                                           String sql) {
+        Matcher star = GRANT_ON_DB_STAR.matcher(scannable);
+        while (star.find()) {
+            if (!grantKeywordInCurrentStatement(scannable, star.start())) {
+                continue;
+            }
+            String starDb = star.group(1);
+            if (starDb != null) {
+                throw new IllegalArgumentException(
+                        "schema change SQL must not GRANT on *.* (cross-database privileges): "
+                                + summarize(sql));
+            }
+            String db = optionalCapture(star, 2, 3, 4, 5);
+            if (db == null || !db.toLowerCase(Locale.ROOT).equals(allowed)) {
+                throw new IllegalArgumentException(
+                        "schema change SQL GRANT targets database '" + (db == null ? "?" : db)
+                                + "' but synchronizer is configured for '" + configuredNamespace
+                                + "': " + summarize(sql));
+            }
+        }
+        Matcher database = GRANT_DATABASE_COLON.matcher(scannable);
+        while (database.find()) {
+            if (!grantKeywordInCurrentStatement(scannable, database.start())) {
+                continue;
+            }
+            String db = firstNonNull(database, 1, 2, 3, 4).toLowerCase(Locale.ROOT);
+            if (!db.equals(allowed)) {
+                throw new IllegalArgumentException(
+                        "schema change SQL GRANT targets DATABASE::'" + firstNonNull(database, 1, 2, 3, 4)
+                                + "' but synchronizer is configured for '" + configuredNamespace
+                                + "': " + summarize(sql));
+            }
+        }
+    }
+
+    /** True when {@code GRANT} appears in the same semicolon-delimited statement as {@code offset}. */
+    private static boolean grantKeywordInCurrentStatement(String scannable, int offset) {
+        int statementStart = scannable.lastIndexOf(';', Math.max(0, offset - 1)) + 1;
+        return GRANT_KEYWORD.matcher(scannable.substring(statementStart, offset)).find();
     }
 
     private static void rejectForeignSchema(Matcher matcher, String allowed, String configuredNamespace,
@@ -113,14 +160,22 @@ final class ChangeSetSchemaScope {
         }
     }
 
-    private static String firstNonNull(Matcher matcher, int... groups) {
+    private static String optionalCapture(Matcher matcher, int... groups) {
         for (int group : groups) {
             String value = matcher.group(group);
             if (value != null && !value.isBlank()) {
                 return value;
             }
         }
-        throw new IllegalStateException("qualified-name match missing schema capture");
+        return null;
+    }
+
+    private static String firstNonNull(Matcher matcher, int... groups) {
+        String value = optionalCapture(matcher, groups);
+        if (value == null) {
+            throw new IllegalStateException("qualified-name match missing schema capture");
+        }
+        return value;
     }
 
     private static boolean isSystemCatalog(String schema) {

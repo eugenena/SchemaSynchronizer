@@ -251,6 +251,16 @@ class SchemaSynchronizerTest {
     }
 
     @Test
+    void dropIndexSqlIsDialectAware() {
+        assertThat(SchemaSynchronizer.dropIndexSql(DatabaseDialect.SQLSERVER, "idx", "items"))
+                .isEqualTo("DROP INDEX idx ON items;");
+        assertThat(SchemaSynchronizer.dropIndexSql(DatabaseDialect.POSTGRESQL, "idx", "items"))
+                .isEqualTo("DROP INDEX IF EXISTS idx;");
+        assertThat(SchemaSynchronizer.dropIndexSql(DatabaseDialect.MYSQL, "idx", "items"))
+                .isEqualTo("DROP INDEX idx ON items;");
+    }
+
+    @Test
     void ignoresOnlyMigrationAndOwnHistorySchemaNoise() {
         assertThat(SchemaSynchronizer.isIgnorableSchemaTable("flyway_schema_history")).isTrue();
         assertThat(SchemaSynchronizer.isIgnorableSchemaTable("schema_synchronizer_history")).isTrue();

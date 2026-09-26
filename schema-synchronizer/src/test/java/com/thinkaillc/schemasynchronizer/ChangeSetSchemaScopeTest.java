@@ -170,11 +170,26 @@ class ChangeSetSchemaScopeTest {
                 "GRANT SELECT ON TABLE *.* TO reader", "public"))
                 .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> ChangeSetSchemaScope.requireScoped(
-                "GRANT SELECT ON otherdb.* TO reader", "public"))
-                .isInstanceOf(IllegalArgumentException.class);
+                "GRANT SELECT ON otherdb.* TO reader", "appdb"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("otherdb");
+        assertThatCode(() -> ChangeSetSchemaScope.requireScoped(
+                "GRANT SELECT ON appdb.* TO reader", "appdb"))
+                .doesNotThrowAnyException();
+        assertThatCode(() -> ChangeSetSchemaScope.requireScoped(
+                "GRANT SELECT ON TABLE `appdb`.* TO reader", "appdb"))
+                .doesNotThrowAnyException();
+        assertThatThrownBy(() -> ChangeSetSchemaScope.requireScoped(
+                "GRANT SELECT ON evil.* TO u GRANT SELECT ON appdb.* TO u", "appdb"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("evil");
         assertThatThrownBy(() -> ChangeSetSchemaScope.requireScoped(
                 "GRANT CONNECT ON DATABASE::evil TO reader", "dbo"))
-                .isInstanceOf(IllegalArgumentException.class);
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("evil");
+        assertThatCode(() -> ChangeSetSchemaScope.requireScoped(
+                "GRANT CONNECT ON DATABASE::dbo TO reader", "dbo"))
+                .doesNotThrowAnyException();
         assertThatThrownBy(() -> ChangeSetSchemaScope.requireScoped(
                 "GRANT SELECT ON SCHEMA::other TO reader", "dbo"))
                 .isInstanceOf(IllegalArgumentException.class)
