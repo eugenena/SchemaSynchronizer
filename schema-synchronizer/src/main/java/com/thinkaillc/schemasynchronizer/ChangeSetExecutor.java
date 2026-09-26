@@ -208,7 +208,13 @@ final class ChangeSetExecutor {
 
     private void createHistory(Connection conn, String history, DatabaseDialect dialect) throws SQLException {
         execute(conn, DialectSupport.createHistoryDdl(dialect, history));
-        execute(conn, DialectSupport.addAppliedByColumnDdl(dialect, history));
+        try {
+            execute(conn, DialectSupport.addAppliedByColumnDdl(dialect, history));
+        } catch (SQLException error) {
+            if (!DialectSupport.isDuplicateColumn(dialect, error)) {
+                throw error;
+            }
+        }
     }
 
     private boolean isVerified(Connection conn, SchemaDefinition.ChangeSet change) throws SQLException {

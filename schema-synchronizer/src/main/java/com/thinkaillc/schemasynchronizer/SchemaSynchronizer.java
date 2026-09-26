@@ -918,9 +918,16 @@ public class SchemaSynchronizer {
                 Integer length = null;
                 Integer scale = null;
                 String normalized = ColumnDefinitionParser.normalizeType(typeName);
-                if (("VARCHAR".equals(normalized) || "CHAR".equals(normalized))
-                        && size > 0 && size < 10_000) {
-                    length = size;
+                if ("VARCHAR".equals(normalized) || "CHAR".equals(normalized)
+                        || "VARBINARY".equals(normalized)) {
+                    if (size > 0 && size < 10_000) {
+                        length = size;
+                    } else if ("VARBINARY".equals(normalized)
+                            && (size <= 0 || size >= 10_000)) {
+                        // SQL Server VARBINARY(MAX) reports COLUMN_SIZE as Integer.MAX_VALUE.
+                        length = ColumnDefinitionParser.MAX_LENGTH;
+                    }
+                    // VARCHAR/CHAR with size >= 10_000 keep length=null (effectiveLength ≡ MAX).
                 } else if ("NUMERIC".equals(normalized) && size > 0 && size <= 1_000) {
                     length = size;
                     scale = decimalDigitsNull ? null : decimalDigits;
