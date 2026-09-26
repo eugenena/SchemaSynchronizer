@@ -66,9 +66,9 @@ public final class NonDestructiveAlterPlanner {
             String liveType, Integer liveLen, Integer liveScale,
             String targetType, Integer targetLen, Integer targetScale) {
         if (liveType.equals(targetType)) {
-            if ("VARCHAR".equals(liveType) || "CHAR".equals(liveType)) {
-                int liveL = liveLen == null ? Integer.MAX_VALUE : liveLen;
-                int targetL = targetLen == null ? Integer.MAX_VALUE : targetLen;
+            if ("VARCHAR".equals(liveType) || "CHAR".equals(liveType) || "VARBINARY".equals(liveType)) {
+                int liveL = ColumnDefinitionParser.effectiveLength(liveLen);
+                int targetL = ColumnDefinitionParser.effectiveLength(targetLen);
                 if (targetL > liveL) return TypeChange.WIDEN;
                 if (targetL < liveL) return TypeChange.NARROW;
                 return TypeChange.SAME;
@@ -93,8 +93,8 @@ public final class NonDestructiveAlterPlanner {
             return TypeChange.SAME;
         }
         if ("CHAR".equals(liveType) && "VARCHAR".equals(targetType)) {
-            int liveL = liveLen == null ? Integer.MAX_VALUE : liveLen;
-            int targetL = targetLen == null ? Integer.MAX_VALUE : targetLen;
+            int liveL = ColumnDefinitionParser.effectiveLength(liveLen);
+            int targetL = ColumnDefinitionParser.effectiveLength(targetLen);
             return targetL >= liveL ? TypeChange.WIDEN : TypeChange.NARROW;
         }
         // VARCHAR → TEXT
@@ -128,9 +128,16 @@ public final class NonDestructiveAlterPlanner {
         if ("VECTOR".equals(baseType) && length != null && length > 0) {
             return "VECTOR(" + length + ")";
         }
-        if (("VARCHAR".equals(baseType) || "CHAR".equals(baseType))
-                && length != null && length > 0 && length < 10_000) {
-            return baseType + "(" + length + ")";
+        if (("VARCHAR".equals(baseType) || "CHAR".equals(baseType) || "VARBINARY".equals(baseType))
+                && length != null) {
+            // CHAR(MAX) is invalid on SQL Server; only VARCHAR/VARBINARY use (MAX).
+            if (length == ColumnDefinitionParser.MAX_LENGTH
+                    && ("VARCHAR".equals(baseType) || "VARBINARY".equals(baseType))) {
+                return baseType + "(MAX)";
+            }
+            if (length > 0 && length < 10_000) {
+                return baseType + "(" + length + ")";
+            }
         }
         return baseType;
     }

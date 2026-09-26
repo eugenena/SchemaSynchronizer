@@ -52,8 +52,10 @@ or isolate synchronization in a dedicated configuration.
 
 ## Dry run changed MariaDB or MySQL
 
-Those engines can commit DDL implicitly. Dry run cannot provide PostgreSQL-style
-transactional rollback. Rehearse against a disposable instance instead.
+Dry-run skips statement execution and `verificationSql` on every dialect. Engines
+where `supportsTransactionalDryRun()` is false (MariaDB, MySQL, Oracle) do not get
+a transactional rollback of control SQL either. Rehearse against a disposable
+instance when you need a live catalog preview.
 
 ## An externally managed table is reported as orphaned
 

@@ -53,9 +53,21 @@ public final class SchemaDefinitionValidator {
                 && (definition.dialect() == null || definition.dialect().isBlank())) {
             throw new IllegalArgumentException("formatVersion 2 definitions require a dialect");
         }
+        int maxId = dialect.maxIdentifierLength();
+        if (schema.length() > maxId) {
+            throw new IllegalArgumentException(dialect.id() + " schema identifiers must be at most "
+                    + maxId + " characters: " + schema);
+        }
+        if ("public".equalsIgnoreCase(schema)
+                && (dialect == DatabaseDialect.SQLSERVER
+                || dialect == DatabaseDialect.ORACLE
+                || dialect.isMySqlFamily())) {
+            throw new IllegalArgumentException(dialect.id()
+                    + " definitions must not use schema 'public'; pass dbo / catalog / connected user");
+        }
         SchemaSynchronizerOptions options = new SchemaSynchronizerOptions(
                 schema, "schema_synchronizer_history", 7_249_031_147L, false, true, true);
         SchemaSynchronizer.validateDeclarative(definition, dialect, options);
-        new ChangeSetExecutor().validate(definition.changes());
+        new ChangeSetExecutor().validate(definition.changes(), options);
     }
 }

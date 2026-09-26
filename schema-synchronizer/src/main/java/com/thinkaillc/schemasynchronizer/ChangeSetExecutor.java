@@ -30,14 +30,12 @@ final class ChangeSetExecutor {
     Result apply(Connection conn, List<SchemaDefinition.ChangeSet> changes, SchemaSynchronizerOptions options,
                  DatabaseDialect dialect)
             throws Exception {
-        List<SchemaDefinition.ChangeSet> safeChanges = validate(changes);
+        List<SchemaDefinition.ChangeSet> safeChanges = validate(changes, options);
         if (safeChanges.isEmpty()) {
             return new Result(0, List.of());
         }
 
-        String history = dialect == DatabaseDialect.POSTGRESQL
-                ? SqlIdentifiers.qualified(options.schema(), options.historyTable())
-                : SqlIdentifiers.requireIdentifier(options.historyTable(), "history table");
+        String history = dialect.qualifyHistoryTable(options.schema(), options.historyTable());
         Map<String, String> applied = historyExists(conn, options, dialect) ? readHistory(conn, history) : Map.of();
         List<String> planned = new ArrayList<>();
         int appliedCount = 0;
@@ -54,7 +52,10 @@ final class ChangeSetExecutor {
                 continue;
             }
             unrecordedCount++;
-            if (!isVerified(conn, change)) {
+            // Dry-run must not execute verificationSql (UDFs / admin SELECT side effects).
+            if (options.dryRun()) {
+                planned.addAll(change.statements());
+            } else if (!isVerified(conn, change)) {
                 planned.addAll(change.statements());
             }
         }
@@ -107,7 +108,8 @@ final class ChangeSetExecutor {
         return new Result(appliedCount, List.copyOf(planned));
     }
 
-    List<SchemaDefinition.ChangeSet> validate(List<SchemaDefinition.ChangeSet> changes) {
+    List<SchemaDefinition.ChangeSet> validate(List<SchemaDefinition.ChangeSet> changes,
+                                              SchemaSynchronizerOptions options) {
         if (changes == null || changes.isEmpty()) {
             return List.of();
         }
@@ -129,9 +131,13 @@ final class ChangeSetExecutor {
             if (change.statements() == null || change.statements().isEmpty()) {
                 throw new IllegalArgumentException("schema change has no statements: " + change.id());
             }
-            change.statements().forEach(NonDestructiveSqlPolicy::requireSafe);
+            change.statements().forEach(statement -> {
+                NonDestructiveSqlPolicy.requireSafe(statement);
+                ChangeSetSchemaScope.requireScoped(statement, options.schema());
+            });
             if (change.verificationSql() != null) {
                 NonDestructiveSqlPolicy.requireReadOnlyVerification(change.verificationSql());
+                ChangeSetSchemaScope.requireScoped(change.verificationSql(), options.schema());
             }
         }
         return List.copyOf(changes);
@@ -140,9 +146,7 @@ final class ChangeSetExecutor {
     void validateHistory(Connection conn, List<SchemaDefinition.ChangeSet> changes, SchemaSynchronizerOptions options,
                          DatabaseDialect dialect)
             throws Exception {
-        String history = dialect == DatabaseDialect.POSTGRESQL
-                ? SqlIdentifiers.qualified(options.schema(), options.historyTable())
-                : SqlIdentifiers.requireIdentifier(options.historyTable(), "history table");
+        String history = dialect.qualifyHistoryTable(options.schema(), options.historyTable());
         Map<String, String> applied = historyExists(conn, options, dialect) ? readHistory(conn, history) : Map.of();
         Map<String, String> expected = new HashMap<>();
         for (SchemaDefinition.ChangeSet change : changes) {
@@ -159,7 +163,7 @@ final class ChangeSetExecutor {
                         + entry.getKey() + "': committed changes are immutable");
             }
         }
-        if (dialect.isMySqlFamily()) {
+        if (dialect.ddlMayCommitImplicitly()) {
             for (SchemaDefinition.ChangeSet change : changes) {
                 if (applied.containsKey(change.id())) {
                     continue;
@@ -180,10 +184,10 @@ final class ChangeSetExecutor {
 
     private boolean historyExists(Connection conn, SchemaSynchronizerOptions options, DatabaseDialect dialect)
             throws SQLException {
-        String catalog = dialect == DatabaseDialect.POSTGRESQL ? null : conn.getCatalog();
-        String schema = dialect == DatabaseDialect.POSTGRESQL ? options.schema() : null;
+        String catalog = dialect.metadataCatalog(conn, options.schema());
+        String schema = dialect.metadataSchemaPattern(options.schema());
         try (ResultSet tables = conn.getMetaData().getTables(
-                catalog, schema, options.historyTable(), new String[]{"TABLE"})) {
+                catalog, schema, dialect.metadataObjectName(options.historyTable()), new String[]{"TABLE"})) {
             return tables.next();
         }
     }
@@ -203,17 +207,14 @@ final class ChangeSetExecutor {
     }
 
     private void createHistory(Connection conn, String history, DatabaseDialect dialect) throws SQLException {
-        String identity = dialect == DatabaseDialect.POSTGRESQL
-                ? "BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY"
-                : "BIGINT AUTO_INCREMENT PRIMARY KEY";
-        String timestamp = dialect == DatabaseDialect.POSTGRESQL ? "TIMESTAMPTZ" : "TIMESTAMP";
-        execute(conn, "CREATE TABLE IF NOT EXISTS " + history + " ("
-                + "installed_rank " + identity + ", "
-                + "change_id VARCHAR(200) NOT NULL UNIQUE, "
-                + "checksum CHAR(64) NOT NULL, "
-                + "description VARCHAR(500), "
-                + "applied_at " + timestamp + " NOT NULL DEFAULT CURRENT_TIMESTAMP, "
-                + "execution_ms BIGINT NOT NULL)");
+        execute(conn, DialectSupport.createHistoryDdl(dialect, history));
+        try {
+            execute(conn, DialectSupport.addAppliedByColumnDdl(dialect, history));
+        } catch (SQLException error) {
+            if (!DialectSupport.isDuplicateColumn(dialect, error)) {
+                throw error;
+            }
+        }
     }
 
     private boolean isVerified(Connection conn, SchemaDefinition.ChangeSet change) throws SQLException {
@@ -242,11 +243,12 @@ final class ChangeSetExecutor {
                                String checksum, long elapsed) throws SQLException {
         try (var statement = conn.prepareStatement(
                 "INSERT INTO " + history
-                        + " (change_id, checksum, description, execution_ms) VALUES (?, ?, ?, ?)")) {
+                        + " (change_id, checksum, description, applied_by, execution_ms) VALUES (?, ?, ?, ?, ?)")) {
             statement.setString(1, change.id());
             statement.setString(2, checksum);
             statement.setString(3, change.description());
-            statement.setLong(4, elapsed);
+            statement.setString(4, CliCredentials.historyActor());
+            statement.setLong(5, elapsed);
             statement.executeUpdate();
         }
     }

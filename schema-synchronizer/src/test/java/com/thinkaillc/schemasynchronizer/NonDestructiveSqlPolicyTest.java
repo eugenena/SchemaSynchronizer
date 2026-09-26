@@ -31,6 +31,21 @@ class NonDestructiveSqlPolicyTest {
                 "CREATE OR REPLACE FUNCTION f() RETURNS void LANGUAGE plpgsql AS $body$ "
                         + "BEGIN PERFORM 1; PERFORM ';'; END $body$;"))
                 .doesNotThrowAnyException();
+        assertThatThrownBy(() -> NonDestructiveSqlPolicy.requireSafe(
+                "CREATE OR REPLACE FUNCTION wipe() RETURNS void LANGUAGE plpgsql AS $$ "
+                        + "BEGIN EXECUTE 'DROP TABLE customers'; END $$"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("destructive");
+        assertThatThrownBy(() -> NonDestructiveSqlPolicy.requireSafe(
+                "CREATE OR REPLACE FUNCTION wipe() RETURNS void LANGUAGE plpgsql AS "
+                        + "'BEGIN DROP TABLE customers; END'"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("destructive");
+        assertThatThrownBy(() -> NonDestructiveSqlPolicy.requireSafe(
+                "CREATE OR REPLACE FUNCTION wipe() RETURNS void LANGUAGE plpgsql AS "
+                        + "E'BEGIN DROP TABLE customers; END'"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("destructive");
         assertThatCode(() -> NonDestructiveSqlPolicy.requireSafe(
                 "UPDATE child SET state = 'READY' WHERE state IS NULL"))
                 .doesNotThrowAnyException();
@@ -52,6 +67,20 @@ class NonDestructiveSqlPolicyTest {
         assertThatThrownBy(() -> NonDestructiveSqlPolicy.requireSafe(
                 "ALTER TABLE customers ALTER COLUMN name TYPE VARCHAR(10)"))
                 .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> NonDestructiveSqlPolicy.requireSafe(
+                "ALTER TABLE customers ALTER COLUMN name VARCHAR(10)"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("unsupported");
+        assertThatThrownBy(() -> NonDestructiveSqlPolicy.requireSafe(
+                "ALTER TABLE customers MODIFY (name VARCHAR2(1))"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("unsupported");
+        assertThatCode(() -> NonDestructiveSqlPolicy.requireSafe(
+                "ALTER TABLE customers ADD notes VARCHAR(255)"))
+                .doesNotThrowAnyException();
+        assertThatCode(() -> NonDestructiveSqlPolicy.requireSafe(
+                "ALTER TABLE customers ADD (notes VARCHAR2(255))"))
+                .doesNotThrowAnyException();
         assertThatThrownBy(() -> NonDestructiveSqlPolicy.requireSafe(
                 "DO $$ BEGIN EXECUTE 'DROP TABLE customers'; END $$"))
                 .isInstanceOf(IllegalArgumentException.class)

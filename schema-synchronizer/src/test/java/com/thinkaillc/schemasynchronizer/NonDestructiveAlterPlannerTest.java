@@ -116,6 +116,38 @@ class NonDestructiveAlterPlannerTest {
     }
 
     @Test
+    void varbinaryLengthComparesUseLiveSizes() {
+        var same = NonDestructiveAlterPlanner.plan("t", "blob",
+                ColumnDefinitionParser.parse("VARBINARY(100)"),
+                new LiveColumn("VARBINARY", 100, null, false, null));
+        assertThat(same.applySql()).isEmpty();
+        assertThat(same.pendingSql()).isEmpty();
+
+        var widen = NonDestructiveAlterPlanner.plan("t", "blob",
+                ColumnDefinitionParser.parse("VARBINARY(MAX)"),
+                new LiveColumn("VARBINARY", 50, null, false, null));
+        assertThat(widen.applySql()).containsExactly(
+                "ALTER TABLE t ALTER COLUMN blob TYPE VARBINARY(MAX)");
+        assertThat(widen.pendingSql()).isEmpty();
+
+        var narrow = NonDestructiveAlterPlanner.plan("t", "blob",
+                ColumnDefinitionParser.parse("VARBINARY(50)"),
+                new LiveColumn("VARBINARY", ColumnDefinitionParser.MAX_LENGTH, null, false, null));
+        assertThat(narrow.applySql()).isEmpty();
+        assertThat(narrow.pendingSql()).singleElement().asString().contains("VARBINARY(50)");
+    }
+
+    @Test
+    void maxVarcharIsWidenFromFiniteAndNarrowBack() {
+        assertThat(NonDestructiveAlterPlanner.classifyTypeChange(
+                "VARCHAR", 100, null, "VARCHAR", ColumnDefinitionParser.MAX_LENGTH, null))
+                .isEqualTo(NonDestructiveAlterPlanner.TypeChange.WIDEN);
+        assertThat(NonDestructiveAlterPlanner.classifyTypeChange(
+                "VARCHAR", ColumnDefinitionParser.MAX_LENGTH, null, "VARCHAR", 100, null))
+                .isEqualTo(NonDestructiveAlterPlanner.TypeChange.NARROW);
+    }
+
+    @Test
     void widensNumericOnlyWhenIntegerAndFractionCapacityDoNotShrink() {
         var safe = NonDestructiveAlterPlanner.plan("t", "amount",
                 ColumnDefinitionParser.parse("NUMERIC(20,6)"),

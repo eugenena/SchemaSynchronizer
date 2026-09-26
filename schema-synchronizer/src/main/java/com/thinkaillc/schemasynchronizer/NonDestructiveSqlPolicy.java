@@ -5,6 +5,7 @@ package com.thinkaillc.schemasynchronizer;
 
 import java.util.List;
 import java.util.Locale;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /** Fail-closed policy for versioned custom SQL. */
@@ -139,6 +140,36 @@ public final class NonDestructiveSqlPolicy {
                         + summarize(sql));
             }
         }
+        // CREATE FUNCTION / TRIGGER / PROCEDURE bodies may be dollar-quoted or
+        // single-quoted; executableSql blanks both. Extract and scan the AS body.
+        if (normalized.matches("(?s)^CREATE\\s+(OR\\s+REPLACE\\s+)?(FUNCTION|TRIGGER|PROCEDURE)\\b.*")) {
+            String bodyScan = routineBodyForScan(sql).toUpperCase(Locale.ROOT);
+            for (Pattern pattern : FORBIDDEN) {
+                if (pattern.matcher(bodyScan).find()) {
+                    throw new IllegalArgumentException("destructive or manually-reviewed SQL is not allowed: "
+                            + summarize(sql));
+                }
+            }
+        }
+    }
+
+    /**
+     * Returns the routine body after {@code AS} for forbidden-token scanning.
+     * Dollar-quoted and ordinary / escape / Unicode single-quoted bodies are included.
+     */
+    static String routineBodyForScan(String sql) {
+        Matcher dollar = Pattern.compile("(?is)\\bAS\\s+(\\$[A-Za-z_][A-Za-z0-9_]*\\$|\\$\\$)(.*)\\1")
+                .matcher(sql);
+        if (dollar.find()) {
+            return dollar.group(2);
+        }
+        Matcher quoted = Pattern.compile("(?is)\\bAS\\s+(?:E|U&)?'((?:[^']|'')*)'")
+                .matcher(sql);
+        if (quoted.find()) {
+            return quoted.group(1).replace("''", "'");
+        }
+        // Fallback: scan with dollar bodies visible and ordinary strings masked.
+        return scannableSql(sql);
     }
 
     private static boolean matchesAllowedStatement(String sql) {
@@ -148,7 +179,10 @@ public final class NonDestructiveSqlPolicy {
                 || sql.matches("(?s)^CREATE\\s+TRIGGER\\b.*")
                 || sql.matches("(?s)^CREATE\\s+EXTENSION\\b.*")
                 || sql.matches("(?s)^ALTER\\s+TABLE\\b.*\\s+ADD\\s+(COLUMN|CONSTRAINT)\\b.*")
-                || sql.matches("(?s)^ALTER\\s+TABLE\\b.*\\s+ALTER\\s+COLUMN\\b.*\\s+SET\\s+NOT\\s+NULL\\b.*")
+                || sql.matches("(?s)^ALTER\\s+TABLE\\b.*\\s+ADD\\s+\\(.*")
+                || sql.matches("(?s)^ALTER\\s+TABLE\\b.*\\s+ADD\\s+[A-Z_][A-Z0-9_]*\\b.*")
+                || sql.matches("(?s)^ALTER\\s+TABLE\\b.*\\s+ALTER\\s+COLUMN\\b.*\\s+(SET|DROP)\\s+(DEFAULT|NOT\\s+NULL)\\b.*")
+                || sql.matches("(?s)^ALTER\\s+TABLE\\b.*\\s+MODIFY\\s*\\(.*\\b(DEFAULT|NULL|NOT\\s+NULL)\\b.*")
                 || sql.matches("(?s)^ALTER\\s+TABLE\\b.*\\s+VALIDATE\\s+CONSTRAINT\\b.*")
                 || sql.matches("(?s)^(UPDATE|INSERT\\s+INTO)\\b.*")
                 || sql.matches("(?s)^COMMENT\\s+ON\\b.*")
@@ -164,8 +198,21 @@ public final class NonDestructiveSqlPolicy {
         return sql.replaceAll("(?s)/\\*.*?\\*/", " ").replaceAll("(?m)--.*$", " ").trim();
     }
 
+    /**
+     * Masks comments and ordinary string/identifier quotes, but leaves dollar-quoted
+     * bodies visible so forbidden tokens inside {@code CREATE FUNCTION} / {@code TRIGGER}
+     * bodies can still be detected.
+     */
+    static String scannableSql(String sql) {
+        return maskSql(sql, false);
+    }
+
     /** Returns only executable SQL text, masking comments and every quoted form. */
     private static String executableSql(String sql) {
+        return maskSql(sql, true);
+    }
+
+    private static String maskSql(String sql, boolean maskDollarBodies) {
         char[] result = sql.toCharArray();
         boolean singleQuoted = false;
         boolean doubleQuoted = false;
@@ -190,10 +237,14 @@ public final class NonDestructiveSqlPolicy {
             }
             if (dollarTag != null) {
                 if (sql.startsWith(dollarTag, index)) {
-                    for (int offset = 0; offset < dollarTag.length(); offset++) result[index + offset] = ' ';
+                    if (maskDollarBodies) {
+                        for (int offset = 0; offset < dollarTag.length(); offset++) {
+                            result[index + offset] = ' ';
+                        }
+                    }
                     index += dollarTag.length() - 1;
                     dollarTag = null;
-                } else {
+                } else if (maskDollarBodies) {
                     result[index] = ' ';
                 }
                 continue;
@@ -227,7 +278,11 @@ public final class NonDestructiveSqlPolicy {
                 if (end >= 0) {
                     String candidate = sql.substring(index, end + 1);
                     if (candidate.matches("\\$[A-Za-z_][A-Za-z0-9_]*\\$|\\$\\$")) {
-                        for (int offset = 0; offset < candidate.length(); offset++) result[index + offset] = ' ';
+                        if (maskDollarBodies) {
+                            for (int offset = 0; offset < candidate.length(); offset++) {
+                                result[index + offset] = ' ';
+                            }
+                        }
                         dollarTag = candidate;
                         index = end;
                     }
