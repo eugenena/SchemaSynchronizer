@@ -56,6 +56,6 @@ public final class SchemaDefinitionValidator {
         SchemaSynchronizerOptions options = new SchemaSynchronizerOptions(
                 schema, "schema_synchronizer_history", 7_249_031_147L, false, true, true);
         SchemaSynchronizer.validateDeclarative(definition, dialect, options);
-        new ChangeSetExecutor().validate(definition.changes());
+        new ChangeSetExecutor().validate(definition.changes(), options);
     }
 }

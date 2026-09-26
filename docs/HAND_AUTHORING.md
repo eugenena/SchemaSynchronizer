@@ -27,14 +27,14 @@ applications normally sync the committed file onto their single datasource.
 2. Offline check:
 
    ```bash
-   java -jar schema-synchronizer-cli-1.3.0-standalone.jar validate schema-definition.json
+   java -jar schema-synchronizer-cli-1.3.1-standalone.jar validate schema-definition.json
    ```
 
 3. Preview against a disposable database:
 
    ```bash
    export SCHEMA_DB_PASSWORD='…'
-   java -jar schema-synchronizer-cli-1.3.0-standalone.jar dry-run \
+   java -jar schema-synchronizer-cli-1.3.1-standalone.jar dry-run \
      jdbc:postgresql://localhost:5432/app_scratch app_user - \
      schema-definition.json public
    ```
@@ -45,7 +45,7 @@ applications normally sync the committed file onto their single datasource.
 ## Partial adoption (already-present objects)
 
 Change sets may encounter databases where **some** statements already succeeded
-(Flyway leftovers, a prior partial apply, or hand DDL). Starting in 1.3.0:
+(Flyway leftovers, a prior partial apply, or hand DDL). Starting in 1.2.0:
 
 1. If `verificationSql` is already true, SchemaSynchronizer records the change in
    history and does **not** replay statements.

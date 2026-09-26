@@ -31,6 +31,21 @@ class NonDestructiveSqlPolicyTest {
                 "CREATE OR REPLACE FUNCTION f() RETURNS void LANGUAGE plpgsql AS $body$ "
                         + "BEGIN PERFORM 1; PERFORM ';'; END $body$;"))
                 .doesNotThrowAnyException();
+        assertThatThrownBy(() -> NonDestructiveSqlPolicy.requireSafe(
+                "CREATE OR REPLACE FUNCTION wipe() RETURNS void LANGUAGE plpgsql AS $$ "
+                        + "BEGIN EXECUTE 'DROP TABLE customers'; END $$"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("destructive");
+        assertThatThrownBy(() -> NonDestructiveSqlPolicy.requireSafe(
+                "CREATE OR REPLACE FUNCTION wipe() RETURNS void LANGUAGE plpgsql AS "
+                        + "'BEGIN DROP TABLE customers; END'"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("destructive");
+        assertThatThrownBy(() -> NonDestructiveSqlPolicy.requireSafe(
+                "CREATE OR REPLACE FUNCTION wipe() RETURNS void LANGUAGE plpgsql AS "
+                        + "E'BEGIN DROP TABLE customers; END'"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("destructive");
         assertThatCode(() -> NonDestructiveSqlPolicy.requireSafe(
                 "UPDATE child SET state = 'READY' WHERE state IS NULL"))
                 .doesNotThrowAnyException();

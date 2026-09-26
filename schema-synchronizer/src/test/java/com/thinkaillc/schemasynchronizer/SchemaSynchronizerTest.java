@@ -69,6 +69,9 @@ class SchemaSynchronizerTest {
     @Test
     void emptyDefinitionStillChecksTheImmutableLedgerUnderLock() throws Exception {
         synchronizer.synchronize(connection, new SchemaDefinition(Map.of()));
+        int key1 = DialectSupport.namespaceLockKey("public");
+        int key2 = Math.floorMod(Long.hashCode(7_249_031_147L), Integer.MAX_VALUE);
+        verify(statement).execute("SELECT pg_advisory_xact_lock(" + key1 + ", " + key2 + ")");
         verify(statement).execute("SELECT pg_advisory_xact_lock(7249031147)");
     }
 

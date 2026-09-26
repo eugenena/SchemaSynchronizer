@@ -122,7 +122,7 @@ SchemaSynchronizer requires Java 21 or later. Add the Maven Central release:
 <dependency>
   <groupId>com.thinkaillc</groupId>
   <artifactId>schema-synchronizer</artifactId>
-  <version>1.3.0</version>
+  <version>1.3.1</version>
 </dependency>
 ```
 
@@ -142,8 +142,8 @@ SQL Server, and Oracle JDBC drivers.
 ### 1. Download the executable JAR
 
 ```bash
-curl -fLO https://repo1.maven.org/maven2/com/thinkaillc/schema-synchronizer-cli/1.3.0/schema-synchronizer-cli-1.3.0-standalone.jar
-java -jar schema-synchronizer-cli-1.3.0-standalone.jar --version
+curl -fLO https://repo1.maven.org/maven2/com/thinkaillc/schema-synchronizer-cli/1.3.1/schema-synchronizer-cli-1.3.1-standalone.jar
+java -jar schema-synchronizer-cli-1.3.1-standalone.jar --version
 ```
 
 Maven Central publishes `.sha256` and `.sha512` files beside the JAR for integrity
@@ -161,14 +161,14 @@ export SCHEMA_DB_PASSWORD='source-password'
 PostgreSQL example:
 
 ```bash
-java -jar schema-synchronizer-cli-1.3.0-standalone.jar serialize \
+java -jar schema-synchronizer-cli-1.3.1-standalone.jar serialize \
   jdbc:postgresql://localhost:5432/source_app app_user - public schema-definition.json
 ```
 
 MariaDB example (the schema argument is the database/catalog name):
 
 ```bash
-java -jar schema-synchronizer-cli-1.3.0-standalone.jar serialize \
+java -jar schema-synchronizer-cli-1.3.1-standalone.jar serialize \
   jdbc:mariadb://localhost:3306/source_app app_user - source_app schema-definition.json
 ```
 
@@ -179,7 +179,7 @@ interchanged implicitly.
 SQL Server example (schema argument is normally `dbo`):
 
 ```bash
-java -jar schema-synchronizer-cli-1.3.0-standalone.jar serialize \
+java -jar schema-synchronizer-cli-1.3.1-standalone.jar serialize \
   "jdbc:sqlserver://localhost:1433;databaseName=app;encrypt=false;trustServerCertificate=true" \
   sa - dbo schema-definition.json
 ```
@@ -187,7 +187,7 @@ java -jar schema-synchronizer-cli-1.3.0-standalone.jar serialize \
 Oracle example (schema argument is the Oracle user/schema):
 
 ```bash
-java -jar schema-synchronizer-cli-1.3.0-standalone.jar serialize \
+java -jar schema-synchronizer-cli-1.3.1-standalone.jar serialize \
   jdbc:oracle:thin:@localhost:1521/XEPDB1 \
   app_user - app_user schema-definition.json
 ```
@@ -209,7 +209,7 @@ export SCHEMA_DB_PASSWORD='target-password'
 PostgreSQL example:
 
 ```bash
-java -jar schema-synchronizer-cli-1.3.0-standalone.jar sync \
+java -jar schema-synchronizer-cli-1.3.1-standalone.jar sync \
   jdbc:postgresql://localhost:5432/target_app app_user - \
   schema-definition.json public schema_synchronizer_history
 ```
@@ -217,7 +217,7 @@ java -jar schema-synchronizer-cli-1.3.0-standalone.jar sync \
 MariaDB example:
 
 ```bash
-java -jar schema-synchronizer-cli-1.3.0-standalone.jar sync \
+java -jar schema-synchronizer-cli-1.3.1-standalone.jar sync \
   jdbc:mariadb://localhost:3306/target_app app_user - \
   schema-definition.json target_app schema_synchronizer_history
 ```
@@ -233,12 +233,13 @@ Add the Maven Central release to an application:
 <dependency>
   <groupId>com.thinkaillc</groupId>
   <artifactId>schema-synchronizer</artifactId>
-  <version>1.3.0</version>
+  <version>1.3.1</version>
 </dependency>
 ```
 
-The library includes PostgreSQL, MariaDB, MySQL, SQL Server, and Oracle JDBC drivers at runtime. Applications
-can override their versions through dependency management.
+The library declares PostgreSQL, MariaDB, MySQL, SQL Server, and Oracle JDBC drivers as
+**optional** dependencies. Add the driver for the engine you use (or rely on Spring Boot /
+your app's existing JDBC dependency). The standalone CLI JAR still embeds all five drivers.
 
 ## Release process for maintainers
 
