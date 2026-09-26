@@ -53,6 +53,20 @@ class NonDestructiveSqlPolicyTest {
                 "ALTER TABLE customers ALTER COLUMN name TYPE VARCHAR(10)"))
                 .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> NonDestructiveSqlPolicy.requireSafe(
+                "ALTER TABLE customers ALTER COLUMN name VARCHAR(10)"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("unsupported");
+        assertThatThrownBy(() -> NonDestructiveSqlPolicy.requireSafe(
+                "ALTER TABLE customers MODIFY (name VARCHAR2(1))"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("unsupported");
+        assertThatCode(() -> NonDestructiveSqlPolicy.requireSafe(
+                "ALTER TABLE customers ADD notes VARCHAR(255)"))
+                .doesNotThrowAnyException();
+        assertThatCode(() -> NonDestructiveSqlPolicy.requireSafe(
+                "ALTER TABLE customers ADD (notes VARCHAR2(255))"))
+                .doesNotThrowAnyException();
+        assertThatThrownBy(() -> NonDestructiveSqlPolicy.requireSafe(
                 "DO $$ BEGIN EXECUTE 'DROP TABLE customers'; END $$"))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("unsupported");

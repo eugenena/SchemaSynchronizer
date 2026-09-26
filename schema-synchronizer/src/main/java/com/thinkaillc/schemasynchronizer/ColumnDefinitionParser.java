@@ -18,6 +18,10 @@ public final class ColumnDefinitionParser {
             "\\s+NOT\\s+NULL\\b", Pattern.CASE_INSENSITIVE);
     private static final Pattern AUTO_INCREMENT = Pattern.compile(
             "\\s+AUTO_INCREMENT\\b", Pattern.CASE_INSENSITIVE);
+    private static final Pattern IDENTITY = Pattern.compile(
+            "\\s+(?:GENERATED\\s+(?:BY\\s+DEFAULT|ALWAYS)\\s+AS\\s+IDENTITY(?:\\s*\\([^)]*\\))?|"
+                    + "IDENTITY(?:\\s*\\(\\s*\\d+\\s*,\\s*\\d+\\s*\\))?)",
+            Pattern.CASE_INSENSITIVE);
     private static final Pattern TYPE_LEN = Pattern.compile(
             "^([A-Za-z][A-Za-z0-9_\\s]*?)(?:\\((\\d+)(?:\\s*,\\s*(\\d+))?\\))?$",
             Pattern.CASE_INSENSITIVE);
@@ -34,6 +38,7 @@ public final class ColumnDefinitionParser {
         }
         String rest = definition.trim();
         rest = AUTO_INCREMENT.matcher(rest).replaceFirst("").trim();
+        rest = IDENTITY.matcher(rest).replaceFirst("").trim();
         String defaultExpr = null;
         Matcher defM = DEFAULT.matcher(rest);
         if (defM.find()) {
@@ -83,13 +88,13 @@ public final class ColumnDefinitionParser {
         }
         String t = typeName.trim().toUpperCase(Locale.ROOT).replaceAll("\\s+", " ");
         return switch (t) {
-            case "CHARACTER VARYING", "VARCHAR" -> "VARCHAR";
-            case "CHARACTER", "CHAR", "BPCHAR" -> "CHAR";
+            case "CHARACTER VARYING", "VARCHAR", "VARCHAR2", "NVARCHAR", "NVARCHAR2" -> "VARCHAR";
+            case "CHARACTER", "CHAR", "BPCHAR", "NCHAR" -> "CHAR";
             case "INT", "INT4", "INTEGER" -> "INTEGER";
             case "INT8", "BIGINT" -> "BIGINT";
             case "INT2", "SMALLINT" -> "SMALLINT";
-            case "BOOL", "BOOLEAN" -> "BOOLEAN";
-            case "DECIMAL", "NUMERIC" -> "NUMERIC";
+            case "BOOL", "BOOLEAN", "BIT" -> "BOOLEAN";
+            case "DECIMAL", "NUMERIC", "NUMBER" -> "NUMERIC";
             case "FLOAT4", "REAL" -> "REAL";
             case "FLOAT8", "DOUBLE PRECISION", "DOUBLE" -> "DOUBLE PRECISION";
             case "TIMESTAMP WITH TIME ZONE", "TIMESTAMPTZ" -> "TIMESTAMPTZ";

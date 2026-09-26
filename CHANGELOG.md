@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.3.0 — 2026-09-26
+
+- Added SQL Server and Oracle dialects with detection, history DDL, session locking,
+  metadata catalog/schema mapping, serialize/sync paths, and duplicate-object adoption
+  codes.
+- SQL Server uses transactional DDL and `sp_getapplock`; Oracle follows the implicit-DDL
+  path (verification + single-statement change sets when unverified) and `DBMS_LOCK`.
+- Bundled Microsoft SQL Server and Oracle JDBC drivers in the library and standalone CLI.
+- CI covers SQL Server 2022; Oracle XE runs as a dedicated workflow job.
+
 ## 1.2.0 — 2026-09-26
 
 - Hand-authoring is a first-class workflow: edit `schema-definition.json` in git,
