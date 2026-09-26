@@ -122,7 +122,7 @@ SchemaSynchronizer requires Java 21 or later. Add the Maven Central release:
 <dependency>
   <groupId>com.thinkaillc</groupId>
   <artifactId>schema-synchronizer</artifactId>
-  <version>1.3.1</version>
+  <version>1.4.0</version>
 </dependency>
 ```
 
@@ -142,8 +142,8 @@ SQL Server, and Oracle JDBC drivers.
 ### 1. Download the executable JAR
 
 ```bash
-curl -fLO https://repo1.maven.org/maven2/com/thinkaillc/schema-synchronizer-cli/1.3.1/schema-synchronizer-cli-1.3.1-standalone.jar
-java -jar schema-synchronizer-cli-1.3.1-standalone.jar --version
+curl -fLO https://repo1.maven.org/maven2/com/thinkaillc/schema-synchronizer-cli/1.4.0/schema-synchronizer-cli-1.4.0-standalone.jar
+java -jar schema-synchronizer-cli-1.4.0-standalone.jar --version
 ```
 
 Maven Central publishes `.sha256` and `.sha512` files beside the JAR for integrity
@@ -161,14 +161,14 @@ export SCHEMA_DB_PASSWORD='source-password'
 PostgreSQL example:
 
 ```bash
-java -jar schema-synchronizer-cli-1.3.1-standalone.jar serialize \
+java -jar schema-synchronizer-cli-1.4.0-standalone.jar serialize \
   jdbc:postgresql://localhost:5432/source_app app_user - public schema-definition.json
 ```
 
 MariaDB example (the schema argument is the database/catalog name):
 
 ```bash
-java -jar schema-synchronizer-cli-1.3.1-standalone.jar serialize \
+java -jar schema-synchronizer-cli-1.4.0-standalone.jar serialize \
   jdbc:mariadb://localhost:3306/source_app app_user - source_app schema-definition.json
 ```
 
@@ -179,7 +179,7 @@ interchanged implicitly.
 SQL Server example (schema argument is normally `dbo`):
 
 ```bash
-java -jar schema-synchronizer-cli-1.3.1-standalone.jar serialize \
+java -jar schema-synchronizer-cli-1.4.0-standalone.jar serialize \
   "jdbc:sqlserver://localhost:1433;databaseName=app;encrypt=false;trustServerCertificate=true" \
   sa - dbo schema-definition.json
 ```
@@ -187,7 +187,7 @@ java -jar schema-synchronizer-cli-1.3.1-standalone.jar serialize \
 Oracle example (schema argument is the Oracle user/schema):
 
 ```bash
-java -jar schema-synchronizer-cli-1.3.1-standalone.jar serialize \
+java -jar schema-synchronizer-cli-1.4.0-standalone.jar serialize \
   jdbc:oracle:thin:@localhost:1521/XEPDB1 \
   app_user - app_user schema-definition.json
 ```
@@ -209,7 +209,7 @@ export SCHEMA_DB_PASSWORD='target-password'
 PostgreSQL example:
 
 ```bash
-java -jar schema-synchronizer-cli-1.3.1-standalone.jar sync \
+java -jar schema-synchronizer-cli-1.4.0-standalone.jar sync \
   jdbc:postgresql://localhost:5432/target_app app_user - \
   schema-definition.json public schema_synchronizer_history
 ```
@@ -217,7 +217,7 @@ java -jar schema-synchronizer-cli-1.3.1-standalone.jar sync \
 MariaDB example:
 
 ```bash
-java -jar schema-synchronizer-cli-1.3.1-standalone.jar sync \
+java -jar schema-synchronizer-cli-1.4.0-standalone.jar sync \
   jdbc:mariadb://localhost:3306/target_app app_user - \
   schema-definition.json target_app schema_synchronizer_history
 ```
@@ -233,7 +233,7 @@ Add the Maven Central release to an application:
 <dependency>
   <groupId>com.thinkaillc</groupId>
   <artifactId>schema-synchronizer</artifactId>
-  <version>1.3.1</version>
+  <version>1.4.0</version>
 </dependency>
 ```
 
@@ -269,14 +269,14 @@ bundle. Central releases are immutable; never reuse a published version number.
 document:
 
 ```text
-SchemaSerializer <jdbc-url> <user> <password-or--> <schema> <output-path>
+SchemaSerializer <jdbc-url> <user> - <schema> <output-path>
 ```
 
 | Argument | Description |
 |---|---|
 | `jdbc-url` | JDBC URL for an available dialect |
 | `user` | Database username |
-| `password-or--` | Password, or `-` to read `SCHEMA_DB_PASSWORD` |
+| `-` | Required password placeholder; reads `SCHEMA_DB_PASSWORD` |
 | `schema` | Dialect-specific schema namespace (a database/catalog in MariaDB and MySQL) |
 | `output-path` | Definition file to create or update |
 
@@ -293,20 +293,20 @@ functions, triggers, extensions, comments, or grants.
 `SchemaSynchronizer` applies a definition to a target database:
 
 ```text
-SchemaSynchronizer <jdbc-url> <user> <password-or--> <schema-file> [schema] [history-table]
+SchemaSynchronizer <jdbc-url> <user> - <schema-file> [schema] [history-table]
 ```
 
 | Argument | Required | Default | Description |
 |---|---:|---|---|
 | `jdbc-url` | Yes | — | Target JDBC URL |
 | `user` | Yes | — | Database username |
-| `password-or--` | Yes | — | Password, or `-` to read `SCHEMA_DB_PASSWORD` |
+| `-` | Yes | — | Password placeholder; reads `SCHEMA_DB_PASSWORD` |
 | `schema-file` | Yes | — | Path to the definition |
 | `schema` | No | `public` | Dialect-specific schema namespace |
 | `history-table` | No | `schema_synchronizer_history` | Change-set ledger table |
 
-Supplying the password directly is supported, but `-` is safer because it avoids
-putting the credential in command history and process arguments.
+Literal passwords on the command line are rejected. Set `SCHEMA_DB_PASSWORD` and
+pass `-`. Optional `SCHEMA_SYNCHRONIZER_ACTOR` is stored in history `applied_by`.
 
 ## Spring Boot usage
 
@@ -331,14 +331,17 @@ schema-synchronizer.require-definition=true
 spring.jpa.hibernate.ddl-auto=validate
 ```
 
+Set `schema` to the dialect namespace: `public` (PostgreSQL), `dbo` (SQL Server),
+the connected user (Oracle), or the catalog/database name (MySQL/MariaDB).
+
 | Property | Default | Meaning |
 |---|---|---|
-| `enabled` | `true` | Enable auto-configuration |
+| `enabled` | `false` | Opt-in auto-configuration (must set `true`) |
 | `resource` | `/schema-definition.json` | Classpath definition to load |
 | `schema` | `public` | Dialect-specific schema namespace |
 | `history-table` | `schema_synchronizer_history` | Applied change-set ledger |
 | `advisory-lock-id` | `7249031147` | PostgreSQL advisory-lock key |
-| `dry-run` | `false` | Plan changes and roll back transactional dialects (PostgreSQL, SQL Server) |
+| `dry-run` | `false` | Plan changes; roll back when `supportsTransactionalDryRun` |
 | `fail-on-pending` | `true` | Stop when manual SQL remains |
 | `require-definition` | `true` | Stop when the classpath definition is absent |
 
@@ -346,8 +349,10 @@ SchemaSynchronizer registers as a database initializer and completes before JPA
 schema validation. Keep `ddl-auto=validate`; do not let JPA and SchemaSynchronizer
 both mutate the schema.
 
-MariaDB, MySQL, and Oracle DDL can commit implicitly, so `dry-run` cannot provide PostgreSQL/SQL Server-style
-rollback guarantees on those engines. Validate new definitions against a disposable database first.
+Dry-run always skips DDL execution and `verificationSql`. Dialects where
+`supportsTransactionalDryRun()` is true (PostgreSQL, SQL Server) also roll back
+transactional control work. MariaDB, MySQL, and Oracle only skip execution — use a
+disposable instance for any rehearsal that must touch the live catalog.
 
 ## Java API
 

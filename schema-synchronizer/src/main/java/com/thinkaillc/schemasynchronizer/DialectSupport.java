@@ -25,6 +25,7 @@ final class DialectSupport {
                     + "change_id VARCHAR(200) NOT NULL UNIQUE, "
                     + "checksum CHAR(64) NOT NULL, "
                     + "description VARCHAR(500), "
+                    + "applied_by VARCHAR(200), "
                     + "applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP, "
                     + "execution_ms BIGINT NOT NULL)";
             case MARIADB, MYSQL -> "CREATE TABLE IF NOT EXISTS " + qualifiedHistory + " ("
@@ -32,6 +33,7 @@ final class DialectSupport {
                     + "change_id VARCHAR(200) NOT NULL UNIQUE, "
                     + "checksum CHAR(64) NOT NULL, "
                     + "description VARCHAR(500), "
+                    + "applied_by VARCHAR(200), "
                     + "applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, "
                     + "execution_ms BIGINT NOT NULL)";
             case SQLSERVER -> "IF OBJECT_ID(N'" + escapeSqlServerLiteral(qualifiedHistory) + "', N'U') IS NULL "
@@ -40,6 +42,7 @@ final class DialectSupport {
                     + "change_id VARCHAR(200) NOT NULL UNIQUE, "
                     + "checksum CHAR(64) NOT NULL, "
                     + "description VARCHAR(500) NULL, "
+                    + "applied_by VARCHAR(200) NULL, "
                     + "applied_at DATETIMEOFFSET NOT NULL DEFAULT SYSDATETIMEOFFSET(), "
                     + "execution_ms BIGINT NOT NULL)";
             case ORACLE -> "BEGIN EXECUTE IMMEDIATE 'CREATE TABLE " + qualifiedHistory + " ("
@@ -47,9 +50,26 @@ final class DialectSupport {
                     + "change_id VARCHAR2(200) NOT NULL UNIQUE, "
                     + "checksum CHAR(64) NOT NULL, "
                     + "description VARCHAR2(500), "
+                    + "applied_by VARCHAR2(200), "
                     + "applied_at TIMESTAMP WITH TIME ZONE DEFAULT SYSTIMESTAMP NOT NULL, "
                     + "execution_ms NUMBER NOT NULL)'; "
                     + "EXCEPTION WHEN OTHERS THEN IF SQLCODE != -955 THEN RAISE; END IF; END;";
+        };
+    }
+
+    /** Adds {@code applied_by} to an existing history table created before 1.4.0. */
+    static String addAppliedByColumnDdl(DatabaseDialect dialect, String qualifiedHistory) {
+        return switch (dialect) {
+            case POSTGRESQL -> "ALTER TABLE " + qualifiedHistory
+                    + " ADD COLUMN IF NOT EXISTS applied_by VARCHAR(200)";
+            case MARIADB, MYSQL -> "ALTER TABLE " + qualifiedHistory
+                    + " ADD COLUMN IF NOT EXISTS applied_by VARCHAR(200)";
+            case SQLSERVER -> "IF COL_LENGTH(N'" + escapeSqlServerLiteral(qualifiedHistory)
+                    + "', N'applied_by') IS NULL ALTER TABLE " + qualifiedHistory
+                    + " ADD applied_by VARCHAR(200) NULL";
+            case ORACLE -> "BEGIN EXECUTE IMMEDIATE 'ALTER TABLE " + qualifiedHistory
+                    + " ADD applied_by VARCHAR2(200)'; "
+                    + "EXCEPTION WHEN OTHERS THEN IF SQLCODE != -1430 THEN RAISE; END IF; END;";
         };
     }
 
@@ -65,24 +85,25 @@ final class DialectSupport {
                 // sharing one Postgres cluster do not serialize on the default id alone.
                 // Also acquire the 1.3.0 single-key form so rolling upgrades still exclude
                 // peers still on the old lock space (the two spaces are independent).
+                // pg_try_* with a 30s deadline matches MySQL/SQL Server lock timeouts
+                // (pg_advisory_xact_lock waits forever).
                 int key1 = namespaceLockKey(namespace);
                 int key2 = Math.floorMod(Long.hashCode(advisoryLockId), Integer.MAX_VALUE);
-                try (Statement statement = conn.createStatement()) {
-                    statement.execute("SELECT pg_advisory_xact_lock(" + key1 + ", " + key2 + ")");
-                    statement.execute("SELECT pg_advisory_xact_lock(" + advisoryLockId + ")");
-                }
+                acquirePostgresLocks(conn, key1, key2, advisoryLockId);
                 yield null;
             }
             case MARIADB, MYSQL -> {
                 String resource = mysqlLockResource(namespace);
-                try (var statement = conn.prepareStatement("SELECT GET_LOCK(?, 30)")) {
-                    statement.setString(1, resource);
-                    try (var row = statement.executeQuery()) {
-                        if (!(row.next() && row.getInt(1) == 1)) {
-                            throw new IllegalStateException("Could not acquire " + dialect.id()
-                                    + " schema synchronization lock");
-                        }
+                String legacy = mysqlLockResourceLegacy(namespace);
+                acquireMysqlLock(conn, dialect, resource);
+                if (!legacy.equals(resource)) {
+                    try {
+                        acquireMysqlLock(conn, dialect, legacy);
+                    } catch (RuntimeException | SQLException secondFailure) {
+                        releaseMysqlLock(conn, resource);
+                        throw secondFailure;
                     }
+                    yield resource + ":" + legacy;
                 }
                 yield resource;
             }
@@ -126,9 +147,10 @@ final class DialectSupport {
         }
         switch (dialect) {
             case MARIADB, MYSQL -> {
-                try (var statement = conn.prepareStatement("SELECT RELEASE_LOCK(?)")) {
-                    statement.setString(1, lockToken);
-                    statement.executeQuery().close();
+                for (String part : lockToken.split(":")) {
+                    if (!part.isBlank()) {
+                        releaseMysqlLock(conn, part);
+                    }
                 }
             }
             case SQLSERVER -> {
@@ -165,13 +187,29 @@ final class DialectSupport {
         }
     }
 
-    /** Package-visible for contract tests. */
+    /** Package-visible for contract tests. SHA-256 form used from 1.4.0. */
     static String mysqlLockResource(String namespace) {
         String full = "schema_synchronizer_" + namespace.toLowerCase(Locale.ROOT);
         if (full.length() <= MYSQL_LOCK_NAME_MAX) {
             return full;
         }
-        // MySQL truncates GET_LOCK names at 64 chars — hash to avoid silent collisions.
+        // MySQL truncates GET_LOCK names at 64 chars — SHA-256 prefix avoids silent collisions.
+        try {
+            var digest = java.security.MessageDigest.getInstance("SHA-256");
+            byte[] hash = digest.digest(full.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            String hex = java.util.HexFormat.of().formatHex(hash);
+            return ("ss_" + hex).substring(0, MYSQL_LOCK_NAME_MAX);
+        } catch (java.security.NoSuchAlgorithmException exception) {
+            throw new IllegalStateException("SHA-256 required for MySQL lock naming", exception);
+        }
+    }
+
+    /** 1.3.1 hashCode form — dual-acquired with {@link #mysqlLockResource} during upgrades. */
+    static String mysqlLockResourceLegacy(String namespace) {
+        String full = "schema_synchronizer_" + namespace.toLowerCase(Locale.ROOT);
+        if (full.length() <= MYSQL_LOCK_NAME_MAX) {
+            return full;
+        }
         return "ss_" + Integer.toHexString(full.hashCode());
     }
 
@@ -179,6 +217,69 @@ final class DialectSupport {
     static int namespaceLockKey(String namespace) {
         return Math.floorMod(("schema_synchronizer_" + namespace.toLowerCase(Locale.ROOT)).hashCode(),
                 Integer.MAX_VALUE);
+    }
+
+    private static void acquireMysqlLock(Connection conn, DatabaseDialect dialect, String resource)
+            throws SQLException {
+        try (var statement = conn.prepareStatement("SELECT GET_LOCK(?, 30)")) {
+            statement.setString(1, resource);
+            try (var row = statement.executeQuery()) {
+                if (!(row.next() && row.getInt(1) == 1)) {
+                    throw new IllegalStateException("Could not acquire " + dialect.id()
+                            + " schema synchronization lock");
+                }
+            }
+        }
+    }
+
+    private static void releaseMysqlLock(Connection conn, String resource) throws SQLException {
+        try (var statement = conn.prepareStatement("SELECT RELEASE_LOCK(?)")) {
+            statement.setString(1, resource);
+            statement.executeQuery().close();
+        }
+    }
+
+    private static final long LOCK_WAIT_NANOS = java.util.concurrent.TimeUnit.SECONDS.toNanos(30);
+    private static final long LOCK_POLL_MILLIS = 100L;
+
+    private static void acquirePostgresLocks(Connection conn, int key1, int key2, long legacyKey)
+            throws SQLException {
+        long deadline = System.nanoTime() + LOCK_WAIT_NANOS;
+        boolean primary = false;
+        boolean legacy = false;
+        try (Statement statement = conn.createStatement()) {
+            while (!(primary && legacy)) {
+                if (!primary) {
+                    primary = tryPostgresLock(statement,
+                            "SELECT pg_try_advisory_xact_lock(" + key1 + ", " + key2 + ")");
+                }
+                if (!legacy) {
+                    legacy = tryPostgresLock(statement,
+                            "SELECT pg_try_advisory_xact_lock(" + legacyKey + ")");
+                }
+                if (primary && legacy) {
+                    return;
+                }
+                if (System.nanoTime() >= deadline) {
+                    throw new IllegalStateException(
+                            "Could not acquire postgresql schema synchronization lock within 30s");
+                }
+                try {
+                    Thread.sleep(LOCK_POLL_MILLIS);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(
+                            "Interrupted while waiting for postgresql schema synchronization lock",
+                            interrupted);
+                }
+            }
+        }
+    }
+
+    private static boolean tryPostgresLock(Statement statement, String sql) throws SQLException {
+        try (var row = statement.executeQuery(sql)) {
+            return row.next() && row.getBoolean(1);
+        }
     }
 
     private static void requestOracleLock(Connection conn, int lockId) throws SQLException {

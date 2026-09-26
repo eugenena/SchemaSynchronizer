@@ -40,6 +40,7 @@ class SchemaSynchronizerTest {
     @Mock private ResultSet primaryKeysRs;
     @Mock private PreparedStatement preparedStatement;
     @Mock private ResultSet preparedRows;
+    @Mock private ResultSet lockRs;
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     private SchemaSynchronizer synchronizer;
@@ -61,6 +62,9 @@ class SchemaSynchronizerTest {
         lenient().when(primaryKeysRs.next()).thenReturn(false);
         lenient().when(connection.createStatement()).thenReturn(statement);
         lenient().when(statement.execute(anyString())).thenReturn(true);
+        lenient().when(statement.executeQuery(anyString())).thenReturn(lockRs);
+        lenient().when(lockRs.next()).thenReturn(true);
+        lenient().when(lockRs.getBoolean(1)).thenReturn(true);
         lenient().when(connection.prepareStatement(anyString())).thenReturn(preparedStatement);
         lenient().when(preparedStatement.executeQuery()).thenReturn(preparedRows);
         lenient().when(preparedRows.next()).thenReturn(false);
@@ -71,8 +75,9 @@ class SchemaSynchronizerTest {
         synchronizer.synchronize(connection, new SchemaDefinition(Map.of()));
         int key1 = DialectSupport.namespaceLockKey("public");
         int key2 = Math.floorMod(Long.hashCode(7_249_031_147L), Integer.MAX_VALUE);
-        verify(statement).execute("SELECT pg_advisory_xact_lock(" + key1 + ", " + key2 + ")");
-        verify(statement).execute("SELECT pg_advisory_xact_lock(7249031147)");
+        verify(statement, atLeastOnce()).executeQuery(
+                "SELECT pg_try_advisory_xact_lock(" + key1 + ", " + key2 + ")");
+        verify(statement, atLeastOnce()).executeQuery("SELECT pg_try_advisory_xact_lock(7249031147)");
     }
 
     @Test

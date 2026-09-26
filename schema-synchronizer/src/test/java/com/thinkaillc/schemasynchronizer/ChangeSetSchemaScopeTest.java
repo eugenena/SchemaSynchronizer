@@ -195,6 +195,9 @@ class ChangeSetSchemaScopeTest {
         String hashed = DialectSupport.mysqlLockResource(longSchema);
         assertThat(hashed).startsWith("ss_");
         assertThat(hashed.length()).isLessThanOrEqualTo(DialectSupport.MYSQL_LOCK_NAME_MAX);
+        String legacy = DialectSupport.mysqlLockResourceLegacy(longSchema);
+        assertThat(legacy).startsWith("ss_");
+        assertThat(legacy).isNotEqualTo(hashed);
         assertThat(DialectSupport.namespaceLockKey("payments"))
                 .isNotEqualTo(DialectSupport.namespaceLockKey("ledger"));
     }

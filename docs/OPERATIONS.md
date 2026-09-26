@@ -59,9 +59,12 @@ SchemaSynchronizer does not commit it. Changes and the transaction-scoped Postgr
 advisory lock remain active until the caller commits or rolls back.
 
 PostgreSQL uses a two-key advisory lock mixing the configured schema namespace with the
-advisory lock id. MySQL/MariaDB `GET_LOCK` resource names are capped at 64 characters
-(longer names are hashed). Oracle `DBMS_LOCK` uses `release_on_commit=false` so implicit
-DDL commits do not release the lock mid-sync.
+advisory lock id, acquired via `pg_try_advisory_xact_lock` with a 30-second deadline
+(unbounded `pg_advisory_xact_lock` is not used). MySQL/MariaDB `GET_LOCK` resource
+names are capped at 64 characters (longer names are SHA-256 hashed). Oracle
+`DBMS_LOCK` uses `release_on_commit=false` so implicit DDL commits do not release
+the lock mid-sync. History rows record `applied_by` from `SCHEMA_SYNCHRONIZER_ACTOR`
+or the JVM `user.name`.
 
 ## Recovery
 

@@ -1,5 +1,15 @@
 # Greptile lessons
 
+## 2026-09-26 — 1.4.0 — P2 hardening before release
+
+- **Bug / gaps:** Boot on-by-default DDL; argv passwords; message-only duplicate
+  classification; unbounded PG advisory wait; history without actor; dry-run API
+  unused; `public` default misleading on SQL Server/Oracle/MySQL.
+- **Missed because:** Audit P2s deferred after P0/P1 1.3.1 pass.
+- **Prevention:** `enabled` default false; `CliCredentials` env-only password;
+  SQLState/vendor-code-only `DuplicateObjectSql`; `pg_try_*` 30s; `applied_by`;
+  dialect schema reject for `public` on non-PG; wire `supportsTransactionalDryRun`.
+
 ## 2026-09-26 — 1.3.1 — schema scope and routine-body policy bypasses
 
 - **Bug:** Change-set schema binding only matched bare `ident.ident` after masking

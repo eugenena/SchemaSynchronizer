@@ -4,7 +4,6 @@
 package com.thinkaillc.schemasynchronizer;
 
 import java.sql.SQLException;
-import java.util.Locale;
 
 /**
  * Classifies JDBC errors that mean a DDL object already exists.
@@ -14,6 +13,10 @@ import java.util.Locale;
  * uniqueness violations are never treated as duplicates to skip. Only the primary
  * {@link SQLException} is inspected — chained {@code nextException} values are ignored
  * so a hard failure is not masked by a later duplicate-object detail.
+ *
+ * <p>Classification is <strong>SQLState / vendor-code only</strong>. Message substring
+ * matching is intentionally absent so a null SQLState plus an {@code already exists}
+ * message cannot fail-open and ledger an incomplete change.
  */
 final class DuplicateObjectSql {
     private DuplicateObjectSql() {
@@ -56,21 +59,6 @@ final class DuplicateObjectSql {
         if (code == 955 || code == 1430 || code == 957 || code == 2260 || code == 2261) {
             return true;
         }
-        String message = exception.getMessage();
-        if (message == null || message.isBlank()) {
-            return false;
-        }
-        String lower = message.toLowerCase(Locale.ROOT);
-        if (lower.contains("duplicate entry") || lower.contains("unique constraint")
-                || lower.contains("unique_violation") || lower.contains("duplicate key")
-                || lower.contains("violation of unique key")
-                || lower.contains("violation of primary key")
-                || lower.contains("ora-00001")) {
-            return false;
-        }
-        return lower.contains("already exists")
-                || lower.contains("already an object named")
-                || lower.contains("name is already used")
-                || lower.contains("column being added already exists");
+        return false;
     }
 }

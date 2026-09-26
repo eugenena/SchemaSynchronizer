@@ -23,5 +23,9 @@ Schema definitions are trusted application artifacts. The SQL policy rejects acc
 destructive DDL (including forbidden tokens inside `CREATE FUNCTION` / `TRIGGER` /
 `PROCEDURE` bodies) and binds change-set SQL to the configured schema namespace. It is
 still not a sandbox for hostile SQL: `UPDATE` / `INSERT` / `GRANT` remain allowed for
-intentional data backfills and privileges. Applications must restrict who can modify
-definitions and deployment artifacts.
+intentional data backfills and privileges. The declarative layer covers tables,
+columns, indexes, and primary keys only — foreign keys, checks, partitions, and
+similar objects belong in ordered change sets. Applications must restrict who can
+modify definitions and deployment artifacts. Passwords must be supplied via
+`SCHEMA_DB_PASSWORD` (never as a literal CLI argument). Spring Boot auto-sync is
+opt-in (`schema-synchronizer.enabled=true`).

@@ -7,7 +7,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 
 @ConfigurationProperties("schema-synchronizer")
 public class SchemaSynchronizerProperties {
-    private boolean enabled = true;
+    private boolean enabled = false;
     private String resource = "/schema-definition.json";
     private String schema = "public";
     private String historyTable = "schema_synchronizer_history";
