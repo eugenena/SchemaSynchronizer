@@ -92,13 +92,9 @@ class SchemaSynchronizerPostgresIntegrationTest {
         }
 
         Path definitionPath = tempDirectory.resolve("schema-definition.json");
-        SchemaSnapshotWriter.main(new String[]{
-                System.getProperty("schema.test.jdbc.url"),
-                System.getProperty("schema.test.jdbc.user", ""),
-                System.getProperty("schema.test.jdbc.password", ""),
-                sourceSchema,
-                definitionPath.toString()
-        });
+        try (Connection connection = dataSource.getConnection()) {
+            SchemaSnapshotWriter.writeSnapshot(connection, sourceSchema, definitionPath);
+        }
         SchemaDefinition definition = new ObjectMapper().readValue(definitionPath.toFile(), SchemaDefinition.class);
 
         assertThat(definition.tables().get("accounts").indexes())
@@ -128,13 +124,11 @@ class SchemaSynchronizerPostgresIntegrationTest {
         }
 
         Path definitionPath = tempDirectory.resolve("exclude-schema-definition.json");
-        assertThatThrownBy(() -> SchemaSnapshotWriter.main(new String[]{
-                System.getProperty("schema.test.jdbc.url"),
-                System.getProperty("schema.test.jdbc.user", ""),
-                System.getProperty("schema.test.jdbc.password", ""),
-                sourceSchema,
-                definitionPath.toString()
-        }))
+        assertThatThrownBy(() -> {
+            try (Connection connection = dataSource.getConnection()) {
+                SchemaSnapshotWriter.writeSnapshot(connection, sourceSchema, definitionPath);
+            }
+        })
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("EXCLUDE constraint")
                 .hasMessageContaining("ordered change set");

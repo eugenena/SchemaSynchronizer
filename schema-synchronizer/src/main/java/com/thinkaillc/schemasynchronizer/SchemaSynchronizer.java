@@ -479,7 +479,12 @@ public class SchemaSynchronizer {
                         if (dialect.isMySqlFamily()) {
                             plan = mySqlFamilyColumnPlan(tableName, col.name(), col.definition(), plan);
                         } else if (dialect == DatabaseDialect.SQLSERVER) {
-                            plan = sqlServerColumnPlan(tableName, col.name(), col.definition(), plan);
+                            LiveColumn liveCol = liveColumns.get(colName);
+                            boolean liveHasDefault = liveCol != null
+                                    && liveCol.defaultExpr() != null
+                                    && !liveCol.defaultExpr().isBlank();
+                            plan = sqlServerColumnPlan(tableName, col.name(), col.definition(), plan,
+                                    liveHasDefault);
                         } else if (dialect == DatabaseDialect.ORACLE) {
                             plan = oracleColumnPlan(tableName, col.name(), col.definition(), plan);
                         }
@@ -636,7 +641,8 @@ public class SchemaSynchronizer {
             return;
         }
         for (Map.Entry<String, SchemaDefinition.TableDef> entry : definition.tables().entrySet()) {
-            String table = SqlIdentifiers.requireIdentifier(entry.getKey(), "table");
+            int maxIdent = dialect.maxIdentifierLength();
+            String table = SqlIdentifiers.requireIdentifier(entry.getKey(), "table", maxIdent);
             SchemaDefinition.TableDef tableDef = entry.getValue();
             if (tableDef == null) {
                 throw new IllegalArgumentException("table definition is null: " + table);
@@ -657,7 +663,7 @@ public class SchemaSynchronizer {
                     if (column == null) {
                         throw new IllegalArgumentException("null column definition in table: " + table);
                     }
-                    String name = SqlIdentifiers.requireIdentifier(column.name(), "column");
+                    String name = SqlIdentifiers.requireIdentifier(column.name(), "column", maxIdent);
                     if (!columns.add(name)) {
                         throw new IllegalArgumentException("duplicate column definition: " + table + "." + name);
                     }
@@ -677,7 +683,7 @@ public class SchemaSynchronizer {
             if (tableDef.indexes() != null) {
                 for (String sql : tableDef.indexes()) {
                     NonDestructiveSqlPolicy.requireCreateIndex(sql, dialect.supportsCreateIndexIfNotExists());
-                    IndexDefinition index = IndexDefinition.parse(sql);
+                    IndexDefinition index = IndexDefinition.parse(sql, maxIdent);
                     if ((index.schema() != null && !options.schema().equalsIgnoreCase(index.schema()))
                             || !table.equals(index.table())) {
                         throw new IllegalArgumentException("index target does not match table definition: "
@@ -724,13 +730,25 @@ public class SchemaSynchronizer {
                 }
             }
         } else {
+            String catalog = dialect.metadataCatalog(conn, options.schema());
+            String schemaPattern = dialect.metadataSchemaPattern(options.schema());
+            String metadataTable = dialect.metadataObjectName(tableName);
+            Set<String> omittedLive = new HashSet<>();
+            omittedLive.addAll(SchemaSnapshotWriter.uniqueConstraintIndexNames(
+                    conn, dialect, catalog, schemaPattern, metadataTable));
+            omittedLive.addAll(SchemaSnapshotWriter.complexSqlServerIndexNames(
+                    conn, dialect, catalog, schemaPattern, metadataTable));
             for (String sql : SchemaSnapshotWriter.readJdbcIndexes(meta, dialect,
-                    dialect.metadataCatalog(conn, options.schema()),
-                    dialect.metadataSchemaPattern(options.schema()), dialect.metadataObjectName(tableName))) {
+                    catalog, schemaPattern, metadataTable)) {
                 IndexDefinition index = IndexDefinition.parse(sql);
                 if (live.put(index.name(), sql) != null) {
                     throw new IllegalStateException("duplicate live index name: " + index.name());
                 }
+            }
+            // Constraint-backed / filter/INCLUDE indexes are omitted from JDBC reconstruction
+            // but still exist live — treat their names as present so we neither CREATE nor DROP.
+            for (String name : omittedLive) {
+                live.putIfAbsent(name, "-- omitted-live-index:" + name);
             }
         }
         Set<String> expected = new HashSet<>();
@@ -743,6 +761,8 @@ public class SchemaSynchronizer {
                     if (applyChanges) {
                         execute(conn, dialectCompatibleIndexSql(sql, dialect));
                     }
+                } else if (liveSql.startsWith("-- omitted-live-index:")) {
+                    // Present via UNIQUE constraint or complex SQL Server index; do not recreate.
                 } else if (!target.hasSameStructure(IndexDefinition.parse(liveSql))) {
                     addIndexReplacement(pendingSql, target, IndexDefinition.parse(liveSql), sql,
                             tableName, dialect);
@@ -757,6 +777,10 @@ public class SchemaSynchronizer {
         }
         for (String liveName : live.keySet().stream().sorted().toList()) {
             if (!expected.contains(liveName)) {
+                String liveSql = live.get(liveName);
+                if (liveSql != null && liveSql.startsWith("-- omitted-live-index:")) {
+                    continue;
+                }
                 pendingSql.add(dialect.isMySqlFamily()
                         ? "DROP INDEX " + liveName + " ON " + tableName + ";"
                         : "DROP INDEX IF EXISTS " + liveName + "; -- table=" + tableName);
@@ -979,6 +1003,12 @@ public class SchemaSynchronizer {
 
     static NonDestructiveAlterPlanner.Plan sqlServerColumnPlan(
             String tableName, String columnName, String definition, NonDestructiveAlterPlanner.Plan plan) {
+        return sqlServerColumnPlan(tableName, columnName, definition, plan, false);
+    }
+
+    static NonDestructiveAlterPlanner.Plan sqlServerColumnPlan(
+            String tableName, String columnName, String definition, NonDestructiveAlterPlanner.Plan plan,
+            boolean liveHasDefault) {
         if (!plan.pendingSql().isEmpty()) {
             return new NonDestructiveAlterPlanner.Plan(List.of(), List.of(
                     "ALTER TABLE " + tableName + " ALTER COLUMN " + columnName + " "
@@ -999,7 +1029,14 @@ public class SchemaSynchronizer {
             if (dropNotNull && !alterDefinition.toUpperCase(Locale.ROOT).contains(" NULL")) {
                 alterDefinition = alterDefinition + " NULL";
             }
-            apply.add("ALTER TABLE " + tableName + " ALTER COLUMN " + columnName + " " + alterDefinition);
+            String alterSql = "ALTER TABLE " + tableName + " ALTER COLUMN " + columnName + " " + alterDefinition;
+            if (liveHasDefault && (typeChange || dropNotNull || setNotNull)) {
+                // SQL Server rejects ALTER COLUMN while a DEFAULT constraint depends on the column.
+                pending.add(alterSql + "; -- pending: drop/recreate DEFAULT constraint around ALTER COLUMN "
+                        + "(or manage via change sets)");
+            } else {
+                apply.add(alterSql);
+            }
         }
         if (defaultChange) {
             pending.add("ALTER TABLE " + tableName + " /* DEFAULT for " + columnName + " */; "

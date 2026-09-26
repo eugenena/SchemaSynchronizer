@@ -2,3 +2,16 @@ target/
 .idea/
 *.iml
 .DS_Store
+
+# Local / agent tooling (not part of the published project)
+.agents/
+.kilo/
+.qodo/
+.claude/
+skills-lock.json
+
+# Personal / internal drafting — never commit
+docs/RESUME*.md
+docs/LINKEDIN*.md
+docs/LINKEDIN*.txt
+docs/AUDIT_*.md

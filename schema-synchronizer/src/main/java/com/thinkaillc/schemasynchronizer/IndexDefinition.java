@@ -20,15 +20,19 @@ record IndexDefinition(String name, String schema, String table, String structur
             "(?i)\\(('(?:''|[^'])*')::text\\)::text");
 
     static IndexDefinition parse(String sql) {
+        return parse(sql, SqlIdentifiers.EXTENDED_MAX_LENGTH);
+    }
+
+    static IndexDefinition parse(String sql, int maxIdentifierLength) {
         Matcher matcher = CREATE_INDEX.matcher(sql == null ? "" : sql);
         if (!matcher.matches()) {
             throw new IllegalArgumentException("index definition must use unquoted PostgreSQL identifiers");
         }
         String unique = matcher.group(1) == null ? "" : "UNIQUE ";
-        String name = SqlIdentifiers.requireIdentifier(matcher.group(2), "index");
+        String name = SqlIdentifiers.requireIdentifier(matcher.group(2), "index", maxIdentifierLength);
         String schema = matcher.group(3) == null ? null
-                : SqlIdentifiers.requireIdentifier(matcher.group(3), "index schema");
-        String table = SqlIdentifiers.requireIdentifier(matcher.group(4), "index table");
+                : SqlIdentifiers.requireIdentifier(matcher.group(3), "index schema", maxIdentifierLength);
+        String table = SqlIdentifiers.requireIdentifier(matcher.group(4), "index table", maxIdentifierLength);
         String rawTail = matcher.group(5).trim();
         int whereOffset = findTopLevelWhere(rawTail);
         String rawStructure = whereOffset < 0 ? rawTail : rawTail.substring(0, whereOffset);

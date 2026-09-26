@@ -1,5 +1,24 @@
 # Greptile lessons
 
+## 2026-09-26 — PR #12 — Oracle/SQL Server release + public-repo hygiene
+
+- **Bug:** Unquoted SQL Server JDBC URLs in CI; ITs still passed argv passwords after
+  `CliCredentials`; Oracle dual-lock leak and PG dual-lock AB-BA wait; `GRANT *.*` /
+  `SCHEMA::` escaped binding; UNIQUE/filter/INCLUDE indexes and DEFAULT-blocked
+  `ALTER COLUMN` mis-handled; 63-char validation despite 128-char dialects; internal
+  audit/resume/LinkedIn drafts committed to a public repo.
+- **Missed because:** Workflow quoting and IT serialize paths were not exercised in the
+  unit suite; lock dual-acquire lacked failure/ordering contracts; GRANT forms beyond
+  `schema.object` were out of the scope matrix; career/audit docs were treated as
+  project docs.
+- **Prevention:** Quote JDBC `-D` URLs; `SchemaSnapshotWriter.writeSnapshot(Connection…)`;
+  release Oracle lock on partial failure; acquire PG locks primary-then-legacy only;
+  reject `*.*` and `SCHEMA::`; skip UNIQUE-constraint and complex SQL Server indexes;
+  pending SQL Server ALTER when live DEFAULT exists; dialect `maxIdentifierLength` in
+  declarative validation; remove internal drafts; keep product narrative in
+  `docs/DESIGN.md` only. Contracts in `ChangeSetSchemaScopeTest` and
+  `SchemaSynchronizerTest`.
+
 ## 2026-09-26 — 1.4.0 — P2 hardening before release
 
 - **Bug / gaps:** Boot on-by-default DDL; argv passwords; message-only duplicate

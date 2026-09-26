@@ -161,6 +161,27 @@ class ChangeSetSchemaScopeTest {
     }
 
     @Test
+    void rejectsGlobalAndSchemaColonGrants() {
+        assertThatThrownBy(() -> ChangeSetSchemaScope.requireScoped(
+                "GRANT SELECT ON *.* TO reader", "public"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("*.*");
+        assertThatThrownBy(() -> ChangeSetSchemaScope.requireScoped(
+                "GRANT SELECT ON TABLE *.* TO reader", "public"))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> ChangeSetSchemaScope.requireScoped(
+                "GRANT SELECT ON otherdb.* TO reader", "public"))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> ChangeSetSchemaScope.requireScoped(
+                "GRANT CONNECT ON DATABASE::evil TO reader", "dbo"))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> ChangeSetSchemaScope.requireScoped(
+                "GRANT SELECT ON SCHEMA::other TO reader", "dbo"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("other");
+    }
+
+    @Test
     void rejectsSessionNamespaceMutators() {
         assertThatThrownBy(() -> ChangeSetSchemaScope.requireScoped(
                 "SELECT set_config('search_path', 'evil', true)", "public"))
