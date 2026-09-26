@@ -155,7 +155,11 @@ final class DialectSupport {
                     try {
                         acquireMysqlLock(conn, dialect, legacy);
                     } catch (RuntimeException | SQLException secondFailure) {
-                        releaseMysqlLock(conn, resource);
+                        try {
+                            releaseMysqlLock(conn, resource);
+                        } catch (RuntimeException | SQLException releaseFailure) {
+                            secondFailure.addSuppressed(releaseFailure);
+                        }
                         throw secondFailure;
                     }
                     yield resource + ":" + legacy;
@@ -187,18 +191,40 @@ final class DialectSupport {
                 int lockId = Math.floorMod(Objects.hash("schema_synchronizer",
                         namespace.toLowerCase(Locale.ROOT), advisoryLockId), 1_073_741_823);
                 int legacyLockId = Math.floorMod(Long.hashCode(advisoryLockId), 1_073_741_823);
-                requestOracleLock(conn, lockId);
+                // Only ids newly acquired here go into the token: status 4 means an outer
+                // caller on this session already owns the lock and must keep it.
+                boolean ownsPrimary = requestOracleLock(conn, lockId);
+                boolean ownsLegacy = false;
                 try {
                     if (legacyLockId != lockId) {
-                        requestOracleLock(conn, legacyLockId);
+                        ownsLegacy = requestOracleLock(conn, legacyLockId);
                     }
                 } catch (RuntimeException | SQLException error) {
-                    releaseOracleLockId(conn, lockId);
+                    if (ownsPrimary) {
+                        try {
+                            releaseOracleLockId(conn, lockId);
+                        } catch (RuntimeException | SQLException releaseFailure) {
+                            error.addSuppressed(releaseFailure);
+                        }
+                    }
                     throw error;
                 }
-                yield Integer.toString(lockId) + ":" + legacyLockId;
+                yield (ownsPrimary ? Integer.toString(lockId) : "") + ":"
+                        + (ownsLegacy ? Integer.toString(legacyLockId) : "");
             }
         };
+    }
+
+    /**
+     * SQL Server and Oracle have no RELEASE SAVEPOINT (mssql-jdbc and ojdbc throw); their
+     * savepoints end with the transaction.
+     */
+    static void releaseSavepoint(Connection conn, DatabaseDialect dialect, java.sql.Savepoint savepoint)
+            throws SQLException {
+        if (savepoint == null || dialect == DatabaseDialect.SQLSERVER || dialect == DatabaseDialect.ORACLE) {
+            return;
+        }
+        conn.releaseSavepoint(savepoint);
     }
 
     static void releaseLock(Connection conn, DatabaseDialect dialect, String lockToken) throws SQLException {
@@ -206,33 +232,61 @@ final class DialectSupport {
             return;
         }
         switch (dialect) {
-            case MARIADB, MYSQL -> {
-                for (String part : lockToken.split(":")) {
-                    if (!part.isBlank()) {
-                        releaseMysqlLock(conn, part);
-                    }
-                }
-            }
+            case MARIADB, MYSQL -> releaseEach(lockToken, part -> releaseMysqlLock(conn, part));
             case SQLSERVER -> {
                 try (var statement = conn.prepareStatement(
                         "DECLARE @result INT; "
                                 + "EXEC @result = sp_releaseapplock @Resource = ?, @LockOwner = 'Session'; "
                                 + "SELECT @result")) {
                     statement.setString(1, lockToken);
-                    statement.executeQuery().close();
-                }
-            }
-            case ORACLE -> {
-                for (String part : lockToken.split(":")) {
-                    if (part.isBlank()) {
-                        continue;
+                    try (var row = statement.executeQuery()) {
+                        if (!row.next() || row.getInt(1) < 0) {
+                            throw new SQLException("Could not release sqlserver schema synchronization lock");
+                        }
                     }
-                    releaseOracleLockId(conn, Integer.parseInt(part));
                 }
             }
+            case ORACLE -> releaseEach(lockToken, part -> releaseOracleLockId(conn, Integer.parseInt(part)));
             case POSTGRESQL -> {
                 // transaction-scoped advisory lock released on commit/rollback
             }
+        }
+    }
+
+    @FunctionalInterface
+    interface LockPartRelease {
+        void release(String part) throws SQLException;
+    }
+
+    /** Attempts every part so one failure cannot leave the other session lock held. */
+    static void releaseEach(String lockToken, LockPartRelease release) throws SQLException {
+        SQLException sqlFailure = null;
+        RuntimeException runtimeFailure = null;
+        for (String part : lockToken.split(":")) {
+            if (part.isBlank()) {
+                continue;
+            }
+            try {
+                release.release(part);
+            } catch (SQLException failure) {
+                if (sqlFailure == null && runtimeFailure == null) {
+                    sqlFailure = failure;
+                } else {
+                    (sqlFailure != null ? sqlFailure : runtimeFailure).addSuppressed(failure);
+                }
+            } catch (RuntimeException failure) {
+                if (sqlFailure == null && runtimeFailure == null) {
+                    runtimeFailure = failure;
+                } else {
+                    (sqlFailure != null ? sqlFailure : runtimeFailure).addSuppressed(failure);
+                }
+            }
+        }
+        if (sqlFailure != null) {
+            throw sqlFailure;
+        }
+        if (runtimeFailure != null) {
+            throw runtimeFailure;
         }
     }
 
@@ -334,17 +388,21 @@ final class DialectSupport {
         }
     }
 
-    private static void requestOracleLock(Connection conn, int lockId) throws SQLException {
+    /** @return true when newly acquired, false when this session already owned it (status 4). */
+    private static boolean requestOracleLock(Connection conn, int lockId) throws SQLException {
         try (var statement = conn.prepareCall("{ ? = call DBMS_LOCK.REQUEST(?, 6, 30, false) }")) {
             statement.registerOutParameter(1, Types.INTEGER);
             statement.setInt(2, lockId);
             statement.execute();
             int status = statement.getInt(1);
-            // 0 = success, 4 = already owned by this session
-            if (status != 0 && status != 4) {
-                throw new IllegalStateException(
-                        "Could not acquire oracle schema synchronization lock (status=" + status + ")");
+            if (status == 0) {
+                return true;
             }
+            if (status == 4) {
+                return false;
+            }
+            throw new IllegalStateException(
+                    "Could not acquire oracle schema synchronization lock (status=" + status + ")");
         }
     }
 

@@ -45,9 +45,9 @@ public class SchemaSynchronizer {
             "(?is)^\\s*CREATE\\s+TABLE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?"
                     + "(?:(?:([a-zA-Z_][a-zA-Z0-9_]*)\\.)?([a-zA-Z_][a-zA-Z0-9_]*))\\s*\\(.*");
     private static final Pattern PRIMARY_KEY_COLUMNS = Pattern.compile(
-            "(?is)\\bPRIMARY\\s+KEY\\s*\\(([^)]+)\\)");
+            "(?is)\\bPRIMARY\\s+KEY\\s*(?:(?:NON)?CLUSTERED\\s*)?\\(([^)]+)\\)");
     private static final Pattern INLINE_PRIMARY_KEY = Pattern.compile(
-            "(?is)(?:\\(|,)\\s*([a-zA-Z_][a-zA-Z0-9_]*)\\s+[^,]*?\\bPRIMARY\\s+KEY\\b");
+            "(?is)(?:\\(|,)\\s*(?!(?:CONSTRAINT|PRIMARY|UNIQUE)\\b)([a-zA-Z_][a-zA-Z0-9_]*)\\s+[^,]*?\\bPRIMARY\\s+KEY\\b");
 
     private final ObjectMapper objectMapper;
     private final DataSource dataSource;
@@ -290,7 +290,7 @@ public class SchemaSynchronizer {
                 if (dialect == DatabaseDialect.POSTGRESQL) {
                     restoreSearchPath(conn, previousSearchPath);
                 }
-                conn.releaseSavepoint(savepoint);
+                DialectSupport.releaseSavepoint(conn, dialect, savepoint);
             }
             return new SchemaSynchronizationResult(beforeChanges.applied() + afterChanges.applied(),
                     declarative.tablesCreated(),
@@ -306,24 +306,28 @@ public class SchemaSynchronizer {
             throw exception;
         } finally {
             plannedSql.remove();
+            Exception cleanupFailure = null;
             try {
                 DialectSupport.releaseLock(conn, dialect, lockToken);
-            } catch (SQLException releaseFailure) {
-                if (primaryFailure != null) {
-                    primaryFailure.addSuppressed(releaseFailure);
-                } else {
-                    throw releaseFailure;
-                }
+            } catch (SQLException | RuntimeException releaseFailure) {
+                cleanupFailure = releaseFailure;
             }
             if (ownsTransaction) {
                 try {
                     conn.setAutoCommit(previousAutoCommit);
-                } catch (SQLException restoreFailure) {
-                    if (primaryFailure != null) {
-                        primaryFailure.addSuppressed(restoreFailure);
+                } catch (SQLException | RuntimeException restoreFailure) {
+                    if (cleanupFailure == null) {
+                        cleanupFailure = restoreFailure;
                     } else {
-                        throw restoreFailure;
+                        cleanupFailure.addSuppressed(restoreFailure);
                     }
+                }
+            }
+            if (cleanupFailure != null) {
+                if (primaryFailure != null) {
+                    primaryFailure.addSuppressed(cleanupFailure);
+                } else {
+                    throw cleanupFailure;
                 }
             }
         }
@@ -346,6 +350,7 @@ public class SchemaSynchronizer {
             requireOracleSchema(conn, options.schema());
         }
         String lockToken = null;
+        Exception primaryFailure = null;
         try {
             lockToken = DialectSupport.acquireLock(conn, dialect, options.schema(), options.advisoryLockId());
             executor.validateHistory(conn, allChanges, options, dialect);
@@ -368,9 +373,19 @@ public class SchemaSynchronizer {
             return new SchemaSynchronizationResult(before.applied() + after.applied(), declarative.tablesCreated(),
                     declarative.columnsAdded(), declarative.columnsAltered(), List.copyOf(plannedSql.get()),
                     declarative.pendingSql());
+        } catch (Exception failure) {
+            primaryFailure = failure;
+            throw failure;
         } finally {
             plannedSql.remove();
-            DialectSupport.releaseLock(conn, dialect, lockToken);
+            try {
+                DialectSupport.releaseLock(conn, dialect, lockToken);
+            } catch (SQLException | RuntimeException releaseFailure) {
+                if (primaryFailure == null) {
+                    throw releaseFailure;
+                }
+                primaryFailure.addSuppressed(releaseFailure);
+            }
         }
     }
 
@@ -421,7 +436,7 @@ public class SchemaSynchronizer {
 
         for (Map.Entry<String, SchemaDefinition.TableDef> entry : def.tables().entrySet()) {
             String tableName = entry.getKey().toLowerCase(Locale.ROOT);
-            SqlIdentifiers.requireIdentifier(tableName, "table");
+            SqlIdentifiers.requireIdentifier(tableName, "table", dialect.maxIdentifierLength());
             SchemaDefinition.TableDef tableDef = entry.getValue();
             Set<String> livePrimaryKeyColumns = existingTables.contains(tableName)
                     ? getLivePrimaryKeyColumns(meta, tableName, dialect) : Set.of();
@@ -429,9 +444,9 @@ public class SchemaSynchronizer {
 
             if (!existingTables.contains(tableName)) {
                 if (tableDef.createSql() != null) {
-                    NonDestructiveSqlPolicy.requireCreateTable(tableDef.createSql());
+                    NonDestructiveSqlPolicy.requireCreateTable(tableDef.createSql(), dialect);
                     if (applyChanges) {
-                        execute(conn, tableDef.createSql());
+                        execute(conn, dialect.executableSql(tableDef.createSql()));
                         log.info("[SchemaSynchronizer] Created table: {}", tableName);
                         tablesCreated++;
                         existingTables.add(tableName);
@@ -440,8 +455,7 @@ public class SchemaSynchronizer {
                     }
                 } else {
                     log.warn("[SchemaSynchronizer] Table '{}' missing but no createSql provided — skipping", tableName);
-                    pendingSql.add("CREATE TABLE " + tableName
-                            + " (...); -- pending: table missing and createSql is absent");
+                    pendingSql.add("-- pending: table " + tableName + " is missing and createSql is absent");
                     continue;
                 }
             }
@@ -452,7 +466,7 @@ public class SchemaSynchronizer {
 
                 for (SchemaDefinition.ColumnDef col : tableDef.columns()) {
                     String colName = col.name().toLowerCase(Locale.ROOT);
-                    SqlIdentifiers.requireIdentifier(colName, "column");
+                    SqlIdentifiers.requireIdentifier(colName, "column", dialect.maxIdentifierLength());
                     targetColumns.add(colName);
                     if (!liveColumns.containsKey(colName)) {
                         if (col.definition() != null) {
@@ -464,8 +478,8 @@ public class SchemaSynchronizer {
                                 columnsAdded++;
                             }
                         } else {
-                            pendingSql.add("ALTER TABLE " + tableName + " ADD COLUMN " + colName
-                                    + " ...; -- pending: column definition is absent");
+                            pendingSql.add("-- pending: column " + tableName + "." + colName
+                                    + " is missing and its definition is absent");
                         }
                         continue;
                     }
@@ -474,23 +488,30 @@ public class SchemaSynchronizer {
                         continue;
                     }
                     try {
-                        ColumnSpec target = ColumnDefinitionParser.parse(col.definition());
+                        ColumnSpec target = foldNationalType(ColumnDefinitionParser.parse(col.definition()), dialect);
+                        LiveColumn comparableLive = dialect == DatabaseDialect.ORACLE
+                                ? oracleComparableLive(liveColumns.get(colName), target, col.definition())
+                                : liveColumns.get(colName);
                         NonDestructiveAlterPlanner.Plan plan =
-                                NonDestructiveAlterPlanner.plan(tableName, col.name(), target, liveColumns.get(colName));
+                                NonDestructiveAlterPlanner.plan(tableName, col.name(), target, comparableLive);
                         if (dialect.isMySqlFamily()) {
-                            plan = mySqlFamilyColumnPlan(tableName, col.name(), col.definition(), plan);
+                            String blockedReason = plan.applySql().isEmpty() ? null
+                                    : mySqlBlockReason(mySqlColumnFacts(conn, tableName, colName), col.definition());
+                            plan = mySqlFamilyColumnPlan(tableName, col.name(), col.definition(), plan, blockedReason);
                         } else if (dialect == DatabaseDialect.SQLSERVER) {
                             LiveColumn liveCol = liveColumns.get(colName);
-                            boolean liveHasDefault = liveCol != null
-                                    && liveCol.defaultExpr() != null
-                                    && !liveCol.defaultExpr().isBlank();
                             plan = sqlServerColumnPlan(tableName, col.name(), col.definition(), plan,
-                                    liveHasDefault);
+                                    sqlServerColumnFacts(conn, options.schema(), tableName, colName,
+                                            col.definition(), target, liveCol, plan));
                         } else if (dialect == DatabaseDialect.ORACLE) {
                             plan = oracleColumnPlan(tableName, col.name(), col.definition(), plan);
                         }
+                        boolean relaxesPrimaryKey = livePrimaryKeyColumns.contains(colName)
+                                && plan.applyOps().contains(NonDestructiveAlterPlanner.Op.DROP_NOT_NULL);
                         for (String sql : plan.applySql()) {
-                            if (sql.endsWith(" DROP NOT NULL") && livePrimaryKeyColumns.contains(colName)) {
+                            boolean deferred = relaxesPrimaryKey && (dialect != DatabaseDialect.POSTGRESQL
+                                    || sql.endsWith(" DROP NOT NULL"));
+                            if (deferred) {
                                 deferredNullabilitySql.add(terminated(sql));
                             } else {
                                 if (applyChanges) {
@@ -576,6 +597,17 @@ public class SchemaSynchronizer {
 
     static NonDestructiveAlterPlanner.Plan mySqlFamilyColumnPlan(
             String tableName, String columnName, String definition, NonDestructiveAlterPlanner.Plan plan) {
+        return mySqlFamilyColumnPlan(tableName, columnName, definition, plan, null);
+    }
+
+    static NonDestructiveAlterPlanner.Plan mySqlFamilyColumnPlan(
+            String tableName, String columnName, String definition, NonDestructiveAlterPlanner.Plan plan,
+            String blockedReason) {
+        if (blockedReason != null && !plan.applySql().isEmpty()) {
+            return new NonDestructiveAlterPlanner.Plan(List.of(), List.of(
+                    "ALTER TABLE " + tableName + " MODIFY COLUMN " + columnName + " " + definition
+                            + "; -- pending: " + blockedReason + "; handle this change in a reviewed change set"));
+        }
         if (!plan.pendingSql().isEmpty()) {
             return new NonDestructiveAlterPlanner.Plan(List.of(), List.of(
                     "ALTER TABLE " + tableName + " MODIFY COLUMN " + columnName
@@ -583,9 +615,87 @@ public class SchemaSynchronizer {
         }
         if (!plan.applySql().isEmpty()) {
             return new NonDestructiveAlterPlanner.Plan(List.of(
-                    "ALTER TABLE " + tableName + " MODIFY COLUMN " + columnName + " " + definition), List.of());
+                    "ALTER TABLE " + tableName + " MODIFY COLUMN " + columnName + " " + definition), List.of(),
+                    requireOps(plan));
         }
         return plan;
+    }
+
+    /** Live MySQL/MariaDB column attributes that {@code MODIFY COLUMN <definition>} would rewrite. */
+    record MySqlColumnFacts(boolean found, String collation, String tableCollation, String characterSet,
+                            String extra, String comment, String generationExpression) {}
+
+    /**
+     * {@code MODIFY COLUMN} replaces the whole column definition: attributes the declaration
+     * does not repeat (charset/collation, ON UPDATE, AUTO_INCREMENT, INVISIBLE, COMMENT,
+     * generation expression) are silently reset, so such columns are pending instead.
+     */
+    static String mySqlBlockReason(MySqlColumnFacts facts, String declaredDefinition) {
+        if (!facts.found()) {
+            return "column was not found in information_schema";
+        }
+        String declared = declaredDefinition.toUpperCase(Locale.ROOT);
+        String extra = facts.extra() == null ? "" : facts.extra().toLowerCase(Locale.ROOT);
+        if (facts.generationExpression() != null && !facts.generationExpression().isBlank()) {
+            return "generated column";
+        }
+        if (extra.contains("on update") && !declared.contains("ON UPDATE")) {
+            return "ON UPDATE attribute would be dropped by MODIFY COLUMN";
+        }
+        if (extra.contains("auto_increment") && !declared.contains("AUTO_INCREMENT")) {
+            return "AUTO_INCREMENT would be dropped by MODIFY COLUMN";
+        }
+        if (extra.contains("invisible")) {
+            return "INVISIBLE attribute would be dropped by MODIFY COLUMN";
+        }
+        if (facts.comment() != null && !facts.comment().isEmpty() && !declared.contains("COMMENT")) {
+            return "column COMMENT would be dropped by MODIFY COLUMN";
+        }
+        boolean national = declared.matches("(?s)^\\s*(?:NVARCHAR|NCHAR|NATIONAL)\\b.*");
+        String charset = facts.characterSet() == null ? "" : facts.characterSet().toLowerCase(Locale.ROOT);
+        if (national && !charset.isEmpty() && !charset.equals("utf8mb3") && !charset.equals("utf8")) {
+            return "NVARCHAR/NCHAR would change the character set from " + charset + " to utf8mb3";
+        }
+        if (!national && facts.collation() != null && !facts.collation().equals(facts.tableCollation())
+                && !declared.contains("COLLATE") && !declared.contains("CHARACTER SET")) {
+            return "column collation " + facts.collation() + " differs from the table default and would be reset";
+        }
+        return null;
+    }
+
+    private static MySqlColumnFacts mySqlColumnFacts(Connection conn, String tableName, String columnName)
+            throws SQLException {
+        String sql = """
+                SELECT c.COLLATION_NAME, t.TABLE_COLLATION, c.CHARACTER_SET_NAME, c.EXTRA, c.COLUMN_COMMENT,
+                       c.GENERATION_EXPRESSION
+                FROM information_schema.COLUMNS c
+                JOIN information_schema.TABLES t
+                  ON t.TABLE_SCHEMA = c.TABLE_SCHEMA AND t.TABLE_NAME = c.TABLE_NAME
+                WHERE c.TABLE_SCHEMA = DATABASE() AND c.TABLE_NAME = ? AND c.COLUMN_NAME = ?
+                """;
+        try (var statement = conn.prepareStatement(sql)) {
+            statement.setString(1, tableName);
+            statement.setString(2, columnName);
+            try (ResultSet rs = statement.executeQuery()) {
+                if (!rs.next()) {
+                    return new MySqlColumnFacts(false, null, null, null, null, null, null);
+                }
+                return new MySqlColumnFacts(true, rs.getString(1), rs.getString(2), rs.getString(3),
+                        rs.getString(4), rs.getString(5), rs.getString(6));
+            }
+        }
+    }
+
+    /** MySQL/MariaDB and PostgreSQL store NVARCHAR/NCHAR as VARCHAR/CHAR (national charset or none). */
+    static ColumnSpec foldNationalType(ColumnSpec spec, DatabaseDialect dialect) {
+        if (!dialect.isMySqlFamily() && dialect != DatabaseDialect.POSTGRESQL) {
+            return spec;
+        }
+        return switch (spec.baseType()) {
+            case "NVARCHAR" -> new ColumnSpec("VARCHAR", spec.length(), spec.scale(), spec.notNull(), spec.defaultExpr());
+            case "NCHAR" -> new ColumnSpec("CHAR", spec.length(), spec.scale(), spec.notNull(), spec.defaultExpr());
+            default -> spec;
+        };
     }
 
     /** Identity / serial columns must not get DROP DEFAULT from nextval noise. */
@@ -601,7 +711,33 @@ public class SchemaSynchronizer {
             return true;
         }
         String liveDef = live.defaultExpr();
-        return liveDef != null && liveDef.contains("nextval(");
+        return liveDef != null && isSequenceDefault(liveDef);
+    }
+
+    /** PostgreSQL {@code nextval('seq')}, Oracle {@code "S"."ISEQ$$_1".nextval} / {@code seq.NEXTVAL}. */
+    static boolean isSequenceDefault(String defaultExpr) {
+        return defaultExpr != null
+                && (defaultExpr.contains("nextval(") || defaultExpr.matches("(?is).*\\.\\s*nextval\\b.*"));
+    }
+
+    /**
+     * Oracle stores INTEGER/INT/SMALLINT and ANSI NUMERIC/DECIMAL without precision as
+     * {@code NUMBER(38,0)}, and DOUBLE PRECISION/REAL as FLOAT; compare those as the declared type.
+     */
+    static LiveColumn oracleComparableLive(LiveColumn live, ColumnSpec target, String definition) {
+        boolean integerStorage = "NUMERIC".equals(live.baseType())
+                && Integer.valueOf(38).equals(live.length())
+                && (live.scale() == null || live.scale() == 0);
+        boolean ansiUnboundedNumeric = "NUMERIC".equals(target.baseType()) && target.length() == null
+                && definition != null && definition.trim().matches("(?is)^(?:NUMERIC|DECIMAL|DEC)\\b(?!\\s*\\().*");
+        if (integerStorage && (ColumnDefinitionParser.integerRank(target.baseType()) > 0 || ansiUnboundedNumeric)) {
+            return new LiveColumn(target.baseType(), target.length(), target.scale(), live.notNull(),
+                    live.defaultExpr());
+        }
+        if ("FLOAT".equals(live.baseType()) && ColumnDefinitionParser.floatRank(target.baseType()) > 0) {
+            return new LiveColumn(target.baseType(), null, null, live.notNull(), live.defaultExpr());
+        }
+        return live;
     }
 
     public static boolean isIgnorableSchemaTable(String tableName) {
@@ -623,6 +759,28 @@ public class SchemaSynchronizer {
         if (indexName == null || indexName.isBlank()) return true;
         String i = indexName.toLowerCase(Locale.ROOT);
         return i.startsWith("flyway_schema_history_") || i.startsWith("schema_synchronizer_history_");
+    }
+
+    private static final Pattern PLAIN_COLUMN_LIST = Pattern.compile(
+            "^\\((?:[a-z_][a-z0-9_]*(?: desc)?)(?:,[a-z_][a-z0-9_]*(?: desc)?)*\\)$");
+
+    /**
+     * Declared indexes must be readable back from the live catalog, or every later sync reports
+     * drift. SQL Server and Oracle reconstruct only plain column lists (Oracle: ascending only).
+     */
+    static void requireComparableIndex(IndexDefinition index, DatabaseDialect dialect) {
+        if (dialect != DatabaseDialect.SQLSERVER && dialect != DatabaseDialect.ORACLE) {
+            return;
+        }
+        String structure = index.structure();
+        boolean plain = index.predicateSql() == null && PLAIN_COLUMN_LIST.matcher(structure).matches();
+        if (!plain || (dialect == DatabaseDialect.ORACLE && structure.contains(" desc"))) {
+            throw new IllegalArgumentException(dialect.id() + " declared index " + index.name()
+                    + " must be a plain column list"
+                    + (dialect == DatabaseDialect.ORACLE ? " without DESC" : "")
+                    + " (no WHERE, INCLUDE, expressions, or index options); "
+                    + "manage it with an ordered change set instead");
+        }
     }
 
     private void validateDeclarativeDefinition(SchemaDefinition definition, DatabaseDialect dialect) {
@@ -649,10 +807,16 @@ public class SchemaSynchronizer {
                 throw new IllegalArgumentException("table definition is null: " + table);
             }
             if (tableDef.createSql() != null) {
-                NonDestructiveSqlPolicy.requireCreateTable(tableDef.createSql());
+                NonDestructiveSqlPolicy.requireCreateTable(tableDef.createSql(), dialect);
+                if (!dialect.supportsCreateTableIfNotExists()
+                        && tableDef.createSql().matches("(?is)^\\s*CREATE\\s+TABLE\\s+IF\\s+NOT\\s+EXISTS\\b.*")) {
+                    throw new IllegalArgumentException(dialect.id()
+                            + " does not support CREATE TABLE IF NOT EXISTS: " + table);
+                }
                 Matcher matcher = CREATE_TABLE_TARGET.matcher(tableDef.createSql());
                 if (!matcher.matches()
-                        || (matcher.group(1) != null && !options.schema().equalsIgnoreCase(matcher.group(1)))
+                        || (matcher.group(1) != null
+                        && !ChangeSetSchemaScope.sameNamespace(options.schema(), matcher.group(1), dialect))
                         || !table.equalsIgnoreCase(matcher.group(2))) {
                     throw new IllegalArgumentException("table createSql target does not match definition: " + table);
                 }
@@ -673,7 +837,7 @@ public class SchemaSynchronizer {
                     }
                 }
             }
-            for (String primaryKeyColumn : primaryKeyColumns(tableDef.createSql())) {
+            for (String primaryKeyColumn : primaryKeyColumns(tableDef.createSql(), dialect)) {
                 ColumnSpec spec = columnSpecs.get(primaryKeyColumn);
                 if (spec != null && !spec.notNull()) {
                     throw new IllegalArgumentException("primary-key column must be declared NOT NULL: "
@@ -683,9 +847,11 @@ public class SchemaSynchronizer {
             Set<String> indexes = new HashSet<>();
             if (tableDef.indexes() != null) {
                 for (String sql : tableDef.indexes()) {
-                    NonDestructiveSqlPolicy.requireCreateIndex(sql, dialect.supportsCreateIndexIfNotExists());
+                    NonDestructiveSqlPolicy.requireCreateIndex(sql, dialect.supportsCreateIndexIfNotExists(), dialect);
                     IndexDefinition index = IndexDefinition.parse(sql, maxIdent);
-                    if ((index.schema() != null && !options.schema().equalsIgnoreCase(index.schema()))
+                    requireComparableIndex(index, dialect);
+                    if ((index.schema() != null
+                            && !ChangeSetSchemaScope.sameNamespace(options.schema(), index.schema(), dialect))
                             || !table.equals(index.table())) {
                         throw new IllegalArgumentException("index target does not match table definition: "
                                 + index.name());
@@ -736,7 +902,7 @@ public class SchemaSynchronizer {
             String metadataTable = dialect.metadataObjectName(tableName);
             Set<String> uniqueConstraintIndexes = SchemaSnapshotWriter.uniqueConstraintIndexNames(
                     conn, dialect, catalog, schemaPattern, metadataTable);
-            Set<String> complexIndexes = SchemaSnapshotWriter.complexSqlServerIndexNames(
+            Set<String> complexIndexes = SchemaSnapshotWriter.complexIndexNames(
                     conn, dialect, catalog, schemaPattern, metadataTable);
             for (String sql : SchemaSnapshotWriter.readJdbcIndexes(meta, dialect,
                     catalog, schemaPattern, metadataTable)) {
@@ -763,7 +929,7 @@ public class SchemaSynchronizer {
                 String liveSql = live.get(target.name());
                 if (liveSql == null) {
                     if (applyChanges) {
-                        execute(conn, dialectCompatibleIndexSql(sql, dialect));
+                        execute(conn, dialect.executableSql(dialectCompatibleIndexSql(sql, dialect)));
                     }
                 } else if (liveSql.startsWith("-- omitted-unique-constraint:")) {
                     // Present via UNIQUE constraint; do not recreate.
@@ -826,20 +992,22 @@ public class SchemaSynchronizer {
         if (tableDef.createSql() == null) {
             return;
         }
-        List<String> expected = primaryKeyColumns(tableDef.createSql());
+        List<String> expected = primaryKeyColumns(tableDef.createSql(), dialect);
         TreeMap<Short, String> orderedLive = new TreeMap<>();
         String constraintName = null;
         try (ResultSet rows = meta.getPrimaryKeys(dialect.metadataCatalog(meta.getConnection(), options.schema()),
                 dialect.metadataSchemaPattern(options.schema()), dialect.metadataObjectName(tableName))) {
             while (rows.next()) {
                 short sequence = rows.getShort("KEY_SEQ");
-                String column = SqlIdentifiers.requireIdentifier(rows.getString("COLUMN_NAME"), "primary-key column");
+                String column = SqlIdentifiers.requireIdentifier(rows.getString("COLUMN_NAME"), "primary-key column",
+                        dialect.maxIdentifierLength());
                 if (orderedLive.put(sequence, column) != null) {
                     throw new IllegalStateException("duplicate primary-key sequence for table: " + tableName);
                 }
                 String rowConstraint = rows.getString("PK_NAME");
                 if (rowConstraint != null) {
-                    rowConstraint = SqlIdentifiers.requireIdentifier(rowConstraint, "primary-key constraint");
+                    rowConstraint = SqlIdentifiers.requireIdentifier(rowConstraint, "primary-key constraint",
+                            dialect.maxIdentifierLength());
                     if (constraintName != null && !constraintName.equals(rowConstraint)) {
                         throw new IllegalStateException("multiple primary-key constraints reported for table: "
                                 + tableName);
@@ -885,7 +1053,7 @@ public class SchemaSynchronizer {
                 dialect.metadataSchemaPattern(options.schema()), dialect.metadataObjectName(tableName))) {
             while (rows.next()) {
                 columns.add(SqlIdentifiers.requireIdentifier(
-                        rows.getString("COLUMN_NAME"), "primary-key column"));
+                        rows.getString("COLUMN_NAME"), "primary-key column", dialect.maxIdentifierLength()));
             }
         }
         return Set.copyOf(columns);
@@ -896,7 +1064,7 @@ public class SchemaSynchronizer {
         return trimmed.endsWith(";") ? trimmed : trimmed + ";";
     }
 
-    private static List<String> primaryKeyColumns(String createSql) {
+    static List<String> primaryKeyColumns(String createSql, DatabaseDialect dialect) {
         if (createSql == null) {
             return List.of();
         }
@@ -906,11 +1074,13 @@ public class SchemaSynchronizer {
             if (!inline.find()) {
                 return List.of();
             }
-            return List.of(SqlIdentifiers.requireIdentifier(inline.group(1), "primary-key column"));
+            return List.of(SqlIdentifiers.requireIdentifier(inline.group(1), "primary-key column",
+                    dialect.maxIdentifierLength()));
         }
         List<String> columns = new ArrayList<>();
         for (String raw : matcher.group(1).split(",")) {
-            columns.add(SqlIdentifiers.requireIdentifier(raw.trim(), "primary-key column"));
+            columns.add(SqlIdentifiers.requireIdentifier(raw.trim().replaceFirst("(?i)\\s+ASC$", ""),
+                    "primary-key column", dialect.maxIdentifierLength()));
         }
         return List.copyOf(columns);
     }
@@ -944,6 +1114,9 @@ public class SchemaSynchronizer {
     Map<String, LiveColumn> getLiveColumns(DatabaseMetaData meta, String tableName,
                                            DatabaseDialect dialect) throws SQLException {
         Map<String, LiveColumn> columns = new HashMap<>();
+        Set<String> generatedDefaults = dialect == DatabaseDialect.MYSQL
+                ? SchemaSnapshotWriter.mysqlGeneratedDefaultColumns(meta.getConnection(), tableName)
+                : Set.of();
         try (ResultSet rs = meta.getColumns(dialect.metadataCatalog(meta.getConnection(), options.schema()),
                 dialect.metadataSchemaPattern(options.schema()),
                 dialect.metadataObjectName(tableName.toLowerCase(Locale.ROOT)), "%")) {
@@ -959,16 +1132,21 @@ public class SchemaSynchronizer {
                 if (dialect != DatabaseDialect.POSTGRESQL && "NULL".equalsIgnoreCase(colDefault)) {
                     colDefault = null;
                 }
+                if (dialect == DatabaseDialect.MYSQL) {
+                    colDefault = SchemaSnapshotWriter.mysqlLiteralDefault(colDefault, typeName,
+                            generatedDefaults.contains(name));
+                }
                 Integer length = null;
                 Integer scale = null;
                 String normalized = ColumnDefinitionParser.normalizeType(typeName);
-                if ("VARCHAR".equals(normalized) || "CHAR".equals(normalized)
-                        || "VARBINARY".equals(normalized)) {
-                    if (size > 0 && size < 10_000) {
+                // Oracle MAX_STRING_SIZE=EXTENDED allows VARCHAR2/NVARCHAR2/RAW up to 32767.
+                int boundedLimit = dialect == DatabaseDialect.ORACLE ? 32_768 : 10_000;
+                if (ColumnDefinitionParser.hasLength(normalized)) {
+                    if (size > 0 && size < boundedLimit) {
                         length = size;
-                    } else if ("VARBINARY".equals(normalized)
+                    } else if (("VARBINARY".equals(normalized) || "NVARCHAR".equals(normalized))
                             && (size <= 0 || size >= 10_000)) {
-                        // SQL Server VARBINARY(MAX) reports COLUMN_SIZE as Integer.MAX_VALUE.
+                        // SQL Server VARBINARY(MAX)/NVARCHAR(MAX) report COLUMN_SIZE as Integer.MAX_VALUE.
                         length = ColumnDefinitionParser.MAX_LENGTH;
                     }
                     // VARCHAR/CHAR with size >= 10_000 keep length=null (effectiveLength ≡ MAX).
@@ -1021,97 +1199,229 @@ public class SchemaSynchronizer {
         };
     }
 
-    static NonDestructiveAlterPlanner.Plan sqlServerColumnPlan(
-            String tableName, String columnName, String definition, NonDestructiveAlterPlanner.Plan plan) {
-        return sqlServerColumnPlan(tableName, columnName, definition, plan, false);
+    /**
+     * SQL Server facts about the live column that decide whether ALTER COLUMN is executable.
+     *
+     * @param liveHasDefault a DEFAULT constraint exists (blocks base-type changes, not length changes)
+     * @param baseTypeChanges live and declared base types differ (e.g. INT to BIGINT)
+     * @param blockedReason why ALTER COLUMN cannot run as-is, or {@code null} when it can
+     */
+    record SqlServerColumnFacts(boolean liveHasDefault, boolean baseTypeChanges, String blockedReason) {
+        static final SqlServerColumnFacts NONE = new SqlServerColumnFacts(false, false, null);
+    }
+
+    /** Catalog facts about one live SQL Server column that constrain ALTER COLUMN. */
+    record SqlServerDependents(boolean found, boolean primaryKey, boolean foreignKey, boolean expressionDependency,
+                               boolean computedFilterOrFullText, boolean index, boolean check, boolean userStatistics,
+                               boolean deprecatedType, boolean nonDefaultCollation, boolean parameterizedType) {
+        static final SqlServerDependents NONE =
+                new SqlServerDependents(true, false, false, false, false, false, false, false, false, false, false);
+    }
+
+    private static SqlServerColumnFacts sqlServerColumnFacts(
+            Connection conn, String schema, String tableName, String columnName, String definition,
+            ColumnSpec target, LiveColumn live, NonDestructiveAlterPlanner.Plan plan) throws SQLException {
+        Set<NonDestructiveAlterPlanner.Op> ops = plan.applyOps();
+        boolean alterColumn = ops.contains(NonDestructiveAlterPlanner.Op.WIDEN_TYPE)
+                || ops.contains(NonDestructiveAlterPlanner.Op.DROP_NOT_NULL);
+        boolean liveHasDefault = live.defaultExpr() != null && !live.defaultExpr().isBlank();
+        boolean baseTypeChanges = !ColumnDefinitionParser.normalizeType(live.baseType()).equals(target.baseType());
+        if (!alterColumn || !plan.pendingSql().isEmpty()) {
+            return new SqlServerColumnFacts(liveHasDefault, baseTypeChanges, null);
+        }
+        return new SqlServerColumnFacts(liveHasDefault, baseTypeChanges, sqlServerBlockReason(
+                sqlServerDependents(conn, schema, tableName, columnName), target, ops, baseTypeChanges,
+                columnTypeText(definition)));
+    }
+
+    /**
+     * SQL Server rejects ALTER COLUMN on key, FK, computed-column, and expression-dependency columns.
+     * Index, CHECK, and CREATE STATISTICS dependencies allow only widening a bounded variable-length
+     * type. ALTER COLUMN also resets collation to the database default and re-applies the declared
+     * type text, so a non-default collation or a declaration that omits the live precision is pending.
+     */
+    static String sqlServerBlockReason(SqlServerDependents dependents, ColumnSpec target,
+                                       Set<NonDestructiveAlterPlanner.Op> ops, boolean baseTypeChanges,
+                                       String declaredTypeText) {
+        if (!dependents.found()) {
+            return "column was not found in the SQL Server catalog";
+        }
+        if (dependents.primaryKey() || dependents.foreignKey() || dependents.expressionDependency()
+                || dependents.computedFilterOrFullText()) {
+            return "column is used by a key, foreign key, computed column, filtered index/statistics predicate, "
+                    + "full-text index, or view/function expression";
+        }
+        if (dependents.deprecatedType()) {
+            return "text/ntext/image/timestamp columns cannot be altered in place";
+        }
+        if (dependents.nonDefaultCollation()) {
+            return "column has a non-default collation that ALTER COLUMN would reset";
+        }
+        if (dependents.parameterizedType() && !declaredTypeText.contains("(")) {
+            return "declared type omits the live length/precision, so ALTER COLUMN would change it";
+        }
+        boolean lengthOnlyWiden = !baseTypeChanges
+                && ColumnDefinitionParser.isVariableLength(target.baseType())
+                && target.length() != null && target.length() != ColumnDefinitionParser.MAX_LENGTH
+                && ops.contains(NonDestructiveAlterPlanner.Op.WIDEN_TYPE)
+                && !ops.contains(NonDestructiveAlterPlanner.Op.DROP_NOT_NULL);
+        if ((dependents.index() || dependents.check() || dependents.userStatistics()) && !lengthOnlyWiden) {
+            return "column is used by an index, CHECK constraint, or statistics object";
+        }
+        return null;
+    }
+
+    private static SqlServerDependents sqlServerDependents(
+            Connection conn, String schema, String tableName, String columnName) throws SQLException {
+        String sql = """
+                SELECT
+                  (SELECT COUNT(*) FROM sys.index_columns ic JOIN sys.indexes i
+                     ON i.object_id = ic.object_id AND i.index_id = ic.index_id
+                   WHERE ic.object_id = c.object_id AND ic.column_id = c.column_id AND i.is_primary_key = 1),
+                  (SELECT COUNT(*) FROM sys.foreign_key_columns f
+                   WHERE (f.parent_object_id = c.object_id AND f.parent_column_id = c.column_id)
+                      OR (f.referenced_object_id = c.object_id AND f.referenced_column_id = c.column_id)),
+                  (SELECT COUNT(*) FROM sys.sql_expression_dependencies d
+                   WHERE d.referenced_id = c.object_id AND d.referenced_minor_id = c.column_id),
+                  (SELECT COUNT(*) FROM sys.computed_columns cc
+                   WHERE cc.object_id = c.object_id
+                     AND (cc.column_id = c.column_id OR CHARINDEX('[' + c.name + ']', cc.definition) > 0))
+                  + (SELECT COUNT(*) FROM sys.indexes fi
+                     WHERE fi.object_id = c.object_id AND fi.has_filter = 1
+                       AND CHARINDEX('[' + c.name + ']', fi.filter_definition) > 0)
+                  + (SELECT COUNT(*) FROM sys.stats fs
+                     WHERE fs.object_id = c.object_id AND fs.has_filter = 1
+                       AND CHARINDEX('[' + c.name + ']', fs.filter_definition) > 0)
+                  + (SELECT COUNT(*) FROM sys.fulltext_index_columns ft
+                     WHERE ft.object_id = c.object_id AND ft.column_id = c.column_id),
+                  (SELECT COUNT(*) FROM sys.index_columns ic JOIN sys.indexes i
+                     ON i.object_id = ic.object_id AND i.index_id = ic.index_id
+                   WHERE ic.object_id = c.object_id AND ic.column_id = c.column_id AND i.is_primary_key = 0),
+                  (SELECT COUNT(*) FROM sys.check_constraints k
+                   WHERE k.parent_object_id = c.object_id
+                     AND (k.parent_column_id = c.column_id
+                          OR (k.parent_column_id = 0 AND CHARINDEX('[' + c.name + ']', k.definition) > 0))),
+                  (SELECT COUNT(*) FROM sys.stats_columns sc JOIN sys.stats st
+                     ON st.object_id = sc.object_id AND st.stats_id = sc.stats_id
+                   WHERE sc.object_id = c.object_id AND sc.column_id = c.column_id AND st.user_created = 1),
+                  CASE WHEN c.system_type_id IN (34, 35, 99, 189) THEN 1 ELSE 0 END,
+                  CASE WHEN c.collation_name IS NOT NULL
+                        AND c.collation_name <> CAST(DATABASEPROPERTYEX(DB_NAME(), 'Collation') AS sysname)
+                       THEN 1 ELSE 0 END,
+                  CASE WHEN TYPE_NAME(c.system_type_id) IN ('decimal', 'numeric', 'datetime2', 'time',
+                        'datetimeoffset', 'varchar', 'nvarchar', 'char', 'nchar', 'varbinary', 'binary')
+                       THEN 1 ELSE 0 END
+                FROM sys.columns c
+                JOIN sys.tables t ON t.object_id = c.object_id
+                JOIN sys.schemas s ON s.schema_id = t.schema_id
+                WHERE s.name = ? AND t.name = ? AND c.name = ?
+                """;
+        try (var statement = conn.prepareStatement(sql)) {
+            statement.setString(1, schema);
+            statement.setString(2, tableName);
+            statement.setString(3, columnName);
+            try (ResultSet rs = statement.executeQuery()) {
+                if (!rs.next()) {
+                    return new SqlServerDependents(false, false, false, false, false, false, false, false,
+                            false, false, false);
+                }
+                return new SqlServerDependents(true, rs.getInt(1) > 0, rs.getInt(2) > 0, rs.getInt(3) > 0,
+                        rs.getInt(4) > 0, rs.getInt(5) > 0, rs.getInt(6) > 0, rs.getInt(7) > 0,
+                        rs.getInt(8) > 0, rs.getInt(9) > 0, rs.getInt(10) > 0);
+            }
+        }
     }
 
     static NonDestructiveAlterPlanner.Plan sqlServerColumnPlan(
             String tableName, String columnName, String definition, NonDestructiveAlterPlanner.Plan plan,
-            boolean liveHasDefault) {
+            SqlServerColumnFacts facts) {
+        ColumnSpec spec = ColumnDefinitionParser.parse(definition);
+        String alterSql = "ALTER TABLE " + tableName + " ALTER COLUMN " + columnName + " "
+                + columnTypeText(definition) + (spec.notNull() ? " NOT NULL" : " NULL");
         if (!plan.pendingSql().isEmpty()) {
             return new NonDestructiveAlterPlanner.Plan(List.of(), List.of(
-                    "ALTER TABLE " + tableName + " ALTER COLUMN " + columnName + " "
-                            + stripDefaultClause(definition)
-                            + "; -- pending: unsafe type/nullability change"));
+                    alterSql + "; -- pending: unsafe type/nullability change"));
         }
-        boolean typeChange = plan.applySql().stream()
-                .anyMatch(sql -> sql.toUpperCase(Locale.ROOT).contains(" TYPE "));
-        boolean dropNotNull = plan.applySql().stream()
-                .anyMatch(sql -> sql.toUpperCase(Locale.ROOT).contains(" DROP NOT NULL"));
-        boolean setNotNull = plan.applySql().stream()
-                .anyMatch(sql -> sql.toUpperCase(Locale.ROOT).contains(" SET NOT NULL"));
-        boolean defaultChange = plan.applySql().stream().anyMatch(SchemaSynchronizer::isDefaultAlter);
-        List<String> apply = new java.util.ArrayList<>();
-        List<String> pending = new java.util.ArrayList<>();
-        if (typeChange || dropNotNull || setNotNull) {
-            String alterDefinition = stripDefaultClause(definition);
-            if (dropNotNull && !alterDefinition.toUpperCase(Locale.ROOT).contains(" NULL")) {
-                alterDefinition = alterDefinition + " NULL";
-            }
-            String alterSql = "ALTER TABLE " + tableName + " ALTER COLUMN " + columnName + " " + alterDefinition;
-            if (liveHasDefault && (typeChange || dropNotNull || setNotNull)) {
-                // SQL Server rejects ALTER COLUMN while a DEFAULT constraint depends on the column.
+        Set<NonDestructiveAlterPlanner.Op> ops = requireOps(plan);
+        boolean alterColumn = ops.contains(NonDestructiveAlterPlanner.Op.WIDEN_TYPE)
+                || ops.contains(NonDestructiveAlterPlanner.Op.DROP_NOT_NULL);
+        boolean defaultChange = ops.contains(NonDestructiveAlterPlanner.Op.SET_DEFAULT)
+                || ops.contains(NonDestructiveAlterPlanner.Op.DROP_DEFAULT);
+        List<String> apply = new ArrayList<>();
+        List<String> pending = new ArrayList<>();
+        Set<NonDestructiveAlterPlanner.Op> applied = new HashSet<>();
+        if (alterColumn) {
+            if (facts.blockedReason() != null) {
+                pending.add(alterSql + "; -- pending: " + facts.blockedReason()
+                        + "; handle this ALTER COLUMN in a reviewed change set");
+            } else if (facts.liveHasDefault() && facts.baseTypeChanges()) {
                 pending.add(alterSql + "; -- pending: drop/recreate DEFAULT constraint around ALTER COLUMN "
                         + "(or manage via change sets)");
             } else {
                 apply.add(alterSql);
+                ops.stream().filter(op -> op == NonDestructiveAlterPlanner.Op.WIDEN_TYPE
+                        || op == NonDestructiveAlterPlanner.Op.DROP_NOT_NULL).forEach(applied::add);
             }
         }
         if (defaultChange) {
-            pending.add("ALTER TABLE " + tableName + " /* DEFAULT for " + columnName + " */; "
-                    + "-- pending: SQL Server defaults are constraint-based; manage via change sets ("
-                    + definition + ")");
+            pending.add("-- pending: SQL Server DEFAULT for " + tableName + "." + columnName
+                    + " differs from the declaration ("
+                    + (spec.defaultExpr() == null ? "no default" : "DEFAULT " + spec.defaultExpr())
+                    + "); replace the DEFAULT constraint via a change set");
         }
-        if (apply.isEmpty() && pending.isEmpty()) {
-            return plan;
-        }
-        return new NonDestructiveAlterPlanner.Plan(List.copyOf(apply), List.copyOf(pending));
+        return new NonDestructiveAlterPlanner.Plan(apply, pending, applied);
     }
 
     static NonDestructiveAlterPlanner.Plan oracleColumnPlan(
             String tableName, String columnName, String definition, NonDestructiveAlterPlanner.Plan plan) {
+        ColumnSpec spec = ColumnDefinitionParser.parse(definition);
         if (!plan.pendingSql().isEmpty()) {
+            // Oracle column grammar: type, then DEFAULT, then inline constraints.
             return new NonDestructiveAlterPlanner.Plan(List.of(), List.of(
-                    "ALTER TABLE " + tableName + " MODIFY (" + columnName
-                            + " " + definition + "); -- pending: unsafe type/nullability change"));
+                    "ALTER TABLE " + tableName + " MODIFY (" + columnName + " " + columnTypeText(definition)
+                            + (spec.defaultExpr() == null ? "" : " DEFAULT " + spec.defaultExpr())
+                            + (spec.notNull() ? " NOT NULL" : "")
+                            + "); -- pending: unsafe type/nullability change"));
         }
-        if (plan.applySql().isEmpty()) {
+        Set<NonDestructiveAlterPlanner.Op> ops = requireOps(plan);
+        List<String> clauses = new ArrayList<>();
+        if (ops.contains(NonDestructiveAlterPlanner.Op.WIDEN_TYPE)) {
+            clauses.add(columnTypeText(definition));
+        }
+        if (ops.contains(NonDestructiveAlterPlanner.Op.SET_DEFAULT)) {
+            clauses.add("DEFAULT " + spec.defaultExpr());
+        } else if (ops.contains(NonDestructiveAlterPlanner.Op.DROP_DEFAULT)) {
+            clauses.add("DEFAULT NULL");
+        }
+        if (ops.contains(NonDestructiveAlterPlanner.Op.DROP_NOT_NULL)) {
+            clauses.add("NULL");
+        }
+        if (clauses.isEmpty()) {
             return plan;
         }
-        boolean enforceNotNull = plan.applySql().stream()
-                .anyMatch(sql -> sql.toUpperCase(Locale.ROOT).contains(" SET NOT NULL"));
-        boolean dropNotNull = plan.applySql().stream()
-                .anyMatch(sql -> sql.toUpperCase(Locale.ROOT).contains(" DROP NOT NULL"));
-        boolean dropDefault = plan.applySql().stream()
-                .anyMatch(sql -> sql.toUpperCase(Locale.ROOT).contains(" DROP DEFAULT"));
-        boolean setDefault = plan.applySql().stream()
-                .anyMatch(sql -> sql.toUpperCase(Locale.ROOT).contains(" SET DEFAULT"));
-        String modifyDefinition = definition;
-        if (!enforceNotNull) {
-            modifyDefinition = stripNotNullClause(modifyDefinition);
-        }
-        if (dropNotNull) {
-            modifyDefinition = stripNotNullClause(modifyDefinition) + " NULL";
-        }
-        if (dropDefault) {
-            modifyDefinition = stripDefaultClause(modifyDefinition) + " DEFAULT NULL";
-        } else if (!setDefault) {
-            modifyDefinition = stripDefaultClause(modifyDefinition);
-        }
         return new NonDestructiveAlterPlanner.Plan(List.of(
-                "ALTER TABLE " + tableName + " MODIFY (" + columnName + " " + modifyDefinition.trim() + ")"),
-                List.of());
+                "ALTER TABLE " + tableName + " MODIFY (" + columnName + " " + String.join(" ", clauses) + ")"),
+                List.of(), ops);
     }
 
-    static boolean isTypeOrNullabilityAlter(String sql) {
-        String upper = sql.toUpperCase(Locale.ROOT);
-        return upper.contains(" TYPE ") || upper.contains(" DROP NOT NULL") || upper.contains(" SET NOT NULL");
+    private static Set<NonDestructiveAlterPlanner.Op> requireOps(NonDestructiveAlterPlanner.Plan plan) {
+        if (!plan.applySql().isEmpty() && plan.applyOps().isEmpty()) {
+            throw new IllegalStateException("dialect column rewrite requires planner operations: " + plan.applySql());
+        }
+        return plan.applyOps();
     }
 
-    static boolean isDefaultAlter(String sql) {
-        String upper = sql.toUpperCase(Locale.ROOT);
-        return upper.contains(" DEFAULT") && !upper.contains(" TYPE ");
+    /** Declared column type text without DEFAULT, nullability, or identity clauses. */
+    static String columnTypeText(String definition) {
+        String rest = definition.trim()
+                .replaceAll("(?i)\\s+AUTO_INCREMENT\\b", "")
+                .replaceAll("(?i)\\s+GENERATED\\s+(?:BY\\s+DEFAULT|ALWAYS)\\s+AS\\s+IDENTITY(?:\\s*\\([^)]*\\))?", "")
+                .replaceAll("(?i)\\s+IDENTITY(?:\\s*\\(\\s*\\d+\\s*,\\s*\\d+\\s*\\))?", "");
+        Matcher defaultClause = Pattern.compile("(?i)\\s+DEFAULT\\s+").matcher(rest);
+        if (defaultClause.find()) {
+            rest = rest.substring(0, defaultClause.start());
+        }
+        return rest.replaceAll("(?i)\\s+NOT\\s+NULL\\b", "").replaceAll("(?i)\\s+NULL\\b", "").trim();
     }
 
     static String stripDefaultClause(String definition) {
@@ -1121,20 +1431,16 @@ public class SchemaSynchronizer {
         return definition.replaceAll("(?i)\\s+DEFAULT\\s+\\S.*$", "").trim();
     }
 
-    static String stripNotNullClause(String definition) {
-        if (definition == null) {
-            return "";
-        }
-        return definition.replaceAll("(?i)\\s+NOT\\s+NULL\\b", "").trim();
-    }
-
     private void bindSqlServerSchema(Connection conn, String schema) throws SQLException {
         SqlIdentifiers.requireIdentifier(schema, "schema");
         conn.setSchema(schema);
         String bound = conn.getSchema();
-        if (bound == null || !bound.equalsIgnoreCase(schema)) {
-            throw new IllegalStateException("Connected SQL Server schema '" + bound
-                    + "' does not match configured schema '" + schema + "'");
+        // SQL Server resolves unqualified names through the login's default schema;
+        // collation may be case-sensitive, so require an exact match.
+        if (bound == null || !bound.equals(schema)) {
+            throw new IllegalStateException("Connected SQL Server default schema '" + bound
+                    + "' does not match configured schema '" + schema
+                    + "' (compared case-sensitively; set the login's DEFAULT_SCHEMA)");
         }
     }
 
@@ -1143,7 +1449,7 @@ public class SchemaSynchronizer {
         if (user == null || user.isBlank()) {
             throw new IllegalStateException("Oracle JDBC metadata did not report a user name");
         }
-        if (!user.equalsIgnoreCase(schema)) {
+        if (!user.equals(ChangeSetSchemaScope.canonical(schema, false, DatabaseDialect.ORACLE))) {
             throw new IllegalStateException("Connected Oracle user '" + user
                     + "' does not match configured schema '" + schema + "'");
         }

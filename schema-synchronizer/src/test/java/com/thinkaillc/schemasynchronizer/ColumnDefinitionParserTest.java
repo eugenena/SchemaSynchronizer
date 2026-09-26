@@ -24,7 +24,26 @@ class ColumnDefinitionParserTest {
         assertThat(ColumnDefinitionParser.normalizeDefault("'PENDING'::character varying"))
                 .isEqualTo("'PENDING'");
         assertThat(ColumnDefinitionParser.normalizeDefault("false"))
-                .isEqualTo("false");
+                .isEqualTo(ColumnDefinitionParser.normalizeDefault("FALSE"));
+    }
+
+    @Test
+    void normalizesSqlServerParenthesizedAndCaseVariantDefaults() {
+        assertThat(ColumnDefinitionParser.normalizeDefault("((0))")).isEqualTo("0");
+        assertThat(ColumnDefinitionParser.normalizeDefault("('NEW')")).isEqualTo("'NEW'");
+        assertThat(ColumnDefinitionParser.normalizeDefault("(getdate())"))
+                .isEqualTo(ColumnDefinitionParser.normalizeDefault("GETDATE()"));
+        assertThat(ColumnDefinitionParser.normalizeDefault("'new'"))
+                .isNotEqualTo(ColumnDefinitionParser.normalizeDefault("'NEW'"));
+        assertThat(ColumnDefinitionParser.normalizeDefault("(1) + (2)")).isEqualTo("(1) + (2)");
+    }
+
+    @Test
+    void normalizesOracleReportedTypeNames() {
+        assertThat(ColumnDefinitionParser.normalizeType("TIMESTAMP(6)")).isEqualTo("TIMESTAMP");
+        assertThat(ColumnDefinitionParser.normalizeType("TIMESTAMP(6) WITH TIME ZONE")).isEqualTo("TIMESTAMPTZ");
+        assertThat(ColumnDefinitionParser.normalizeType("bigint identity")).isEqualTo("BIGINT");
+        assertThat(ColumnDefinitionParser.parse("VARCHAR2(40 CHAR) NOT NULL").length()).isEqualTo(40);
     }
 
     @Test
@@ -113,7 +132,7 @@ class ColumnDefinitionParserTest {
         assertThat(varchar.notNull()).isTrue();
 
         var nvarchar = ColumnDefinitionParser.parse("NVARCHAR(MAX)");
-        assertThat(nvarchar.baseType()).isEqualTo("VARCHAR");
+        assertThat(nvarchar.baseType()).isEqualTo("NVARCHAR");
         assertThat(nvarchar.length()).isEqualTo(ColumnDefinitionParser.MAX_LENGTH);
 
         var varbinary = ColumnDefinitionParser.parse("VARBINARY(MAX)");

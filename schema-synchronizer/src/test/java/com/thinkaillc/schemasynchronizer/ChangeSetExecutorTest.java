@@ -58,6 +58,26 @@ class ChangeSetExecutorTest {
     }
 
     @Test
+    void verificationSqlMayUseTableAliasesButNotChangeTheSessionNamespace() {
+        SchemaDefinition.ChangeSet aliased = new SchemaDefinition.ChangeSet(
+                "aliased", "verify with joins", List.of("CREATE TABLE widgets (id INT)"),
+                "SELECT count(*) = 1 FROM pg_constraint c JOIN pg_class r ON r.oid = c.conrelid "
+                        + "WHERE r.relname = 'widgets'",
+                SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA);
+        assertThat(new ChangeSetExecutor().validate(List.of(aliased), mariaOptions(), DatabaseDialect.POSTGRESQL))
+                .hasSize(1);
+
+        SchemaDefinition.ChangeSet sessionChange = new SchemaDefinition.ChangeSet(
+                "session", "verify switches schema", List.of("CREATE TABLE widgets (id INT)"),
+                "SELECT set_config('search_path', 'other', false) IS NOT NULL",
+                SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA);
+        assertThatThrownBy(() -> new ChangeSetExecutor().validate(List.of(sessionChange), mariaOptions(),
+                DatabaseDialect.POSTGRESQL))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("session namespace");
+    }
+
+    @Test
     void validateRejectsCrossSchemaChangeSetSql() {
         SchemaDefinition.ChangeSet change = new SchemaDefinition.ChangeSet(
                 "cross", "bad", List.of("UPDATE other.items SET note = 'x'"));
@@ -82,7 +102,7 @@ class ChangeSetExecutorTest {
         SchemaDefinition.ChangeSet change = new SchemaDefinition.ChangeSet(
                 "dry", "preview",
                 List.of("ALTER TABLE items ADD COLUMN note TEXT"),
-                "SELECT pg_terminate_backend(1)");
+                "SELECT count(*) > 0 FROM items");
         SchemaSynchronizerOptions dryRun = new SchemaSynchronizerOptions(
                 "test", "schema_synchronizer_history", 7_249_031_147L, true, true, true);
 

@@ -6,6 +6,8 @@ package com.thinkaillc.schemasynchronizer;
 final class SqlIdentifiers {
     /** PostgreSQL / portable default. */
     static final int DEFAULT_MAX_LENGTH = 63;
+    /** MySQL / MariaDB table, column, and index name limit. */
+    static final int MYSQL_MAX_LENGTH = 64;
     /** SQL Server and Oracle 12.2+ unquoted identifier limit. */
     static final int EXTENDED_MAX_LENGTH = 128;
 

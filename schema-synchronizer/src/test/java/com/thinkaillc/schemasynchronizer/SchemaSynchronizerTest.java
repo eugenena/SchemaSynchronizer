@@ -18,6 +18,7 @@ import java.sql.ResultSet;
 import java.sql.Statement;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -209,45 +210,168 @@ class SchemaSynchronizerTest {
         assertThat(SchemaSynchronizer.addColumnSql("items", "notes", "VARCHAR2(255)", DatabaseDialect.ORACLE))
                 .isEqualTo("ALTER TABLE items ADD (notes VARCHAR2(255))");
 
-        NonDestructiveAlterPlanner.Plan widen = new NonDestructiveAlterPlanner.Plan(
-                List.of("ALTER TABLE items ALTER COLUMN label TYPE VARCHAR(100)"),
-                List.of());
+        var none = SchemaSynchronizer.SqlServerColumnFacts.NONE;
+        NonDestructiveAlterPlanner.Plan widen = planFor("VARCHAR(100) NOT NULL",
+                new LiveColumn("VARCHAR", 40, null, true, null));
         assertThat(SchemaSynchronizer.sqlServerColumnPlan(
-                "items", "label", "VARCHAR(100) NOT NULL", widen).applySql())
+                "items", "label", "VARCHAR(100) NOT NULL", widen, none).applySql())
                 .containsExactly("ALTER TABLE items ALTER COLUMN label VARCHAR(100) NOT NULL");
-        NonDestructiveAlterPlanner.Plan widenWithDefault = SchemaSynchronizer.sqlServerColumnPlan(
-                "items", "label", "VARCHAR(100) NOT NULL DEFAULT 'x'", widen, true);
-        assertThat(widenWithDefault.applySql()).isEmpty();
-        assertThat(widenWithDefault.pendingSql()).isNotEmpty()
-                .anyMatch(sql -> sql.contains("DEFAULT constraint"));
         assertThat(SchemaSynchronizer.oracleColumnPlan(
                 "items", "label", "VARCHAR2(100) NOT NULL", widen).applySql())
                 .containsExactly("ALTER TABLE items MODIFY (label VARCHAR2(100))");
 
-        NonDestructiveAlterPlanner.Plan defaultOnly = new NonDestructiveAlterPlanner.Plan(
-                List.of("ALTER TABLE items ALTER COLUMN status SET DEFAULT 'NEW'"),
-                List.of());
-        NonDestructiveAlterPlanner.Plan sqlServerDefault =
-                SchemaSynchronizer.sqlServerColumnPlan("items", "status", "VARCHAR(50) DEFAULT 'NEW'", defaultOnly);
-        assertThat(sqlServerDefault.applySql()).isEmpty();
-        assertThat(sqlServerDefault.pendingSql()).isNotEmpty();
-
-        NonDestructiveAlterPlanner.Plan dropNotNull = new NonDestructiveAlterPlanner.Plan(
-                List.of("ALTER TABLE items ALTER COLUMN label DROP NOT NULL"),
-                List.of());
+        NonDestructiveAlterPlanner.Plan dropNotNull = planFor("VARCHAR(40)",
+                new LiveColumn("VARCHAR", 40, null, true, null));
         assertThat(SchemaSynchronizer.sqlServerColumnPlan(
-                "items", "label", "VARCHAR(40)", dropNotNull).applySql())
+                "items", "label", "VARCHAR(40)", dropNotNull, none).applySql())
                 .containsExactly("ALTER TABLE items ALTER COLUMN label VARCHAR(40) NULL");
         assertThat(SchemaSynchronizer.oracleColumnPlan(
                 "items", "label", "VARCHAR2(40)", dropNotNull).applySql())
-                .containsExactly("ALTER TABLE items MODIFY (label VARCHAR2(40) NULL)");
+                .containsExactly("ALTER TABLE items MODIFY (label NULL)");
 
-        NonDestructiveAlterPlanner.Plan dropDefault = new NonDestructiveAlterPlanner.Plan(
-                List.of("ALTER TABLE items ALTER COLUMN status DROP DEFAULT"),
-                List.of());
+        NonDestructiveAlterPlanner.Plan dropDefault = planFor("VARCHAR(50)",
+                new LiveColumn("VARCHAR", 50, null, false, "'OLD'"));
         assertThat(SchemaSynchronizer.oracleColumnPlan(
                 "items", "status", "VARCHAR2(50)", dropDefault).applySql())
-                .containsExactly("ALTER TABLE items MODIFY (status VARCHAR2(50) DEFAULT NULL)");
+                .containsExactly("ALTER TABLE items MODIFY (status DEFAULT NULL)");
+    }
+
+    private static NonDestructiveAlterPlanner.Plan planFor(String definition, LiveColumn live) {
+        return NonDestructiveAlterPlanner.plan("items", "c", ColumnDefinitionParser.parse(definition), live);
+    }
+
+    @Test
+    void sqlServerDefaultConstraintBlocksOnlyBaseTypeChanges() {
+        String declared = "VARCHAR(100) NOT NULL DEFAULT 'x'";
+        NonDestructiveAlterPlanner.Plan widen = planFor(declared,
+                new LiveColumn("VARCHAR", 40, null, true, "('x')"));
+
+        NonDestructiveAlterPlanner.Plan lengthWiden = SchemaSynchronizer.sqlServerColumnPlan(
+                "items", "label", declared, widen, new SchemaSynchronizer.SqlServerColumnFacts(true, false, null));
+        assertThat(lengthWiden.applySql())
+                .containsExactly("ALTER TABLE items ALTER COLUMN label VARCHAR(100) NOT NULL");
+        assertThat(lengthWiden.pendingSql()).isEmpty();
+
+        NonDestructiveAlterPlanner.Plan baseType = SchemaSynchronizer.sqlServerColumnPlan(
+                "items", "qty", "BIGINT DEFAULT 0",
+                planFor("BIGINT DEFAULT 0", new LiveColumn("INTEGER", null, null, false, "((0))")),
+                new SchemaSynchronizer.SqlServerColumnFacts(true, true, null));
+        assertThat(baseType.applySql()).isEmpty();
+        assertThat(baseType.pendingSql()).singleElement().asString().contains("DEFAULT constraint");
+
+        NonDestructiveAlterPlanner.Plan dependents = SchemaSynchronizer.sqlServerColumnPlan(
+                "items", "label", declared, widen, new SchemaSynchronizer.SqlServerColumnFacts(false, false, "column is used by an index, key"));
+        assertThat(dependents.applySql()).isEmpty();
+        assertThat(dependents.pendingSql()).singleElement().asString().contains("index, key");
+    }
+
+    @Test
+    void sqlServerBlockReasonCoversEveryDependencyKind() {
+        var widen = Set.of(NonDestructiveAlterPlanner.Op.WIDEN_TYPE);
+        var relax = Set.of(NonDestructiveAlterPlanner.Op.DROP_NOT_NULL);
+        ColumnSpec varchar100 = ColumnDefinitionParser.parse("VARCHAR(100)");
+        ColumnSpec varcharMax = ColumnDefinitionParser.parse("VARCHAR(MAX)");
+        var none = SchemaSynchronizer.SqlServerDependents.NONE;
+        var index = new SchemaSynchronizer.SqlServerDependents(
+                true, false, false, false, false, true, false, false, false, false, true);
+        var check = new SchemaSynchronizer.SqlServerDependents(
+                true, false, false, false, false, false, true, false, false, false, true);
+        var stats = new SchemaSynchronizer.SqlServerDependents(
+                true, false, false, false, false, false, false, true, false, false, true);
+        var computed = new SchemaSynchronizer.SqlServerDependents(
+                true, false, false, false, true, false, false, false, false, false, true);
+        var deprecated = new SchemaSynchronizer.SqlServerDependents(
+                true, false, false, false, false, false, false, false, true, false, false);
+        var collation = new SchemaSynchronizer.SqlServerDependents(
+                true, false, false, false, false, false, false, false, false, true, true);
+        var parameterized = new SchemaSynchronizer.SqlServerDependents(
+                true, false, false, false, false, false, false, false, false, false, true);
+        var missing = new SchemaSynchronizer.SqlServerDependents(
+                false, false, false, false, false, false, false, false, false, false, false);
+
+        assertThat(SchemaSynchronizer.sqlServerBlockReason(none, varchar100, widen, false, "VARCHAR(100)")).isNull();
+        for (var lengthWidenAllowed : List.of(index, check, stats)) {
+            assertThat(SchemaSynchronizer.sqlServerBlockReason(lengthWidenAllowed, varchar100, widen, false,
+                    "VARCHAR(100)")).isNull();
+            assertThat(SchemaSynchronizer.sqlServerBlockReason(lengthWidenAllowed, varcharMax, widen, false,
+                    "VARCHAR(MAX)")).contains("index");
+            assertThat(SchemaSynchronizer.sqlServerBlockReason(lengthWidenAllowed, varchar100, relax, false,
+                    "VARCHAR(100)")).contains("index");
+            assertThat(SchemaSynchronizer.sqlServerBlockReason(lengthWidenAllowed,
+                    ColumnDefinitionParser.parse("BIGINT"), widen, true, "BIGINT")).isNotNull();
+        }
+        assertThat(SchemaSynchronizer.sqlServerBlockReason(computed, varchar100, widen, false, "VARCHAR(100)"))
+                .contains("computed column");
+        assertThat(SchemaSynchronizer.sqlServerBlockReason(deprecated, ColumnDefinitionParser.parse("TEXT"),
+                relax, false, "TEXT")).contains("text/ntext");
+        assertThat(SchemaSynchronizer.sqlServerBlockReason(collation, varchar100, widen, false, "VARCHAR(100)"))
+                .contains("collation");
+        assertThat(SchemaSynchronizer.sqlServerBlockReason(parameterized, ColumnDefinitionParser.parse("DATETIME2"),
+                relax, false, "DATETIME2")).contains("precision");
+        assertThat(SchemaSynchronizer.sqlServerBlockReason(parameterized, ColumnDefinitionParser.parse("DATETIME2(0)"),
+                relax, false, "DATETIME2(0)")).isNull();
+        assertThat(SchemaSynchronizer.sqlServerBlockReason(missing, varchar100, widen, false, "VARCHAR(100)"))
+                .contains("not found");
+    }
+
+    @Test
+    void sqlServerDefaultDriftIsACommentNeverExecutableSql() {
+        NonDestructiveAlterPlanner.Plan defaultOnly = planFor("VARCHAR(50) DEFAULT 'NEW'",
+                new LiveColumn("VARCHAR", 50, null, false, "('OLD')"));
+        NonDestructiveAlterPlanner.Plan plan = SchemaSynchronizer.sqlServerColumnPlan(
+                "items", "status", "VARCHAR(50) DEFAULT 'NEW'", defaultOnly,
+                SchemaSynchronizer.SqlServerColumnFacts.NONE);
+        assertThat(plan.applySql()).isEmpty();
+        assertThat(plan.pendingSql()).singleElement().asString().startsWith("-- pending:");
+    }
+
+    @Test
+    void sqlServerEquivalentParenthesizedDefaultIsNoDrift() {
+        NonDestructiveAlterPlanner.Plan plan = planFor("INT NOT NULL DEFAULT 0",
+                new LiveColumn("INTEGER", null, null, true, "((0))"));
+        assertThat(plan.applySql()).isEmpty();
+        assertThat(plan.pendingSql()).isEmpty();
+    }
+
+    @Test
+    void dialectRewriteRejectsPlansWithoutOperations() {
+        NonDestructiveAlterPlanner.Plan untyped = new NonDestructiveAlterPlanner.Plan(
+                List.of("ALTER TABLE items ALTER COLUMN label DROP NOT NULL"), List.of());
+        assertThatThrownBy(() -> SchemaSynchronizer.oracleColumnPlan("items", "label", "VARCHAR2(40)", untyped))
+                .isInstanceOf(IllegalStateException.class);
+    }
+
+    @Test
+    void columnTypeTextStripsDefaultNullabilityAndIdentity() {
+        assertThat(SchemaSynchronizer.columnTypeText("VARCHAR(40) NOT NULL DEFAULT 'a NOT NULL'"))
+                .isEqualTo("VARCHAR(40)");
+        assertThat(SchemaSynchronizer.columnTypeText("VARCHAR(40) DEFAULT 'x' NOT NULL")).isEqualTo("VARCHAR(40)");
+        assertThat(SchemaSynchronizer.columnTypeText("BIGINT IDENTITY(1,1) NOT NULL")).isEqualTo("BIGINT");
+        assertThat(SchemaSynchronizer.columnTypeText("NUMBER(19) GENERATED BY DEFAULT AS IDENTITY"))
+                .isEqualTo("NUMBER(19)");
+        assertThat(SchemaSynchronizer.columnTypeText("NVARCHAR(MAX) NULL")).isEqualTo("NVARCHAR(MAX)");
+    }
+
+    @Test
+    void oracleIntegerStorageComparesAsDeclaredIntegerAndIdentityDefaultsAreSkipped() {
+        LiveColumn live = new LiveColumn("NUMERIC", 38, 0, true, null);
+        assertThat(comparable(live, "INTEGER NOT NULL").baseType()).isEqualTo("INTEGER");
+        assertThat(comparable(live, "NUMBER(19)")).isSameAs(live);
+        for (String ansi : List.of("NUMERIC NOT NULL", "DECIMAL NOT NULL", "numeric NOT NULL")) {
+            NonDestructiveAlterPlanner.Plan plan = planFor(ansi, comparable(live, ansi));
+            assertThat(plan.applySql()).as(ansi).isEmpty();
+            assertThat(plan.pendingSql()).as(ansi).isEmpty();
+        }
+        assertThat(comparable(live, "NUMBER")).as("Oracle NUMBER is unbounded, not NUMBER(38,0)").isSameAs(live);
+        LiveColumn floatLive = new LiveColumn("FLOAT", null, null, false, null);
+        assertThat(comparable(floatLive, "DOUBLE PRECISION").baseType()).isEqualTo("DOUBLE PRECISION");
+        assertThat(comparable(floatLive, "REAL").baseType()).isEqualTo("REAL");
+        assertThat(SchemaSynchronizer.shouldSkipAlter("NUMBER(19) NOT NULL",
+                new LiveColumn("NUMERIC", 19, 0, true, "\"APP\".\"ISEQ$$_7\".nextval"))).isTrue();
+    }
+
+    private static LiveColumn comparable(LiveColumn live, String definition) {
+        return SchemaSynchronizer.oracleComparableLive(live, ColumnDefinitionParser.parse(definition), definition);
     }
 
     @Test
