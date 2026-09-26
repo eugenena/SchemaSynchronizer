@@ -12,15 +12,21 @@ review.
 
 Use it as:
 
-- two command-line utilities that serialize a source schema and synchronize a target;
+- two command-line utilities that serialize a source schema and synchronize a target
+  (plus `validate` and `dry-run` for hand-authored definitions);
 - a Spring Boot database initializer that runs before JPA validation; or
 - a small Java API over an existing JDBC connection.
+
+Applications typically **hand-author** `schema-definition.json` in source control and
+apply it to each environment's database on startup. Serializing a live database is
+optional bootstrap. See [Hand-authoring](docs/HAND_AUTHORING.md).
 
 ## Start here
 
 | Goal | Guide |
 |---|---|
 | Add SchemaSynchronizer to a Spring Boot application | [Five-minute Spring Boot quick start](docs/QUICK_START_SPRING_BOOT.md) |
+| Hand-author `schema-definition.json` (normal app workflow) | [Hand-authoring guide](docs/HAND_AUTHORING.md) |
 | Serialize or synchronize a database from the command line | [CLI guide](docs/CLI.md) |
 | Understand or author `schema-definition.json` | [Schema definition reference](docs/SCHEMA_DEFINITION.md) |
 | Prepare a production deployment | [Operations and safety runbook](docs/OPERATIONS.md) |
@@ -114,7 +120,7 @@ SchemaSynchronizer requires Java 21 or later. Add the Maven Central release:
 <dependency>
   <groupId>com.thinkaillc</groupId>
   <artifactId>schema-synchronizer</artifactId>
-  <version>1.1.0</version>
+  <version>1.2.0</version>
 </dependency>
 ```
 
@@ -134,8 +140,8 @@ MySQL JDBC drivers.
 ### 1. Download the executable JAR
 
 ```bash
-curl -fLO https://repo1.maven.org/maven2/com/thinkaillc/schema-synchronizer-cli/1.1.0/schema-synchronizer-cli-1.1.0-standalone.jar
-java -jar schema-synchronizer-cli-1.1.0-standalone.jar --version
+curl -fLO https://repo1.maven.org/maven2/com/thinkaillc/schema-synchronizer-cli/1.2.0/schema-synchronizer-cli-1.2.0-standalone.jar
+java -jar schema-synchronizer-cli-1.2.0-standalone.jar --version
 ```
 
 Maven Central publishes `.sha256` and `.sha512` files beside the JAR for integrity
@@ -153,14 +159,14 @@ export SCHEMA_DB_PASSWORD='source-password'
 PostgreSQL example:
 
 ```bash
-java -jar schema-synchronizer-cli-1.1.0-standalone.jar serialize \
+java -jar schema-synchronizer-cli-1.2.0-standalone.jar serialize \
   jdbc:postgresql://localhost:5432/source_app app_user - public schema-definition.json
 ```
 
 MariaDB example (the schema argument is the database/catalog name):
 
 ```bash
-java -jar schema-synchronizer-cli-1.1.0-standalone.jar serialize \
+java -jar schema-synchronizer-cli-1.2.0-standalone.jar serialize \
   jdbc:mariadb://localhost:3306/source_app app_user - source_app schema-definition.json
 ```
 
@@ -185,7 +191,7 @@ export SCHEMA_DB_PASSWORD='target-password'
 PostgreSQL example:
 
 ```bash
-java -jar schema-synchronizer-cli-1.1.0-standalone.jar sync \
+java -jar schema-synchronizer-cli-1.2.0-standalone.jar sync \
   jdbc:postgresql://localhost:5432/target_app app_user - \
   schema-definition.json public schema_synchronizer_history
 ```
@@ -193,7 +199,7 @@ java -jar schema-synchronizer-cli-1.1.0-standalone.jar sync \
 MariaDB example:
 
 ```bash
-java -jar schema-synchronizer-cli-1.1.0-standalone.jar sync \
+java -jar schema-synchronizer-cli-1.2.0-standalone.jar sync \
   jdbc:mariadb://localhost:3306/target_app app_user - \
   schema-definition.json target_app schema_synchronizer_history
 ```
@@ -209,7 +215,7 @@ Add the Maven Central release to an application:
 <dependency>
   <groupId>com.thinkaillc</groupId>
   <artifactId>schema-synchronizer</artifactId>
-  <version>1.1.0</version>
+  <version>1.2.0</version>
 </dependency>
 ```
 

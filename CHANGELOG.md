@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.2.0 — 2026-09-26
+
+- Hand-authoring is a first-class workflow: edit `schema-definition.json` in git,
+  validate offline, dry-run, then sync on startup. Serialize remains optional bootstrap.
+- Change-set apply tolerates already-present DDL objects (PostgreSQL duplicate
+  object/table/column SQLSTATES; MySQL/MariaDB duplicate table/column/key/FK codes)
+  so partial Flyway or hand-DDL adoption no longer fails mid-change. Each statement
+  runs under a savepoint on PostgreSQL so a skipped duplicate does not abort the
+  transaction. Skipping at least one statement requires `verificationSql`, which must
+  still pass. SQLState `23505` / MySQL `1062` uniqueness failures are never skipped.
+- Fully verified but unrecorded change sets continue to be adopted into history
+  without replaying statements.
+- CLI adds `validate` (offline) and `dry-run` (live preview) commands.
+- Docs: [HAND_AUTHORING.md](docs/HAND_AUTHORING.md), adoption and troubleshooting
+  updates for partial apply and hand-authored definitions.
+
 ## 1.1.0 — 2026-09-23
 
 - Added task-oriented adoption guides for Spring Boot, CLI use, schema authoring,

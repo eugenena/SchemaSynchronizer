@@ -3,11 +3,15 @@
 
 package com.thinkaillc.schemasynchronizer;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Savepoint;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -19,6 +23,8 @@ import java.util.Map;
 import java.util.Set;
 
 final class ChangeSetExecutor {
+    private static final Logger log = LoggerFactory.getLogger(ChangeSetExecutor.class);
+
     record Result(int applied, List<String> plannedSql) {}
 
     Result apply(Connection conn, List<SchemaDefinition.ChangeSet> changes, SchemaSynchronizerOptions options,
@@ -74,12 +80,26 @@ final class ChangeSetExecutor {
                 continue;
             }
             Instant started = Instant.now();
+            int skippedDuplicates = 0;
             for (String sql : change.statements()) {
-                execute(conn, sql);
+                if (executeAllowingAlreadyExists(conn, sql, change.id())) {
+                    skippedDuplicates++;
+                }
             }
             long elapsed = Duration.between(started, Instant.now()).toMillis();
+            if (skippedDuplicates > 0
+                    && (change.verificationSql() == null || change.verificationSql().isBlank())) {
+                throw new IllegalStateException("schema change '" + change.id()
+                        + "' skipped already-present statement(s) but has no verificationSql; "
+                        + "add a verification query so partial adoption cannot ledger an incomplete effect");
+            }
             if (change.verificationSql() != null && !isVerified(conn, change)) {
                 throw new IllegalStateException("verification failed after schema change '" + change.id() + "'");
+            }
+            if (skippedDuplicates > 0) {
+                log.info("[SchemaSynchronizer] Change '{}' adopted {} already-present statement(s) and "
+                                + "applied the remainder",
+                        change.id(), skippedDuplicates);
             }
             insertHistory(conn, history, change, checksum, elapsed);
             appliedCount++;
@@ -252,5 +272,47 @@ final class ChangeSetExecutor {
         try (var statement = conn.createStatement()) {
             statement.execute(sql);
         }
+    }
+
+    /**
+     * Executes one change-set statement. Returns {@code true} when the statement was
+     * skipped because the object already exists (adoption / partial prior apply).
+     *
+     * <p>PostgreSQL marks the whole transaction aborted after a failed statement, so
+     * each attempt uses a savepoint when auto-commit is off.
+     */
+    private boolean executeAllowingAlreadyExists(Connection conn, String sql, String changeId)
+            throws SQLException {
+        Savepoint savepoint = null;
+        boolean usedSavepoint = !conn.getAutoCommit();
+        try {
+            if (usedSavepoint) {
+                savepoint = conn.setSavepoint("schema_sync_stmt");
+            }
+            execute(conn, sql);
+            if (usedSavepoint) {
+                conn.releaseSavepoint(savepoint);
+            }
+            return false;
+        } catch (SQLException exception) {
+            if (usedSavepoint && savepoint != null) {
+                try {
+                    conn.rollback(savepoint);
+                } catch (SQLException rollbackFailure) {
+                    exception.setNextException(rollbackFailure);
+                }
+            }
+            if (DuplicateObjectSql.isAlreadyExists(exception)) {
+                log.debug("[SchemaSynchronizer] Skipping already-present statement in '{}': {}",
+                        changeId, summarize(sql));
+                return true;
+            }
+            throw exception;
+        }
+    }
+
+    private static String summarize(String sql) {
+        String trimmed = sql == null ? "" : sql.replaceAll("\\s+", " ").trim();
+        return trimmed.length() <= 120 ? trimmed : trimmed.substring(0, 117) + "...";
     }
 }

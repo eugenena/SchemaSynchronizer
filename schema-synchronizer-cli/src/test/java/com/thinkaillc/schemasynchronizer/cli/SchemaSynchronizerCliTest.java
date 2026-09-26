@@ -23,7 +23,8 @@ class SchemaSynchronizerCliTest {
                 args -> { throw new AssertionError("synchronizer called"); });
 
         assertThat(status).isZero();
-        assertThat(streams.stdout()).contains("Usage:", "serialize", "sync", "SCHEMA_DB_PASSWORD");
+        assertThat(streams.stdout()).contains("Usage:", "serialize", "sync", "dry-run", "validate",
+                "SCHEMA_DB_PASSWORD");
         assertThat(streams.stderr()).isEmpty();
     }
 
@@ -40,6 +41,41 @@ class SchemaSynchronizerCliTest {
         assertThat(status).isZero();
         assertThat(received.get()).containsExactly(
                 "jdbc:postgresql://localhost/db", "user", "-", "public", "schema.json");
+    }
+
+    @Test
+    void dryRunForwardsOnlyCommandArguments() {
+        Streams streams = new Streams();
+        AtomicReference<String[]> received = new AtomicReference<>();
+
+        int status = SchemaSynchronizerCli.run(
+                new String[]{"dry-run", "jdbc:postgresql://localhost/db", "user", "-", "schema.json", "public"},
+                streams.out(), streams.err(),
+                args -> { throw new AssertionError("serializer called"); },
+                args -> { throw new AssertionError("synchronizer called"); },
+                received::set,
+                args -> { throw new AssertionError("validate called"); });
+
+        assertThat(status).isZero();
+        assertThat(received.get()).containsExactly(
+                "jdbc:postgresql://localhost/db", "user", "-", "schema.json", "public");
+    }
+
+    @Test
+    void validateForwardsOnlyCommandArguments() {
+        Streams streams = new Streams();
+        AtomicReference<String[]> received = new AtomicReference<>();
+
+        int status = SchemaSynchronizerCli.run(
+                new String[]{"validate", "schema.json", "public"},
+                streams.out(), streams.err(),
+                args -> { throw new AssertionError("serializer called"); },
+                args -> { throw new AssertionError("synchronizer called"); },
+                args -> { throw new AssertionError("dry-run called"); },
+                received::set);
+
+        assertThat(status).isZero();
+        assertThat(received.get()).containsExactly("schema.json", "public");
     }
 
     @Test
