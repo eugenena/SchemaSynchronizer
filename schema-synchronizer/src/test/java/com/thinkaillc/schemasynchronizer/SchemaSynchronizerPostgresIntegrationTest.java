@@ -165,6 +165,54 @@ class SchemaSynchronizerPostgresIntegrationTest {
     }
 
     @Test
+    void adoptsPartialChangeWhenSomeStatementsAlreadyExist() throws Exception {
+        DataSource dataSource = dataSource();
+        String schema = uniqueSchema("partial_adopt");
+        createSchema(dataSource, schema);
+        SchemaDefinition definition = new SchemaDefinition(2, "postgresql", Map.of(), List.of(
+                new SchemaDefinition.ChangeSet(
+                        "001-two-checks",
+                        "two check constraints; one may already exist from a prior tool",
+                        List.of(
+                                "CREATE TABLE widgets (id UUID PRIMARY KEY, score INTEGER, weight INTEGER)",
+                                "ALTER TABLE widgets ADD CONSTRAINT ck_widgets_score CHECK (score IS NULL OR score >= 0)",
+                                "ALTER TABLE widgets ADD CONSTRAINT ck_widgets_weight CHECK (weight IS NULL OR weight >= 0)"
+                        ),
+                        "SELECT count(*) = 2 FROM pg_constraint c JOIN pg_class r ON r.oid = c.conrelid "
+                                + "JOIN pg_namespace n ON n.oid = r.relnamespace "
+                                + "WHERE n.nspname = current_schema() AND r.relname = 'widgets' "
+                                + "AND c.conname IN ('ck_widgets_score', 'ck_widgets_weight')",
+                        SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA
+                )));
+
+        try (Connection connection = dataSource.getConnection(); var statement = connection.createStatement()) {
+            statement.execute("SET search_path TO " + schema);
+            statement.execute("CREATE TABLE widgets (id UUID PRIMARY KEY, score INTEGER, weight INTEGER)");
+            statement.execute("ALTER TABLE widgets ADD CONSTRAINT ck_widgets_score CHECK (score IS NULL OR score >= 0)");
+        }
+
+        try (Connection connection = dataSource.getConnection()) {
+            SchemaSynchronizationResult result = synchronizer(dataSource, schema, false)
+                    .synchronizeWithResult(connection, definition);
+            assertThat(result.changeSetsApplied()).isEqualTo(1);
+            assertThat(queryLong(connection, "SELECT count(*) FROM " + schema
+                    + ".schema_synchronizer_history")).isEqualTo(1);
+            assertThat(queryLong(connection, "SELECT count(*) FROM pg_constraint c "
+                    + "JOIN pg_class r ON r.oid = c.conrelid "
+                    + "JOIN pg_namespace n ON n.oid = r.relnamespace "
+                    + "WHERE n.nspname = '" + schema + "' AND r.relname = 'widgets' "
+                    + "AND c.conname IN ('ck_widgets_score', 'ck_widgets_weight')"))
+                    .isEqualTo(2);
+        }
+
+        try (Connection connection = dataSource.getConnection()) {
+            SchemaSynchronizationResult replay = synchronizer(dataSource, schema, false)
+                    .synchronizeWithResult(connection, definition);
+            assertThat(replay.changeSetsApplied()).isZero();
+        }
+    }
+
+    @Test
     void adoptsOnlyWhenVerificationProvesExistingChange() throws Exception {
         DataSource dataSource = dataSource();
         String schema = uniqueSchema("adopt_case");

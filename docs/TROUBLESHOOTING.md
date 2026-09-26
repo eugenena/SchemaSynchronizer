@@ -20,6 +20,19 @@ execute it. Follow [OPERATIONS.md](OPERATIONS.md#handling-pending-sql). Common c
 are removed columns, orphan tables or indexes, primary-key drift, type narrowing,
 and tightening nullability.
 
+## A change set fails with "already exists"
+
+Before 1.2.0, replaying a multi-statement change against a database that already
+had some constraints or tables aborted the whole change. From 1.2.0, duplicate DDL
+objects are skipped and `verificationSql` must still pass. If verification fails
+after skips, the remaining statements did not establish the postcondition — fix the
+definition or the live schema, then retry.
+
+## Hand-authored definition will not start
+
+Run `validate` on the file first. Confirm `formatVersion` 2 includes `dialect`,
+change-set ids are stable, and you did not edit an already-applied change set.
+
 ## A change-set checksum changed
 
 An already-applied change set was edited. Restore the original text and add a new

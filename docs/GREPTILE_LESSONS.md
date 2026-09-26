@@ -1,5 +1,16 @@
 # Greptile lessons
 
+## 2026-09-26 — 1.2.0 — fail-closed uniqueness when skipping already-exists DDL
+
+- **Bug risk:** Message-only `"already exists"` matching could treat PostgreSQL
+  `23505` DETAIL text (`Key (…) already exists.`) as a skippable DDL duplicate;
+  walking `getNextException()` could also mask a hard primary error.
+- **Missed because:** Uniqueness was blocked by message heuristics instead of
+  SQLState/`1062` first; chain OR-matching treated any linked duplicate as success.
+- **Prevention:** Reject `23505`/`1062` before message heuristics; classify only the
+  primary `SQLException`; require `verificationSql` whenever any statement is skipped.
+  Contract: `DuplicateObjectSqlTest` DETAIL-only `23505` and chained `42501`+`42710`.
+
 ## 2026-09-23 — PR #11 — classify constraint-backed indexes by semantics
 
 - **Bug:** PostgreSQL serialization excluded every constraint-owned index even though

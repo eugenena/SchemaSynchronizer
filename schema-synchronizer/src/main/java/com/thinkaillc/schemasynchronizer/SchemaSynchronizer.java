@@ -68,6 +68,38 @@ public class SchemaSynchronizer {
      * {@code schema_synchronizer_history}.
      */
     public static void main(String[] args) throws Exception {
+        runFromArgs(args, false);
+    }
+
+    /**
+     * Dry-run entry point with the same arguments as {@link #main(String[])}.
+     * Plans work without committing DDL (PostgreSQL); MariaDB/MySQL may still commit
+     * implicit DDL — rehearse against a disposable instance.
+     */
+    public static void dryRunMain(String[] args) throws Exception {
+        runFromArgs(args, true);
+    }
+
+    /**
+     * Offline validation entry point.
+     *
+     * <p>Usage: {@code SchemaSynchronizer validate &lt;schema-file&gt; [schema]}
+     * or {@code &lt;schema-file&gt; [schema]} when invoked through the CLI {@code validate}
+     * command (without the literal {@code validate} token).
+     */
+    public static void validateMain(String[] args) throws Exception {
+        if (args.length < 1 || args.length > 2) {
+            throw new IllegalArgumentException(
+                    "Usage: SchemaSynchronizer validate <schema-file> [schema]");
+        }
+        Path schemaFile = Path.of(args[0]);
+        String schema = SqlIdentifiers.requireIdentifierPreservingCase(
+                args.length >= 2 ? args[1] : "public", "schema");
+        SchemaDefinitionValidator.validateFile(schemaFile, schema);
+        log.info("[SchemaSynchronizer] Definition is valid: {}", schemaFile.toAbsolutePath());
+    }
+
+    private static void runFromArgs(String[] args, boolean dryRun) throws Exception {
         if (args.length < 4 || args.length > 6) {
             throw new IllegalArgumentException("Usage: SchemaSynchronizer <jdbc-url> <user> "
                     + "<password-or--> <schema-file> [schema] [history-table]");
@@ -82,16 +114,19 @@ public class SchemaSynchronizer {
         ObjectMapper mapper = new ObjectMapper();
         SchemaDefinition definition = readDefinition(mapper, schemaFile);
         SchemaSynchronizerOptions options = new SchemaSynchronizerOptions(
-                schema, historyTable, 7_249_031_147L, false, true, true);
+                schema, historyTable, 7_249_031_147L, dryRun, true, true);
         SchemaSynchronizer synchronizer = new SchemaSynchronizer(mapper, null, "", options);
 
-        log.info("[SchemaSynchronizer] Connecting to target database");
+        log.info("[SchemaSynchronizer] Connecting to target database{}", dryRun ? " (dry-run)" : "");
         try (Connection connection = DriverManager.getConnection(args[0], args[1], password)) {
             SchemaSynchronizationResult result = synchronizer.synchronizeWithResult(connection, definition);
             log.info("[SchemaSynchronizer] Complete: {} table(s) created, {} column(s) added, "
                             + "{} column alteration(s), {} change set(s) applied, {} pending statement(s)",
                     result.tablesCreated(), result.columnsAdded(), result.columnsAltered(),
                     result.changeSetsApplied(), result.pendingSql().size());
+            if (!result.plannedSql().isEmpty()) {
+                log.info("[SchemaSynchronizer] Planned statements: {}", result.plannedSql().size());
+            }
         }
     }
 
@@ -523,6 +558,15 @@ public class SchemaSynchronizer {
     }
 
     private void validateDeclarativeDefinition(SchemaDefinition definition, DatabaseDialect dialect) {
+        validateDeclarative(definition, dialect, options);
+    }
+
+    /**
+     * Package/public validation of the declarative {@code tables} section used by
+     * {@link SchemaDefinitionValidator} and startup synchronization.
+     */
+    static void validateDeclarative(SchemaDefinition definition, DatabaseDialect dialect,
+                                    SchemaSynchronizerOptions options) {
         if (definition == null) {
             throw new IllegalArgumentException("schema definition is null");
         }
@@ -737,7 +781,7 @@ public class SchemaSynchronizer {
         return trimmed.endsWith(";") ? trimmed : trimmed + ";";
     }
 
-    private List<String> primaryKeyColumns(String createSql) {
+    private static List<String> primaryKeyColumns(String createSql) {
         if (createSql == null) {
             return List.of();
         }
