@@ -80,6 +80,10 @@ column creation, index creation, defaults, supported type widenings, and relaxin
 `NOT NULL`. Drops, narrowing, ambiguous type changes, and tightening nullability are
 manual unless expressed intentionally through a validated change set.
 
+Foreign keys, check constraints, partitions, clustered/filtered indexes, tablespaces,
+FILEGROUPs, and collations are **not** inferred from JDBC metadata into the declarative
+`tables` model. Express them as ordered change sets with `verificationSql`.
+
 Generate the declarative portion with `SchemaSerializer` when helpful, or hand-author
 `tables` directly. Maintain exceptional `changes` by hand either way. See
 [HAND_AUTHORING.md](HAND_AUTHORING.md) for the recommended application workflow,

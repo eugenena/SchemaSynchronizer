@@ -208,6 +208,7 @@ final class ChangeSetExecutor {
 
     private void createHistory(Connection conn, String history, DatabaseDialect dialect) throws SQLException {
         execute(conn, DialectSupport.createHistoryDdl(dialect, history));
+        execute(conn, DialectSupport.addAppliedByColumnDdl(dialect, history));
     }
 
     private boolean isVerified(Connection conn, SchemaDefinition.ChangeSet change) throws SQLException {
@@ -236,11 +237,12 @@ final class ChangeSetExecutor {
                                String checksum, long elapsed) throws SQLException {
         try (var statement = conn.prepareStatement(
                 "INSERT INTO " + history
-                        + " (change_id, checksum, description, execution_ms) VALUES (?, ?, ?, ?)")) {
+                        + " (change_id, checksum, description, applied_by, execution_ms) VALUES (?, ?, ?, ?, ?)")) {
             statement.setString(1, change.id());
             statement.setString(2, checksum);
             statement.setString(3, change.description());
-            statement.setLong(4, elapsed);
+            statement.setString(4, CliCredentials.historyActor());
+            statement.setLong(5, elapsed);
             statement.executeUpdate();
         }
     }

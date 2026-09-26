@@ -87,4 +87,14 @@ class DuplicateObjectSqlTest {
                 new SQLException("relation \"widgets\" does not exist", "42P01")))
                 .isFalse();
     }
+
+    @Test
+    void doesNotClassifyFromMessageAloneWhenSqlStateAndVendorCodeAreAbsent() {
+        assertThat(DuplicateObjectSql.isAlreadyExists(
+                new SQLException("table already exists")))
+                .isFalse();
+        assertThat(DuplicateObjectSql.isAlreadyExists(
+                new SQLException("name is already used by an existing object", null, 0)))
+                .isFalse();
+    }
 }

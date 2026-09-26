@@ -8,9 +8,11 @@ instances of the same dialect, not between SQL dialects.
 
 - Supported baseline: PostgreSQL 16+
 - Namespace: schema, normally `public`
-- Locking: two-key `pg_advisory_xact_lock` (schema namespace + configured lock id)
+- Locking: two-key `pg_try_advisory_xact_lock` (schema namespace + configured lock id),
+  30s timeout; legacy single-key also acquired during 1.3.x upgrades
 - DDL: transactional for supported operations
-- Dry run: planned work is rolled back; `verificationSql` is not executed
+- Dry run: planned work is rolled back (`supportsTransactionalDryRun()=true`);
+  `verificationSql` is not executed
 - Identifiers: unquoted lower-case, within PostgreSQL's 63-byte limit
 
 PostgreSQL pending destructive output is wrapped in a transaction and includes a

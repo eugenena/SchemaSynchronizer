@@ -1,5 +1,32 @@
 # Changelog
 
+## 1.4.0 — 2026-09-26
+
+Closes remaining enterprise-audit P2s and deferred least-privilege defaults
+(**breaking** for Spring Boot and CLI callers):
+
+- **SS-004:** Spring Boot auto-config is **off by default**
+  (`schema-synchronizer.enabled` must be `true`; `matchIfMissing=false`).
+- **SS-008:** History ledger records `applied_by` (from `SCHEMA_SYNCHRONIZER_ACTOR`
+  or `user.name`). Existing history tables gain the column on next sync.
+- **SS-009:** PostgreSQL locks use `pg_try_advisory_xact_lock` with a 30s deadline
+  (no unbounded wait), matching MySQL/SQL Server timeouts.
+- **SS-012:** Rejects misleading `schema=public` on SQL Server, Oracle, and MySQL
+  family (require `dbo` / connected user / catalog name).
+- **SS-014:** Dry-run paths consult `supportsTransactionalDryRun()`; transactional
+  dry-run rollback is asserted only for dialects that support it; others warn and
+  skip execution only.
+- **SS-016:** CLI/serialize/sync reject literal passwords on argv — password
+  argument must be `-` with `SCHEMA_DB_PASSWORD` set.
+- **SS-019:** `DuplicateObjectSql` classifies only by SQLState / vendor code
+  (no message-substring fail-open).
+- **SS-018 / SS-010:** Docs clarify declarative scope (tables/columns/indexes/PK)
+  and that UPDATE/INSERT/GRANT are intentional trusted-artifact operations, not a
+  sandbox.
+- Offline `validate` enforces dialect `maxIdentifierLength` for the schema name.
+- MySQL `GET_LOCK` long names use SHA-256 (not 32-bit `hashCode`), and dual-acquire
+  the 1.3.1 hashCode form during rolling upgrades.
+
 ## 1.3.1 — 2026-09-26
 
 Hardening from the enterprise audit (P0/P1 correctness and packaging):
