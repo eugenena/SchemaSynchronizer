@@ -61,4 +61,79 @@ class ColumnDefinitionParserTest {
         assertThat(bare.baseType()).isEqualTo("BIGINT");
         assertThat(bare.notNull()).isTrue();
     }
+
+    @Test
+    void extractsNotNullWhenDefaultPrecedesIt() {
+        var spec = ColumnDefinitionParser.parse("TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL");
+        assertThat(spec.baseType()).isEqualTo("TIMESTAMP");
+        assertThat(spec.notNull()).isTrue();
+        assertThat(ColumnDefinitionParser.normalizeDefault(spec.defaultExpr()))
+                .isEqualTo("CURRENT_TIMESTAMP");
+    }
+
+    @Test
+    void preservesNotNullInsideQuotedDefaultExpressions() {
+        var inside = ColumnDefinitionParser.parse("VARCHAR(50) DEFAULT 'is NOT NULL'");
+        assertThat(inside.notNull()).isFalse();
+        assertThat(ColumnDefinitionParser.normalizeDefault(inside.defaultExpr()))
+                .isEqualTo("'is NOT NULL'");
+
+        var mixed = ColumnDefinitionParser.parse("VARCHAR(50) DEFAULT 'x NOT NULL y'");
+        assertThat(mixed.notNull()).isFalse();
+        assertThat(ColumnDefinitionParser.normalizeDefault(mixed.defaultExpr()))
+                .isEqualTo("'x NOT NULL y'");
+
+        var both = ColumnDefinitionParser.parse("VARCHAR(50) NOT NULL DEFAULT 'is NOT NULL'");
+        assertThat(both.notNull()).isTrue();
+        assertThat(ColumnDefinitionParser.normalizeDefault(both.defaultExpr()))
+                .isEqualTo("'is NOT NULL'");
+
+        var afterLiteral = ColumnDefinitionParser.parse("VARCHAR(50) DEFAULT 'is' NOT NULL");
+        assertThat(afterLiteral.notNull()).isTrue();
+        assertThat(ColumnDefinitionParser.normalizeDefault(afterLiteral.defaultExpr()))
+                .isEqualTo("'is'");
+    }
+
+    @Test
+    void parsesOracleTimestampWithTimeZoneForms() {
+        var tstz = ColumnDefinitionParser.parse("TIMESTAMP(6) WITH TIME ZONE NOT NULL");
+        assertThat(tstz.baseType()).isEqualTo("TIMESTAMPTZ");
+        assertThat(tstz.notNull()).isTrue();
+
+        var local = ColumnDefinitionParser.parse("TIMESTAMP WITH LOCAL TIME ZONE");
+        assertThat(local.baseType()).isEqualTo("TIMESTAMPTZ");
+        assertThat(local.notNull()).isFalse();
+    }
+
+    @Test
+    void parsesSqlServerMaxLengthTypes() {
+        var varchar = ColumnDefinitionParser.parse("VARCHAR(MAX) NOT NULL");
+        assertThat(varchar.baseType()).isEqualTo("VARCHAR");
+        assertThat(varchar.length()).isEqualTo(ColumnDefinitionParser.MAX_LENGTH);
+        assertThat(varchar.notNull()).isTrue();
+
+        var nvarchar = ColumnDefinitionParser.parse("NVARCHAR(MAX)");
+        assertThat(nvarchar.baseType()).isEqualTo("VARCHAR");
+        assertThat(nvarchar.length()).isEqualTo(ColumnDefinitionParser.MAX_LENGTH);
+
+        var varbinary = ColumnDefinitionParser.parse("VARBINARY(MAX)");
+        assertThat(varbinary.baseType()).isEqualTo("VARBINARY");
+        assertThat(varbinary.length()).isEqualTo(ColumnDefinitionParser.MAX_LENGTH);
+
+        assertThat(NonDestructiveAlterPlanner.formatType("VARCHAR", ColumnDefinitionParser.MAX_LENGTH, null))
+                .isEqualTo("VARCHAR(MAX)");
+        assertThat(NonDestructiveAlterPlanner.formatType("VARBINARY", ColumnDefinitionParser.MAX_LENGTH, null))
+                .isEqualTo("VARBINARY(MAX)");
+        assertThat(NonDestructiveAlterPlanner.classifyTypeChange(
+                "VARCHAR", 100, null, "VARCHAR", ColumnDefinitionParser.MAX_LENGTH, null))
+                .isEqualTo(NonDestructiveAlterPlanner.TypeChange.WIDEN);
+    }
+
+    @Test
+    void rejectsCharMax() {
+        org.assertj.core.api.Assertions.assertThatThrownBy(
+                        () -> ColumnDefinitionParser.parse("CHAR(MAX)"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("VARCHAR/VARBINARY");
+    }
 }

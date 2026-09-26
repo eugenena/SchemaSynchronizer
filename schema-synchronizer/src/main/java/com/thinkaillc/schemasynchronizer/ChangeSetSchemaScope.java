@@ -21,8 +21,8 @@ final class ChangeSetSchemaScope {
     private static final String IDENT =
             "(?:\"([^\"]+)\"|\\[([^\\]]+)\\]|`([^`]+)`|([A-Za-z_][A-Za-z0-9_]*))";
 
-    /** Any schema.object form that survives string/comment masking. */
-    private static final Pattern QUALIFIED = Pattern.compile(IDENT + "\\." + IDENT);
+    /** Any schema.object form that survives string/comment masking (whitespace around {@code .} allowed). */
+    private static final Pattern QUALIFIED = Pattern.compile(IDENT + "\\s*\\.\\s*" + IDENT);
 
     private static final Pattern IN_SCHEMA = Pattern.compile(
             "(?i)\\bIN\\s+SCHEMA\\s+" + IDENT);

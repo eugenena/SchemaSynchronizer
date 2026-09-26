@@ -26,6 +26,7 @@ class SchemaSynchronizerMySqlIntegrationTest {
     void cleanDatabase() throws Exception {
         try (Connection connection = connection(); var statement = connection.createStatement()) {
             statement.execute("DROP TABLE IF EXISTS mysql_items");
+            statement.execute("DROP TABLE IF EXISTS mysql_flag");
             statement.execute("DROP TABLE IF EXISTS schema_synchronizer_history");
         }
     }
@@ -85,6 +86,35 @@ class SchemaSynchronizerMySqlIntegrationTest {
                         columns,
                         List.of("CREATE INDEX idx_mysql_items_label ON mysql_items (label)"))),
                 List.of());
+    }
+
+    @Test
+    void appliesChangeSetAndCreatesHistoryWithAppliedBy() throws Exception {
+        // Exercises createHistory() + MySQL ADD COLUMN applied_by (no IF NOT EXISTS).
+        SchemaDefinition withChange = new SchemaDefinition(2, "mysql", Map.of(), List.of(
+                new SchemaDefinition.ChangeSet(
+                        "001-mysql-flag",
+                        "add flag table via change set",
+                        List.of("CREATE TABLE IF NOT EXISTS mysql_flag (id BIGINT PRIMARY KEY)"),
+                        "SELECT COUNT(*) = 1 FROM information_schema.tables "
+                                + "WHERE table_schema = DATABASE() AND table_name = 'mysql_flag'",
+                        SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA)));
+        SchemaSynchronizer synchronizer = synchronizer();
+        try (Connection connection = connection()) {
+            SchemaSynchronizationResult first = synchronizer.synchronizeWithResult(connection, withChange);
+            assertThat(first.changeSetsApplied()).isEqualTo(1);
+        }
+        try (Connection connection = connection(); var statement = connection.createStatement();
+             var rows = statement.executeQuery(
+                     "SELECT applied_by FROM schema_synchronizer_history WHERE change_id = '001-mysql-flag'")) {
+            assertThat(rows.next()).isTrue();
+            // Column must exist; value may be null depending on JDBC URL user.
+            rows.getString(1);
+        }
+        try (Connection connection = connection()) {
+            assertThat(synchronizer.synchronizeWithResult(connection, withChange).changeSetsApplied())
+                    .isZero();
+        }
     }
 
     private SchemaSynchronizer synchronizer() throws Exception {

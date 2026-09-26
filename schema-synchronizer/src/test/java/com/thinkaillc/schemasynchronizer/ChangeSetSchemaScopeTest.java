@@ -32,6 +32,18 @@ class ChangeSetSchemaScopeTest {
     }
 
     @Test
+    void rejectsCrossSchemaTargetsWithWhitespaceAroundDot() {
+        assertThatThrownBy(() -> ChangeSetSchemaScope.requireScoped(
+                "ALTER TABLE others . victims ADD COLUMN x INT", "public"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("others");
+        assertThatThrownBy(() -> ChangeSetSchemaScope.requireScoped(
+                "UPDATE \"app_b\" . \"accounts\" SET x = 1", "public"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("app_b");
+    }
+
+    @Test
     void rejectsCrossSchemaTargets() {
         assertThatThrownBy(() -> ChangeSetSchemaScope.requireScoped(
                 "UPDATE app_b.accounts SET balance = 0", "app_a"))
