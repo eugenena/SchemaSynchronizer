@@ -1,8 +1,12 @@
 # Command-line guide
 
-SchemaSynchronizer 1.1.0 publishes a self-contained executable JAR with two commands:
+SchemaSynchronizer 1.2.0 publishes a self-contained executable JAR with four
+commands:
 
 - `serialize` captures the declarative portion of a live source schema.
+- `validate` checks a definition file offline (hand-authoring).
+- `dry-run` previews convergence against a live target without committing work
+  (PostgreSQL); rehearse MariaDB/MySQL against a disposable instance.
 - `sync` applies a definition to a target and reports manual work.
 
 The JAR requires Java 21 and includes PostgreSQL, MariaDB, and MySQL JDBC drivers.
@@ -10,16 +14,16 @@ The JAR requires Java 21 and includes PostgreSQL, MariaDB, and MySQL JDBC driver
 ## Download and verify
 
 ```bash
-curl -fLO https://repo1.maven.org/maven2/com/thinkaillc/schema-synchronizer-cli/1.1.0/schema-synchronizer-cli-1.1.0-standalone.jar
-curl -fLO https://repo1.maven.org/maven2/com/thinkaillc/schema-synchronizer-cli/1.1.0/schema-synchronizer-cli-1.1.0-standalone.jar.sha256
+curl -fLO https://repo1.maven.org/maven2/com/thinkaillc/schema-synchronizer-cli/1.2.0/schema-synchronizer-cli-1.2.0-standalone.jar
+curl -fLO https://repo1.maven.org/maven2/com/thinkaillc/schema-synchronizer-cli/1.2.0/schema-synchronizer-cli-1.2.0-standalone.jar.sha256
 ```
 
 Compare the JAR's SHA-256 digest with the downloaded checksum before execution. The
 same executable and checksum files are attached to the GitHub release.
 
 ```bash
-java -jar schema-synchronizer-cli-1.1.0-standalone.jar --version
-java -jar schema-synchronizer-cli-1.1.0-standalone.jar --help
+java -jar schema-synchronizer-cli-1.2.0-standalone.jar --version
+java -jar schema-synchronizer-cli-1.2.0-standalone.jar --help
 ```
 
 Use the environment for credentials so passwords do not appear in shell history or
@@ -27,6 +31,32 @@ process arguments:
 
 ```bash
 export SCHEMA_DB_PASSWORD='replace-me'
+```
+
+## Validate a hand-authored definition
+
+```text
+validate <schema-file> [schema]
+```
+
+```bash
+java -jar schema-synchronizer-cli-1.2.0-standalone.jar validate schema-definition.json
+java -jar schema-synchronizer-cli-1.2.0-standalone.jar validate schema-definition.json public
+```
+
+No database connection is required. The command checks format, dialect, declarative
+targets, SQL safety policy, and change-set structure.
+
+## Dry-run against a target
+
+```text
+dry-run <jdbc-url> <user> <password-or--> <schema-file> [schema] [history-table]
+```
+
+```bash
+java -jar schema-synchronizer-cli-1.2.0-standalone.jar dry-run \
+  jdbc:postgresql://localhost:5432/target_app app_user - \
+  schema-definition.json public schema_synchronizer_history
 ```
 
 ## Serialize a source database
@@ -38,20 +68,21 @@ serialize <jdbc-url> <user> <password-or--> <schema> <output-path>
 PostgreSQL:
 
 ```bash
-java -jar schema-synchronizer-cli-1.1.0-standalone.jar serialize \
+java -jar schema-synchronizer-cli-1.2.0-standalone.jar serialize \
   jdbc:postgresql://localhost:5432/source_app app_user - public schema-definition.json
 ```
 
 MySQL:
 
 ```bash
-java -jar schema-synchronizer-cli-1.1.0-standalone.jar serialize \
+java -jar schema-synchronizer-cli-1.2.0-standalone.jar serialize \
   jdbc:mysql://localhost:3306/source_app app_user - source_app schema-definition.json
 ```
 
 MariaDB uses a `jdbc:mariadb:` URL and `mariadb` dialect. If the output file already
 exists, serialization preserves its hand-authored `changes` array. Always review
-the generated definition before committing it.
+the generated definition before committing it. Serialize is optional; hand-authoring
+is documented in [HAND_AUTHORING.md](HAND_AUTHORING.md).
 
 ## Synchronize a target database
 
@@ -60,7 +91,7 @@ sync <jdbc-url> <user> <password-or--> <schema-file> [schema] [history-table]
 ```
 
 ```bash
-java -jar schema-synchronizer-cli-1.1.0-standalone.jar sync \
+java -jar schema-synchronizer-cli-1.2.0-standalone.jar sync \
   jdbc:postgresql://localhost:5432/target_app app_user - \
   schema-definition.json public schema_synchronizer_history
 ```
@@ -82,7 +113,7 @@ Exit statuses are stable for automation:
 git clone https://github.com/eugenena/SchemaSynchronizer.git
 cd SchemaSynchronizer
 mvn clean package
-java -jar schema-synchronizer-cli/target/schema-synchronizer-cli-1.1.0-standalone.jar --help
+java -jar schema-synchronizer-cli/target/schema-synchronizer-cli-1.2.0-standalone.jar --help
 ```
 
 ## Credential rules

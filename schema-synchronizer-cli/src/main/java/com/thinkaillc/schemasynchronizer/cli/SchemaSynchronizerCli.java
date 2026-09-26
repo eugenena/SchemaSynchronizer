@@ -16,7 +16,11 @@ public final class SchemaSynchronizerCli {
     }
 
     public static void main(String[] args) {
-        int status = run(args, System.out, System.err, SchemaSerializer::main, SchemaSynchronizer::main);
+        int status = run(args, System.out, System.err,
+                SchemaSerializer::main,
+                SchemaSynchronizer::main,
+                SchemaSynchronizer::dryRunMain,
+                SchemaSynchronizer::validateMain);
         if (status != 0) {
             System.exit(status);
         }
@@ -24,6 +28,14 @@ public final class SchemaSynchronizerCli {
 
     static int run(String[] args, PrintStream out, PrintStream err,
                    CliCommand serializer, CliCommand synchronizer) {
+        return run(args, out, err, serializer, synchronizer, synchronizer, argsIgnored -> {
+            throw new IllegalStateException("validate command is unavailable in this test harness");
+        });
+    }
+
+    static int run(String[] args, PrintStream out, PrintStream err,
+                   CliCommand serializer, CliCommand synchronizer,
+                   CliCommand dryRun, CliCommand validate) {
         if (args.length == 0) {
             err.println("A command is required.");
             printUsage(err);
@@ -48,6 +60,12 @@ public final class SchemaSynchronizerCli {
                         : invalidArguments(command, err);
                 case "sync" -> commandArgs.length >= 4 && commandArgs.length <= 6
                         ? execute(synchronizer, commandArgs)
+                        : invalidArguments(command, err);
+                case "dry-run" -> commandArgs.length >= 4 && commandArgs.length <= 6
+                        ? execute(dryRun, commandArgs)
+                        : invalidArguments(command, err);
+                case "validate" -> commandArgs.length >= 1 && commandArgs.length <= 2
+                        ? execute(validate, commandArgs)
                         : invalidArguments(command, err);
                 default -> {
                     err.println("Unknown command: " + command);
@@ -87,9 +105,16 @@ public final class SchemaSynchronizerCli {
         stream.println("    <jdbc-url> <user> <password-or--> <schema> <output-path>");
         stream.println("  java -jar schema-synchronizer-cli-<version>-standalone.jar sync \\");
         stream.println("    <jdbc-url> <user> <password-or--> <schema-file> [schema] [history-table]");
+        stream.println("  java -jar schema-synchronizer-cli-<version>-standalone.jar dry-run \\");
+        stream.println("    <jdbc-url> <user> <password-or--> <schema-file> [schema] [history-table]");
+        stream.println("  java -jar schema-synchronizer-cli-<version>-standalone.jar validate \\");
+        stream.println("    <schema-file> [schema]");
         stream.println();
         stream.println("Use '-' for <password-or--> to read SCHEMA_DB_PASSWORD.");
-        stream.println("Commands: serialize, sync, help, version");
+        stream.println("Commands: serialize, sync, dry-run, validate, help, version");
+        stream.println();
+        stream.println("Hand-authoring: edit schema-definition.json, run validate, then dry-run/sync.");
+        stream.println("Serialize is optional bootstrap from a known-good live database.");
     }
 
     @FunctionalInterface

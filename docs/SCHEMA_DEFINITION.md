@@ -73,5 +73,8 @@ column creation, index creation, defaults, supported type widenings, and relaxin
 `NOT NULL`. Drops, narrowing, ambiguous type changes, and tightening nullability are
 manual unless expressed intentionally through a validated change set.
 
-Generate the declarative portion with `SchemaSerializer` when possible, then review
-the result and maintain exceptional changes by hand.
+Generate the declarative portion with `SchemaSerializer` when helpful, or hand-author
+`tables` directly. Maintain exceptional `changes` by hand either way. See
+[HAND_AUTHORING.md](HAND_AUTHORING.md) for the recommended application workflow,
+including offline `validate`, `dry-run`, and partial adoption of already-present
+objects.

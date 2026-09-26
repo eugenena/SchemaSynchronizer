@@ -4,17 +4,27 @@ SchemaSynchronizer is a desired-state synchronizer, not a migration-history play
 Adoption should prove that a new database and every supported existing database
 converge to the same state.
 
+Hand-authoring the definition (rather than only serializing production) is supported
+and common; see [HAND_AUTHORING.md](HAND_AUTHORING.md).
+
 ## 1. Freeze competing schema writers
 
 Identify every component that can mutate schema: Flyway, Liquibase, Hibernate DDL,
 deployment scripts, and manual bootstrap jobs. Plan a release in which exactly one
 tool owns mutation at a time.
 
-## 2. Serialize a representative database
+## 2. Produce a schema definition
 
-Use `SchemaSerializer`, review the generated tables, columns, keys, defaults, and
-indexes, and commit the definition. Repeat against materially different deployment
-ages to expose drift.
+Either:
+
+- **Serialize** a representative database with `SchemaSerializer`, review the
+  generated tables, columns, keys, defaults, and indexes, and commit the definition;
+  or
+- **Hand-author** `tables` and `changes` in git, then `validate` offline.
+
+Repeat serialization against materially different deployment ages when you need to
+expose structural drift. Prefer one committed definition that both empty and aged
+databases can adopt.
 
 ## 3. Represent non-declarative effects
 
@@ -31,13 +41,19 @@ Test at least:
 2. an existing production-shaped database adopting verified history without
    replaying destructive or non-idempotent work.
 
+On existing databases, SchemaSynchronizer 1.2.0+ will:
+
+- record a change set in history when `verificationSql` is already true; and
+- when verification is false, skip individual statements that fail only because the
+  object already exists, then require verification to succeed.
+
 Compare the resulting schemas. Both must converge before cutover.
 
 ## 5. Rehearse pending SQL
 
-Run with production-shaped data and review every pending statement. Decide whether
-each live orphan should be removed, moved to another managed schema, or represented
-in the definition.
+Run `dry-run` (or sync with a disposable clone) with production-shaped data and
+review every pending statement. Decide whether each live orphan should be removed,
+moved to another managed schema, or represented in the definition.
 
 ## 6. Cut over
 
