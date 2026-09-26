@@ -60,13 +60,30 @@ Rules:
   on newly created tables or columns.
 - `verificationSql` must return exactly one row containing one non-null boolean.
 - Verification queries must be read-only and must not call side-effecting functions.
-- Change-set statements and verification SQL must target the configured schema
-  namespace (or system catalogs such as `information_schema` / `pg_catalog` / `sys`).
-  Any `other.object` reference is rejected. Prefer unqualified column names in
-  `SET` clauses (`SET note = …`); `SET items.note = …` is treated as a namespace
-  reference and will fail unless `items` is the configured schema.
-  Session namespace mutators (`SET search_path`, `set_config`, `USE`,
-  `ALTER SESSION SET CURRENT_SCHEMA`) are rejected.
+- Change-set statements must target the configured schema namespace (or system
+  catalogs such as `information_schema` / `pg_catalog` / `sys`). Any `other.object`
+  reference is rejected. Prefer unqualified column names in `SET` clauses
+  (`SET note = …`); `SET items.note = …` is treated as a namespace reference and will
+  fail unless `items` is the configured schema. Read-only verification queries may use
+  table aliases (`r.relname`), because `alias.column` cannot be told apart from
+  `schema.table` without a parser.
+- Session namespace mutators (`SET search_path`, `set_config`, `USE`,
+  `ALTER SESSION SET CURRENT_SCHEMA`) are rejected in statements and verification SQL.
+- Verification SQL must not write or lock: `INTO` (including `SELECT … INTO` and
+  `INTO OUTFILE`), `FOR UPDATE`/`FOR SHARE`, locking hints, advisory/application lock
+  functions, and sequence functions (`nextval`, `setval`, `seq.NEXTVAL`) are rejected.
+- System catalogs are readable but never write or DDL targets. Three-part names
+  (`db.schema.object`) on PostgreSQL and SQL Server, and Oracle database links, are
+  rejected.
+- Triggers must be table triggers: server, database, schema, and logon/startup triggers
+  are rejected. Oracle clauses such as `SET UNUSED`, `MODIFY`, or `RENAME` chained after
+  `ADD (…)` in one `ALTER TABLE` are rejected.
+- Routine bodies (PostgreSQL dollar-quoted or string bodies) are checked as code: their
+  comments and string literals, such as `RAISE` messages, are ignored.
+- On MySQL/MariaDB, double-quoted text is treated as a string unless it is part of a
+  dotted name (`"db"."t"`).
+- These checks are a guardrail against accidental unsafe change sets, not a security
+  boundary against a hostile author.
 
 MariaDB, MySQL, and Oracle can commit DDL implicitly. Every unapplied change set for
 those dialects therefore requires `verificationSql`; if verification is false, the

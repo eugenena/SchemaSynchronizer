@@ -30,9 +30,10 @@ public final class ColumnDefinitionParser {
             "^(TIMESTAMP(?:\\(\\d+\\))?\\s+WITH\\s+(?:LOCAL\\s+)?TIME\\s+ZONE)\\b(.*)$",
             Pattern.CASE_INSENSITIVE);
     private static final Pattern TYPE_LEN = Pattern.compile(
-            "^([A-Za-z][A-Za-z0-9_\\s]*?)(?:\\((MAX|\\d+)(?:\\s*,\\s*(\\d+))?\\))?$",
+            "^([A-Za-z][A-Za-z0-9_\\s]*?)(?:\\((MAX|\\d+)(?:\\s+(?:CHAR|BYTE))?(?:\\s*,\\s*(\\d+))?\\))?$",
             Pattern.CASE_INSENSITIVE);
     private static final Pattern PG_CAST = Pattern.compile("::[A-Za-z][A-Za-z0-9_\\s]*$");
+    private static final Pattern ON_UPDATE = Pattern.compile("\\s+ON\\s+UPDATE\\s+", Pattern.CASE_INSENSITIVE);
 
     private ColumnDefinitionParser() {}
 
@@ -59,6 +60,11 @@ public final class ColumnDefinitionParser {
             if (peel >= 0) {
                 notNull = true;
                 defaultExpr = defaultExpr.substring(0, peel).trim();
+            }
+            // MySQL "DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP": ON UPDATE is not part of the default.
+            Matcher onUpdate = ON_UPDATE.matcher(defaultExpr);
+            if (onUpdate.find() && !isInsideSingleQuotes(defaultExpr, onUpdate.start())) {
+                defaultExpr = defaultExpr.substring(0, onUpdate.start()).trim();
             }
         }
         Matcher nn = NOT_NULL.matcher(rest);
@@ -95,9 +101,12 @@ public final class ColumnDefinitionParser {
             scale = Integer.parseInt(tm.group(3));
         }
         String normalized = normalizeType(rawType);
-        if (length != null && length == MAX_LENGTH
-                && !"VARCHAR".equals(normalized) && !"VARBINARY".equals(normalized)) {
-            throw new IllegalArgumentException("MAX length is only valid for VARCHAR/VARBINARY: " + definition);
+        if (length != null && length == MAX_LENGTH && !isVariableLength(normalized)) {
+            throw new IllegalArgumentException("MAX length is only valid for VARCHAR/NVARCHAR/VARBINARY: "
+                    + definition);
+        }
+        if (length == null && isFixedLength(normalized)) {
+            length = 1; // CHAR, NCHAR, and BINARY without a length mean length 1 on every engine.
         }
         if (scale != null && !"NUMERIC".equals(normalized)) {
             throw new IllegalArgumentException("scale is supported only for NUMERIC: " + definition);
@@ -108,6 +117,11 @@ public final class ColumnDefinitionParser {
         return new ColumnSpec(normalized, length, scale, notNull, defaultExpr);
     }
 
+    /**
+     * Comparable form of a DEFAULT expression: PostgreSQL casts removed, redundant outer
+     * parentheses removed (SQL Server reports {@code 0} as {@code ((0))}), and text outside
+     * string literals upper-cased so {@code getdate()} equals {@code GETDATE()}.
+     */
     public static String normalizeDefault(String defaultExpr) {
         if (defaultExpr == null) {
             return null;
@@ -117,20 +131,74 @@ public final class ColumnDefinitionParser {
         if (cast.find()) {
             d = d.substring(0, cast.start()).trim();
         }
-        if (d.equalsIgnoreCase("CURRENT_TIMESTAMP") || d.equalsIgnoreCase("CURRENT_TIMESTAMP()")) {
+        d = stripOuterParentheses(d);
+        d = upperOutsideLiterals(d);
+        if (d.equals("NULL")) {
+            return null;
+        }
+        // SQL Server CURRENT_TIMESTAMP is GETDATE(); PostgreSQL/MySQL CURRENT_TIMESTAMP is NOW().
+        if (d.equals("CURRENT_TIMESTAMP") || d.equals("CURRENT_TIMESTAMP()") || d.equals("GETDATE()")
+                || d.equals("NOW()")) {
             return "CURRENT_TIMESTAMP";
         }
         return d;
+    }
+
+    static String stripOuterParentheses(String expression) {
+        String result = expression.trim();
+        while (result.length() >= 2 && result.charAt(0) == '(' && closingParenthesis(result) == result.length() - 1) {
+            result = result.substring(1, result.length() - 1).trim();
+        }
+        return result;
+    }
+
+    /** Index of the parenthesis closing the one at 0, ignoring single-quoted literals; -1 if unbalanced. */
+    private static int closingParenthesis(String text) {
+        int depth = 0;
+        boolean quoted = false;
+        for (int index = 0; index < text.length(); index++) {
+            char current = text.charAt(index);
+            if (current == '\'') {
+                quoted = !quoted;
+            } else if (!quoted && current == '(') {
+                depth++;
+            } else if (!quoted && current == ')') {
+                depth--;
+                if (depth == 0) {
+                    return index;
+                }
+            }
+        }
+        return -1;
+    }
+
+    private static String upperOutsideLiterals(String text) {
+        StringBuilder result = new StringBuilder(text.length());
+        boolean quoted = false;
+        for (int index = 0; index < text.length(); index++) {
+            char current = text.charAt(index);
+            if (current == '\'') {
+                quoted = !quoted;
+            }
+            result.append(quoted || current == '\'' ? current : Character.toUpperCase(current));
+        }
+        return result.toString();
     }
 
     public static String normalizeType(String typeName) {
         if (typeName == null) {
             return "";
         }
-        String t = typeName.trim().toUpperCase(Locale.ROOT).replaceAll("\\s+", " ");
+        String t = typeName.trim().toUpperCase(Locale.ROOT).replaceAll("\\s+", " ")
+                // SQL Server reports identity columns as e.g. "bigint identity".
+                .replaceFirst(" IDENTITY$", "")
+                // Oracle reports TIMESTAMP precision in TYPE_NAME: TIMESTAMP(6) [WITH [LOCAL] TIME ZONE].
+                .replaceFirst("^TIMESTAMP\\s*\\(\\d+\\)", "TIMESTAMP");
         return switch (t) {
-            case "CHARACTER VARYING", "VARCHAR", "VARCHAR2", "NVARCHAR", "NVARCHAR2" -> "VARCHAR";
-            case "CHARACTER", "CHAR", "BPCHAR", "NCHAR" -> "CHAR";
+            case "NVARCHAR", "NVARCHAR2", "NATIONAL CHARACTER VARYING" -> "NVARCHAR";
+            case "CHARACTER VARYING", "VARCHAR", "VARCHAR2" -> "VARCHAR";
+            case "CHARACTER", "CHAR", "BPCHAR" -> "CHAR";
+            case "NCHAR", "NATIONAL CHARACTER", "NATIONAL CHAR" -> "NCHAR";
             case "INT", "INT4", "INTEGER" -> "INTEGER";
             case "INT8", "BIGINT" -> "BIGINT";
             case "INT2", "SMALLINT" -> "SMALLINT";
@@ -141,11 +209,29 @@ public final class ColumnDefinitionParser {
             case "TIMESTAMP WITH TIME ZONE", "TIMESTAMPTZ",
                  "TIMESTAMP WITH LOCAL TIME ZONE" -> "TIMESTAMPTZ";
             case "TIMESTAMP WITHOUT TIME ZONE", "TIMESTAMP" -> "TIMESTAMP";
-            case "VARBINARY", "BINARY" -> "VARBINARY";
+            // Oracle RAW is variable-length binary; BINARY(n) is fixed-length and pads.
+            case "VARBINARY", "RAW" -> "VARBINARY";
+            case "BINARY" -> "BINARY";
             case "BIGSERIAL" -> "BIGINT"; // compare as bigint for widen checks
             case "SERIAL" -> "INTEGER";
             default -> t;
         };
+    }
+
+    /** Types whose length may be {@code (MAX)} and that widen by length. */
+    public static boolean isVariableLength(String normalizedType) {
+        return "VARCHAR".equals(normalizedType) || "NVARCHAR".equals(normalizedType)
+                || "VARBINARY".equals(normalizedType);
+    }
+
+    /** Fixed-length types whose declared length is significant. */
+    public static boolean isFixedLength(String normalizedType) {
+        return "CHAR".equals(normalizedType) || "NCHAR".equals(normalizedType) || "BINARY".equals(normalizedType);
+    }
+
+    /** Types whose live length is read and compared. */
+    public static boolean hasLength(String normalizedType) {
+        return isVariableLength(normalizedType) || isFixedLength(normalizedType);
     }
 
     /** Integer family rank for widening (higher = wider). -1 if not integer. */

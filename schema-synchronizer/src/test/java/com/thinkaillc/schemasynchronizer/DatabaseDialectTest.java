@@ -43,7 +43,7 @@ class DatabaseDialectTest {
         assertThat(DatabaseDialect.ORACLE.supportsCreateIndexIfNotExists()).isFalse();
         assertThat(DatabaseDialect.SQLSERVER.supportsCreateTableIfNotExists()).isFalse();
         assertThat(DatabaseDialect.POSTGRESQL.maxIdentifierLength()).isEqualTo(63);
-        assertThat(DatabaseDialect.MYSQL.maxIdentifierLength()).isEqualTo(63);
+        assertThat(DatabaseDialect.MYSQL.maxIdentifierLength()).isEqualTo(64);
         assertThat(DatabaseDialect.SQLSERVER.maxIdentifierLength()).isEqualTo(128);
         assertThat(DatabaseDialect.ORACLE.maxIdentifierLength()).isEqualTo(128);
     }

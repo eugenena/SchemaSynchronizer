@@ -59,9 +59,10 @@ public enum DatabaseDialect {
 
     /** Unquoted identifier length limit for this dialect. */
     public int maxIdentifierLength() {
-        return this == POSTGRESQL || isMySqlFamily()
-                ? SqlIdentifiers.DEFAULT_MAX_LENGTH
-                : SqlIdentifiers.EXTENDED_MAX_LENGTH;
+        if (this == POSTGRESQL) {
+            return SqlIdentifiers.DEFAULT_MAX_LENGTH;
+        }
+        return isMySqlFamily() ? SqlIdentifiers.MYSQL_MAX_LENGTH : SqlIdentifiers.EXTENDED_MAX_LENGTH;
     }
 
     public static DatabaseDialect detect(DatabaseMetaData metadata) throws SQLException {
@@ -124,6 +125,32 @@ public enum DatabaseDialect {
         }
         return null;
     }
+
+    /**
+     * Statement text as sent over JDBC. Oracle rejects a trailing {@code ;} on SQL statements
+     * (ORA-00933/00911) but requires it at the end of PL/SQL blocks and stored-code DDL.
+     */
+    public String executableSql(String sql) {
+        if (this != ORACLE || sql == null) {
+            return sql;
+        }
+        String masked;
+        try {
+            masked = SqlLexer.mask(sql, SqlLexer.Mode.ORACLE, true, true);
+        } catch (IllegalArgumentException unlexable) {
+            return sql;
+        }
+        // Offsets match: comments and literals are blanked, so a trailing comment is whitespace here.
+        String code = masked.stripTrailing();
+        if (!code.endsWith(";") || ORACLE_PLSQL.matcher(masked).lookingAt()) {
+            return sql;
+        }
+        return sql.substring(0, code.length() - 1).strip();
+    }
+
+    private static final java.util.regex.Pattern ORACLE_PLSQL = java.util.regex.Pattern.compile(
+            "(?is)\\s*(?:BEGIN\\b|DECLARE\\b|CREATE\\s+(?:OR\\s+REPLACE\\s+)?"
+                    + "(?:(?:NON)?EDITIONABLE\\s+)?(?:FUNCTION|PROCEDURE|TRIGGER|PACKAGE|TYPE)\\b)");
 
     /** Engines that accept {@code CREATE INDEX IF NOT EXISTS}. */
     public boolean supportsCreateIndexIfNotExists() {

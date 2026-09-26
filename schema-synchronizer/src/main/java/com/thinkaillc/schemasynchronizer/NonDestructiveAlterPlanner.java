@@ -4,8 +4,10 @@
 package com.thinkaillc.schemasynchronizer;
 
 import java.util.ArrayList;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 
 /**
  * Plans non-destructive ALTER COLUMN statements. Destructive / unsafe changes
@@ -15,11 +17,25 @@ public final class NonDestructiveAlterPlanner {
 
     private NonDestructiveAlterPlanner() {}
 
-    public record Plan(List<String> applySql, List<String> pendingSql) {}
+    /** Auto-safe operations in {@link Plan#applySql()}, for dialect rewrites that must not parse SQL text. */
+    public enum Op { WIDEN_TYPE, SET_DEFAULT, DROP_DEFAULT, DROP_NOT_NULL }
+
+    public record Plan(List<String> applySql, List<String> pendingSql, Set<Op> applyOps) {
+        public Plan {
+            applySql = List.copyOf(applySql);
+            pendingSql = List.copyOf(pendingSql);
+            applyOps = applyOps.isEmpty() ? Set.of() : Set.copyOf(EnumSet.copyOf(applyOps));
+        }
+
+        public Plan(List<String> applySql, List<String> pendingSql) {
+            this(applySql, pendingSql, Set.of());
+        }
+    }
 
     public static Plan plan(String table, String column, ColumnSpec target, LiveColumn live) {
         List<String> apply = new ArrayList<>();
         List<String> pending = new ArrayList<>();
+        Set<Op> ops = EnumSet.noneOf(Op.class);
         String t = quoteIdent(table);
         String c = quoteIdent(column);
 
@@ -30,9 +46,11 @@ public final class NonDestructiveAlterPlanner {
                 targetType, target.length(), target.scale());
         switch (typeChange) {
             case SAME -> { /* no-op */ }
-            case WIDEN -> apply.add(
-                    "ALTER TABLE " + t + " ALTER COLUMN " + c + " TYPE "
-                            + formatType(targetType, target.length(), target.scale()));
+            case WIDEN -> {
+                apply.add("ALTER TABLE " + t + " ALTER COLUMN " + c + " TYPE "
+                        + formatType(targetType, target.length(), target.scale()));
+                ops.add(Op.WIDEN_TYPE);
+            }
             case NARROW, INCOMPATIBLE -> pending.add(
                     "ALTER TABLE " + t + " ALTER COLUMN " + c + " TYPE "
                             + formatType(targetType, target.length(), target.scale())
@@ -44,20 +62,23 @@ public final class NonDestructiveAlterPlanner {
         if (!Objects.equals(liveDef, targetDef)) {
             if (targetDef == null) {
                 apply.add("ALTER TABLE " + t + " ALTER COLUMN " + c + " DROP DEFAULT");
+                ops.add(Op.DROP_DEFAULT);
             } else {
                 apply.add("ALTER TABLE " + t + " ALTER COLUMN " + c + " SET DEFAULT " + target.defaultExpr().trim());
+                ops.add(Op.SET_DEFAULT);
             }
         }
 
         if (live.notNull() && !target.notNull()) {
             apply.add("ALTER TABLE " + t + " ALTER COLUMN " + c + " DROP NOT NULL");
+            ops.add(Op.DROP_NOT_NULL);
         } else if (!live.notNull() && target.notNull()) {
             pending.add(
                     "ALTER TABLE " + t + " ALTER COLUMN " + c
                             + " SET NOT NULL; -- pending: may fail if NULLs exist; backfill first");
         }
 
-        return new Plan(List.copyOf(apply), List.copyOf(pending));
+        return new Plan(apply, pending, ops);
     }
 
     enum TypeChange { SAME, WIDEN, NARROW, INCOMPATIBLE }
@@ -66,7 +87,11 @@ public final class NonDestructiveAlterPlanner {
             String liveType, Integer liveLen, Integer liveScale,
             String targetType, Integer targetLen, Integer targetScale) {
         if (liveType.equals(targetType)) {
-            if ("VARCHAR".equals(liveType) || "CHAR".equals(liveType) || "VARBINARY".equals(liveType)) {
+            if ("BINARY".equals(liveType)) {
+                // Resizing fixed-length binary re-pads every stored value.
+                return java.util.Objects.equals(liveLen, targetLen) ? TypeChange.SAME : TypeChange.INCOMPATIBLE;
+            }
+            if (ColumnDefinitionParser.hasLength(liveType)) {
                 int liveL = ColumnDefinitionParser.effectiveLength(liveLen);
                 int targetL = ColumnDefinitionParser.effectiveLength(targetLen);
                 if (targetL > liveL) return TypeChange.WIDEN;
@@ -92,7 +117,8 @@ public final class NonDestructiveAlterPlanner {
             }
             return TypeChange.SAME;
         }
-        if ("CHAR".equals(liveType) && "VARCHAR".equals(targetType)) {
+        if (("CHAR".equals(liveType) && "VARCHAR".equals(targetType))
+                || ("NCHAR".equals(liveType) && "NVARCHAR".equals(targetType))) {
             int liveL = ColumnDefinitionParser.effectiveLength(liveLen);
             int targetL = ColumnDefinitionParser.effectiveLength(targetLen);
             return targetL >= liveL ? TypeChange.WIDEN : TypeChange.NARROW;
@@ -128,11 +154,9 @@ public final class NonDestructiveAlterPlanner {
         if ("VECTOR".equals(baseType) && length != null && length > 0) {
             return "VECTOR(" + length + ")";
         }
-        if (("VARCHAR".equals(baseType) || "CHAR".equals(baseType) || "VARBINARY".equals(baseType))
-                && length != null) {
-            // CHAR(MAX) is invalid on SQL Server; only VARCHAR/VARBINARY use (MAX).
-            if (length == ColumnDefinitionParser.MAX_LENGTH
-                    && ("VARCHAR".equals(baseType) || "VARBINARY".equals(baseType))) {
+        if (ColumnDefinitionParser.hasLength(baseType) && length != null) {
+            // CHAR(MAX) is invalid on SQL Server; only variable-length types use (MAX).
+            if (length == ColumnDefinitionParser.MAX_LENGTH && ColumnDefinitionParser.isVariableLength(baseType)) {
                 return baseType + "(MAX)";
             }
             if (length > 0 && length < 10_000) {

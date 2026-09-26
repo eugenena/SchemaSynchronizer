@@ -12,6 +12,30 @@ import static org.assertj.core.api.Assertions.assertThat;
 class DialectSupportTest {
 
     @Test
+    void releaseEachAttemptsEveryPartAndSuppressesLaterFailures() {
+        java.util.List<String> attempted = new java.util.ArrayList<>();
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> DialectSupport.releaseEach("a:b:c", part -> {
+                    attempted.add(part);
+                    if (!"b".equals(part)) {
+                        throw new SQLException("release " + part);
+                    }
+                }))
+                .isInstanceOf(SQLException.class)
+                .hasMessage("release a")
+                .satisfies(error -> assertThat(error.getSuppressed()).hasSize(1));
+        assertThat(attempted).containsExactly("a", "b", "c");
+    }
+
+    @Test
+    void releaseEachSkipsPartsNotOwnedByThisRun() throws SQLException {
+        java.util.List<String> attempted = new java.util.ArrayList<>();
+        DialectSupport.releaseEach(":123", attempted::add);
+        DialectSupport.releaseEach("456:", attempted::add);
+        DialectSupport.releaseEach(":", attempted::add);
+        assertThat(attempted).containsExactly("123", "456");
+    }
+
+    @Test
     void mysqlAppliedByMigrationDoesNotUseIfNotExists() {
         String ddl = DialectSupport.addAppliedByColumnDdl(DatabaseDialect.MYSQL, "schema_synchronizer_history");
         assertThat(ddl).contains("ADD COLUMN applied_by");

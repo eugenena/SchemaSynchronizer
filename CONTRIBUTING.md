@@ -23,8 +23,11 @@ cd SchemaSynchronizer
 mvn test
 ```
 
-Run integration tests against the databases affected by a change. Commands and
-properties are documented in [README.md](README.md#testing-and-development).
+Run integration tests against the databases affected by a change. Changes to shared
+code (planner, type normalization, snapshot writer, change-set guardrails, executor)
+affect every dialect: run the integration suite against all five engines and confirm
+no integration test was skipped. Commands and properties are documented in
+[README.md](README.md#testing-and-development).
 
 ## Pull requests
 
@@ -39,6 +42,15 @@ properties are documented in [README.md](README.md#testing-and-development).
 - Code that compares schema, catalog, or object names must follow the dialect's
   identifier folding (`ChangeSetSchemaScope.canonical`), never `equalsIgnoreCase` or
   `toLowerCase` on both sides; test mixed-case configured names per dialect.
+- Type normalization may merge two type names only when every engine stores them
+  identically (for example `INT`/`INTEGER`). Keep lossy pairs distinct (`NCHAR`/`CHAR`,
+  `BINARY`/`VARBINARY`) and send conversions between them to pending.
+- A column-change path must pass the strict round trip: a second sync with
+  `failOnPending=true` reports nothing, and a snapshot replayed into an empty schema
+  reports nothing.
+- Change-set allowlist rules must inspect the whole statement, including trailing
+  top-level clauses and routine bodies, not only the leading keyword; add the bypass
+  and its legitimate neighbour to `GuardrailBypassTest`.
 - Do not edit already released change-set examples in ways that encourage checksum
   mutation.
 

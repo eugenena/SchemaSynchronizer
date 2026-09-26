@@ -27,6 +27,7 @@ class SchemaSynchronizerMySqlIntegrationTest {
         try (Connection connection = connection(); var statement = connection.createStatement()) {
             statement.execute("DROP TABLE IF EXISTS mysql_items");
             statement.execute("DROP TABLE IF EXISTS mysql_flag");
+            statement.execute("DROP TABLE IF EXISTS mysql_strict");
             statement.execute("DROP TABLE IF EXISTS schema_synchronizer_history");
         }
     }
@@ -74,6 +75,48 @@ class SchemaSynchronizerMySqlIntegrationTest {
         }
     }
 
+    @Test
+    void strictResyncAndSnapshotReplayHaveNoPendingDrift(@TempDir Path tempDir) throws Exception {
+        String create = "CREATE TABLE IF NOT EXISTS mysql_strict (id BIGINT NOT NULL AUTO_INCREMENT, "
+                + "code INT NOT NULL, label VARCHAR(40) NOT NULL DEFAULT 'new', qty INT DEFAULT 0, "
+                + "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (id))";
+        SchemaDefinition initial = new SchemaDefinition(2, "mysql", Map.of("mysql_strict",
+                new SchemaDefinition.TableDef(create, List.of(
+                        new SchemaDefinition.ColumnDef("id", "BIGINT NOT NULL AUTO_INCREMENT"),
+                        new SchemaDefinition.ColumnDef("code", "INT NOT NULL"),
+                        new SchemaDefinition.ColumnDef("label", "VARCHAR(40) NOT NULL DEFAULT 'new'"),
+                        new SchemaDefinition.ColumnDef("qty", "INT DEFAULT 0"),
+                        new SchemaDefinition.ColumnDef("created_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")),
+                        List.of("CREATE INDEX idx_mysql_strict_label ON mysql_strict (label, code DESC)"))),
+                List.of());
+
+        try (Connection connection = connection()) {
+            assertThat(synchronizer(true).synchronizeWithResult(connection, initial).tablesCreated()).isEqualTo(1);
+        }
+        try (Connection connection = connection()) {
+            SchemaSynchronizationResult strict = synchronizer(true).synchronizeWithResult(connection, initial);
+            assertThat(strict.pendingSql()).isEmpty();
+            assertThat(strict.changed()).isFalse();
+        }
+
+        Path snapshot = tempDir.resolve("schema-definition.json");
+        try (Connection connection = connection()) {
+            SchemaSnapshotWriter.writeSnapshot(connection, catalog(), snapshot);
+        }
+        SchemaDefinition serialized = new ObjectMapper().readValue(snapshot.toFile(), SchemaDefinition.class);
+        try (Connection connection = connection(); var statement = connection.createStatement()) {
+            statement.execute("DROP TABLE mysql_strict");
+        }
+        try (Connection connection = connection()) {
+            assertThat(synchronizer(true).synchronizeWithResult(connection, serialized).tablesCreated()).isEqualTo(1);
+        }
+        try (Connection connection = connection()) {
+            SchemaSynchronizationResult replayed = synchronizer(true).synchronizeWithResult(connection, serialized);
+            assertThat(replayed.pendingSql()).isEmpty();
+            assertThat(replayed.changed()).isFalse();
+        }
+    }
+
     private SchemaDefinition definition(List<SchemaDefinition.ColumnDef> columns) {
         return new SchemaDefinition(2, "mysql", Map.of("mysql_items",
                 new SchemaDefinition.TableDef(
@@ -114,10 +157,14 @@ class SchemaSynchronizerMySqlIntegrationTest {
     }
 
     private SchemaSynchronizer synchronizer() throws Exception {
+        return synchronizer(false);
+    }
+
+    private SchemaSynchronizer synchronizer(boolean failOnPending) throws Exception {
         String catalog = catalog();
         return new SchemaSynchronizer(new ObjectMapper(), null, "",
                 new SchemaSynchronizerOptions(catalog, "schema_synchronizer_history", 7_249_031_147L,
-                        false, false, true));
+                        false, failOnPending, true));
     }
 
     private String catalog() throws Exception {
