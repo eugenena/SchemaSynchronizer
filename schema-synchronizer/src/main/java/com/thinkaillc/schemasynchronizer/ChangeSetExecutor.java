@@ -83,7 +83,7 @@ final class ChangeSetExecutor {
             Instant started = Instant.now();
             int skippedDuplicates = 0;
             for (String sql : change.statements()) {
-                if (executeAllowingAlreadyExists(conn, sql, change.id())) {
+                if (executeAllowingAlreadyExists(conn, dialect.executableSql(sql), change.id(), dialect)) {
                     skippedDuplicates++;
                 }
             }
@@ -132,12 +132,12 @@ final class ChangeSetExecutor {
                 throw new IllegalArgumentException("schema change has no statements: " + change.id());
             }
             change.statements().forEach(statement -> {
-                NonDestructiveSqlPolicy.requireSafe(statement);
+                NonDestructiveSqlPolicy.requireSafe(statement, dialect);
                 ChangeSetSchemaScope.requireScoped(statement, options.schema(), dialect);
             });
             if (change.verificationSql() != null) {
-                NonDestructiveSqlPolicy.requireReadOnlyVerification(change.verificationSql());
-                ChangeSetSchemaScope.requireScoped(change.verificationSql(), options.schema(), dialect);
+                NonDestructiveSqlPolicy.requireReadOnlyVerification(change.verificationSql(), dialect);
+                ChangeSetSchemaScope.requireNoSessionNamespaceChange(change.verificationSql(), dialect);
             }
         }
         return List.copyOf(changes);
@@ -283,19 +283,17 @@ final class ChangeSetExecutor {
      * <p>PostgreSQL marks the whole transaction aborted after a failed statement, so
      * each attempt uses a savepoint when auto-commit is off.
      */
-    private boolean executeAllowingAlreadyExists(Connection conn, String sql, String changeId)
-            throws SQLException {
+    private boolean executeAllowingAlreadyExists(Connection conn, String sql, String changeId,
+                                                 DatabaseDialect dialect) throws SQLException {
         Savepoint savepoint = null;
-        boolean usedSavepoint = !conn.getAutoCommit();
+        // Implicit-commit DDL destroys savepoints (MySQL error 1305; ojdbc cannot release them),
+        // and those engines do not abort the transaction on a failed statement.
+        boolean usedSavepoint = !conn.getAutoCommit() && !dialect.ddlMayCommitImplicitly();
         try {
             if (usedSavepoint) {
                 savepoint = conn.setSavepoint("schema_sync_stmt");
             }
             execute(conn, sql);
-            if (usedSavepoint) {
-                conn.releaseSavepoint(savepoint);
-            }
-            return false;
         } catch (SQLException exception) {
             if (usedSavepoint && savepoint != null) {
                 try {
@@ -311,6 +309,9 @@ final class ChangeSetExecutor {
             }
             throw exception;
         }
+        // Outside the try: a release failure must not roll back a statement that succeeded.
+        DialectSupport.releaseSavepoint(conn, dialect, savepoint);
+        return false;
     }
 
     private static String summarize(String sql) {

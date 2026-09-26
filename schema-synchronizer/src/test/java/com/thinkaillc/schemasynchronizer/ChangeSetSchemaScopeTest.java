@@ -155,11 +155,11 @@ class ChangeSetSchemaScopeTest {
                         + "'BEGIN PERFORM 1 FROM other.t; END'", "public"))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("other");
-        assertThatThrownBy(() -> pg(
+        assertThatThrownBy(() -> NonDestructiveSqlPolicy.requireSafe(
                 "CREATE FUNCTION public.f() RETURNS void LANGUAGE plpgsql AS "
-                        + "'BEGIN EXECUTE ''GRANT USAGE ON SCHEMA other TO u''; END'", "public"))
+                        + "'BEGIN EXECUTE ''GRANT USAGE ON SCHEMA other TO u''; END'"))
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("other");
+                .hasMessageContaining("destructive");
     }
 
     @Test

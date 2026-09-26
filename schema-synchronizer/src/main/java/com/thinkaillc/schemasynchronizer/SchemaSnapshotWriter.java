@@ -133,6 +133,8 @@ public class SchemaSnapshotWriter {
                 List<Map<String, String>> columns = new ArrayList<>();
                 List<String> pkCols = new ArrayList<>();
                 List<Map<String, Object>> pendingCols = new ArrayList<>();
+                Set<String> generatedDefaults = dialect == DatabaseDialect.MYSQL
+                        ? mysqlGeneratedDefaultColumns(conn, tableName) : Set.of();
 
                 try (ResultSet cols = meta.getColumns(catalog, schemaPattern, metadataTable, "%")) {
                     while (cols.next()) {
@@ -148,6 +150,22 @@ public class SchemaSnapshotWriter {
                             colDefault = null;
                         }
                         boolean autoInc = "YES".equalsIgnoreCase(cols.getString("IS_AUTOINCREMENT"));
+                        if (dialect == DatabaseDialect.SQLSERVER && typeName.endsWith(" IDENTITY")) {
+                            typeName = typeName.substring(0, typeName.length() - " IDENTITY".length()).trim();
+                            autoInc = true;
+                        }
+                        if (colDefault != null) {
+                            colDefault = colDefault.trim();
+                        }
+                        if (dialect == DatabaseDialect.MYSQL) {
+                            colDefault = mysqlLiteralDefault(colDefault, typeName,
+                                    generatedDefaults.contains(colName));
+                        }
+                        if (dialect == DatabaseDialect.ORACLE && colDefault != null
+                                && colDefault.toUpperCase(Locale.ROOT).contains("ISEQ$$")) {
+                            autoInc = true;
+                            colDefault = null;
+                        }
 
                         if (dialect == DatabaseDialect.POSTGRESQL && "VECTOR".equals(typeName)) {
                             size = readVectorDimension(conn, schema, tableName, colName);
@@ -301,11 +319,12 @@ public class SchemaSnapshotWriter {
         }
         skipIndexes.addAll(uniqueConstraintIndexNames(meta.getConnection(), dialect, catalog, schemaPattern,
                 metadataTable));
-        skipIndexes.addAll(complexSqlServerIndexNames(meta.getConnection(), dialect, catalog, schemaPattern,
+        skipIndexes.addAll(complexIndexNames(meta.getConnection(), dialect, catalog, schemaPattern,
                 metadataTable));
         record IndexParts(boolean unique, SortedMap<Short, String> columns) {}
         Map<String, IndexParts> byName = new TreeMap<>();
-        try (ResultSet rows = meta.getIndexInfo(catalog, schemaPattern, metadataTable, false, false)) {
+        // approximate=true: ojdbc otherwise runs ANALYZE TABLE (needs privileges and rewrites optimizer stats).
+        try (ResultSet rows = meta.getIndexInfo(catalog, schemaPattern, metadataTable, false, true)) {
             while (rows.next()) {
                 String name = rows.getString("INDEX_NAME");
                 short type = rows.getShort("TYPE");
@@ -376,13 +395,59 @@ public class SchemaSnapshotWriter {
             }
             return names;
         }
-        String sql = "SELECT constraint_name FROM all_constraints "
-                + "WHERE constraint_type = 'U' AND table_name = ? AND owner = ?";
+        // The backing index may be named differently from the constraint (USING INDEX / pre-existing index).
+        String sql = "SELECT constraint_name, index_name FROM all_constraints "
+                + "WHERE ((constraint_type = 'U') OR (constraint_type = 'P' AND index_name IS NOT NULL)) "
+                + "AND table_name = ? AND owner = ?";
         try (var statement = conn.prepareStatement(sql)) {
             statement.setString(1, tableName.toUpperCase(Locale.ROOT));
             statement.setString(2, schemaPattern == null
                     ? tableName.toUpperCase(Locale.ROOT)
                     : schemaPattern.toUpperCase(Locale.ROOT));
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    for (int column = 1; column <= 2; column++) {
+                        String name = rows.getString(column);
+                        if (name != null) {
+                            names.add(name.toLowerCase(Locale.ROOT));
+                        }
+                    }
+                }
+            }
+        }
+        return names;
+    }
+
+    /**
+     * Indexes that {@link DatabaseMetaData#getIndexInfo} cannot reconstruct as a plain column-list
+     * CREATE INDEX: SQL Server filtered, INCLUDE, clustered (non-PK), columnstore, XML, spatial;
+     * Oracle function-based (including DESC), bitmap, domain. Omit them so serialize/sync does not
+     * invent incomplete DDL.
+     */
+    static Set<String> complexIndexNames(Connection conn, DatabaseDialect dialect, String catalog,
+                                         String schemaPattern, String tableName) throws SQLException {
+        if (conn == null || (dialect != DatabaseDialect.SQLSERVER && dialect != DatabaseDialect.ORACLE)) {
+            return Set.of();
+        }
+        String sql = dialect == DatabaseDialect.SQLSERVER
+                ? "SELECT i.name FROM sys.indexes i "
+                        + "INNER JOIN sys.tables t ON t.object_id = i.object_id "
+                        + "INNER JOIN sys.schemas s ON s.schema_id = t.schema_id "
+                        + "WHERE t.name = ? AND s.name = ? AND i.name IS NOT NULL AND i.is_primary_key = 0 "
+                        + "AND (i.type <> 2 OR i.has_filter = 1 OR EXISTS ("
+                        + "SELECT 1 FROM sys.index_columns ic "
+                        + "WHERE ic.object_id = i.object_id AND ic.index_id = i.index_id "
+                        + "AND ic.is_included_column = 1))"
+                : "SELECT index_name FROM all_indexes "
+                        + "WHERE table_name = ? AND table_owner = ? AND index_type <> 'NORMAL'";
+        String schema = dialect == DatabaseDialect.SQLSERVER
+                ? (schemaPattern == null ? "dbo" : schemaPattern)
+                : (schemaPattern == null ? tableName : schemaPattern).toUpperCase(Locale.ROOT);
+        String table = dialect == DatabaseDialect.ORACLE ? tableName.toUpperCase(Locale.ROOT) : tableName;
+        Set<String> names = new HashSet<>();
+        try (var statement = conn.prepareStatement(sql)) {
+            statement.setString(1, table);
+            statement.setString(2, schema);
             try (ResultSet rows = statement.executeQuery()) {
                 while (rows.next()) {
                     String name = rows.getString(1);
@@ -395,37 +460,39 @@ public class SchemaSnapshotWriter {
         return names;
     }
 
-    /**
-     * SQL Server indexes with FILTER predicates or INCLUDE columns cannot be reconstructed from
-     * {@link DatabaseMetaData#getIndexInfo}; omit them so serialize/sync does not invent incomplete DDL.
-     */
-    static Set<String> complexSqlServerIndexNames(Connection conn, DatabaseDialect dialect, String catalog,
-                                                  String schemaPattern, String tableName) throws SQLException {
-        if (conn == null || dialect != DatabaseDialect.SQLSERVER) {
-            return Set.of();
-        }
+    private static final Set<String> MYSQL_NUMERIC_TYPES = Set.of("TINYINT", "SMALLINT", "MEDIUMINT", "INT",
+            "INTEGER", "BIGINT", "DECIMAL", "NUMERIC", "FLOAT", "DOUBLE", "REAL", "BIT", "BOOLEAN", "BOOL", "YEAR");
+
+    /** MySQL columns whose default is an expression (EXTRA = DEFAULT_GENERATED), not a literal. */
+    static Set<String> mysqlGeneratedDefaultColumns(Connection conn, String tableName) throws SQLException {
         Set<String> names = new HashSet<>();
-        String sql = "SELECT i.name FROM sys.indexes i "
-                + "INNER JOIN sys.tables t ON t.object_id = i.object_id "
-                + "INNER JOIN sys.schemas s ON s.schema_id = t.schema_id "
-                + "WHERE t.name = ? AND s.name = ? AND i.name IS NOT NULL "
-                + "AND (i.has_filter = 1 OR EXISTS ("
-                + "SELECT 1 FROM sys.index_columns ic "
-                + "WHERE ic.object_id = i.object_id AND ic.index_id = i.index_id "
-                + "AND ic.is_included_column = 1))";
-        try (var statement = conn.prepareStatement(sql)) {
+        try (var statement = conn.prepareStatement("SELECT column_name FROM information_schema.columns "
+                + "WHERE table_schema = DATABASE() AND table_name = ? AND extra LIKE '%DEFAULT_GENERATED%'")) {
             statement.setString(1, tableName);
-            statement.setString(2, schemaPattern == null ? "dbo" : schemaPattern);
             try (ResultSet rows = statement.executeQuery()) {
                 while (rows.next()) {
-                    String name = rows.getString(1);
-                    if (name != null) {
-                        names.add(name.toLowerCase(Locale.ROOT));
-                    }
+                    names.add(rows.getString(1).toLowerCase(Locale.ROOT));
                 }
             }
         }
         return names;
+    }
+
+    /**
+     * MySQL reports literal defaults unquoted ({@code new}, {@code 2020-01-01}); quote non-numeric
+     * literals so they compare with declarations and replay as valid SQL.
+     */
+    static String mysqlLiteralDefault(String columnDefault, String typeName, boolean generated) {
+        if (columnDefault == null || generated || columnDefault.startsWith("'")
+                || columnDefault.matches("(?i)CURRENT_TIMESTAMP(?:\\(\\d*\\))?")) {
+            return columnDefault;
+        }
+        String baseType = typeName.toUpperCase(Locale.ROOT).replaceAll("\\s+UNSIGNED.*$", "")
+                .replaceAll("\\(.*$", "").trim();
+        if (MYSQL_NUMERIC_TYPES.contains(baseType)) {
+            return columnDefault;
+        }
+        return "'" + columnDefault.replace("\\", "\\\\").replace("'", "''") + "'";
     }
 
     static String portablePostgresIndex(String indexDefinition) {
@@ -453,8 +520,9 @@ public class SchemaSnapshotWriter {
                 if (column == null) {
                     throw new SQLException(dialect.id() + " expression index cannot be serialized safely: " + name);
                 }
-                name = SqlIdentifiers.requireIdentifier(name.toLowerCase(Locale.ROOT), "index");
-                column = SqlIdentifiers.requireIdentifier(column.toLowerCase(Locale.ROOT), "index column");
+                int max = dialect.maxIdentifierLength();
+                name = SqlIdentifiers.requireIdentifier(name.toLowerCase(Locale.ROOT), "index", max);
+                column = SqlIdentifiers.requireIdentifier(column.toLowerCase(Locale.ROOT), "index column", max);
                 boolean unique = !rows.getBoolean("non_unique");
                 short position = rows.getShort("seq_in_index");
                 int prefixLength = rows.getInt("sub_part");
@@ -502,12 +570,8 @@ public class SchemaSnapshotWriter {
             return PkIdentity.createType(typeName, nullable, columnDefault, autoIncrement, primaryKey);
         }
         String base = switch (typeName) {
-            case "VARCHAR" -> size > 0 && size < 10_000 ? "VARCHAR(" + size + ")" : "TEXT";
             case "BIGSERIAL", "SERIAL" -> typeName;
-            case "INT2" -> "SMALLINT";
-            case "VECTOR" -> "vector(" + size + ")";
-            case "NUMERIC", "DECIMAL" -> numericType(size, scale);
-            default -> typeName;
+            default -> columnType(typeName, size, scale, dialect);
         };
         base += nullable;
         if (columnDefault != null && !columnDefault.contains("nextval(")) {
@@ -521,27 +585,19 @@ public class SchemaSnapshotWriter {
      * clause when present. Sequence-backed defaults (nextval) are omitted — those columns
      * are PKs and are never added via ALTER TABLE.
      */
-    private static String buildDefinition(String typeName, int size, Integer scale, String nullable,
-                                          String columnDefault, boolean autoIncrement, DatabaseDialect dialect) {
-        String base = switch (typeName) {
-            case "VARCHAR", "CHARACTER VARYING", "VARCHAR2" ->
-                    portableVarchar(size, nullable, dialect, false);
-            case "NVARCHAR", "NVARCHAR2" ->
-                    portableVarchar(size, nullable, dialect, true);
-            case "VARBINARY", "BINARY" ->
-                    portableVarbinary(size, nullable, dialect);
-            case "TEXT", "JSONB", "JSON", "BYTEA",
-                 "TIMESTAMPTZ", "TIMESTAMP WITH TIME ZONE",
-                 "TIMESTAMP WITH LOCAL TIME ZONE",
-                 "TIMESTAMP", "DATE", "BOOLEAN", "BIGINT",
-                 "INTEGER", "INT", "INT4", "INT8", "BIGSERIAL", "SERIAL",
-                 "FLOAT4", "FLOAT8", "DOUBLE PRECISION" ->
-                    typeName + nullable;
-            case "NUMERIC", "DECIMAL", "NUMBER" -> numericType(size, scale) + nullable;
-            case "INT2" -> "SMALLINT" + nullable;
-            case "VECTOR" -> "vector(" + size + ")" + nullable;
-            default -> typeName + nullable;
-        };
+    static String buildDefinition(String typeName, int size, Integer scale, String nullable,
+                                  String columnDefault, boolean autoIncrement, DatabaseDialect dialect) {
+        String type = columnType(typeName, size, scale, dialect);
+        if (dialect == DatabaseDialect.ORACLE) {
+            // Oracle grammar: type [DEFAULT expr | GENERATED … AS IDENTITY] [NOT NULL].
+            if (autoIncrement) {
+                type += " GENERATED BY DEFAULT AS IDENTITY";
+            } else if (columnDefault != null) {
+                type += " DEFAULT " + columnDefault;
+            }
+            return type + nullable;
+        }
+        String base = type + nullable;
         if (columnDefault != null && !columnDefault.contains("nextval(")) {
             base += " DEFAULT " + columnDefault;
         }
@@ -550,11 +606,40 @@ public class SchemaSnapshotWriter {
                 base += " AUTO_INCREMENT";
             } else if (dialect == DatabaseDialect.SQLSERVER) {
                 base += " IDENTITY(1,1)";
-            } else if (dialect == DatabaseDialect.ORACLE) {
-                base += " GENERATED BY DEFAULT AS IDENTITY";
             }
         }
         return base;
+    }
+
+    static String columnType(String typeName, int size, Integer scale, DatabaseDialect dialect) {
+        return switch (typeName) {
+            case "VARCHAR", "CHARACTER VARYING", "VARCHAR2" -> portableVarchar(size, "", dialect, false);
+            case "NVARCHAR", "NVARCHAR2" -> portableVarchar(size, "", dialect, true);
+            case "VARBINARY" -> portableVarbinary(size, "", dialect);
+            // Fixed-length and Oracle RAW types require their length; without it CHAR means CHAR(1).
+            case "CHAR", "CHARACTER", "BPCHAR" -> sized("CHAR", size);
+            case "NCHAR" -> sized("NCHAR", size);
+            case "BINARY" -> sized("BINARY", size);
+            case "RAW" -> sized("RAW", size);
+            // Oracle NUMBER without precision is unbounded; ANSI NUMERIC there means NUMBER(38,0).
+            case "NUMERIC", "DECIMAL", "NUMBER" -> dialect == DatabaseDialect.ORACLE && size <= 0
+                    ? "NUMBER" : numericType(size, scale);
+            case "INT2" -> "SMALLINT";
+            case "VECTOR" -> "vector(" + size + ")";
+            // Fractional-second precision; SQL Server legacy DATETIME has no precision argument.
+            case "DATETIME2", "DATETIMEOFFSET" -> dialect == DatabaseDialect.SQLSERVER && scale != null
+                    ? typeName + "(" + scale + ")" : typeName;
+            case "TIME" -> (dialect == DatabaseDialect.SQLSERVER && scale != null)
+                    || (dialect.isMySqlFamily() && scale != null && scale > 0)
+                    ? typeName + "(" + scale + ")" : typeName;
+            case "DATETIME", "TIMESTAMP" -> dialect.isMySqlFamily() && scale != null && scale > 0
+                    ? typeName + "(" + scale + ")" : typeName;
+            default -> typeName;
+        };
+    }
+
+    private static String sized(String type, int size) {
+        return size > 0 ? type + "(" + size + ")" : type;
     }
 
     private static String portableVarchar(int size, String nullable, DatabaseDialect dialect, boolean national) {
@@ -562,11 +647,12 @@ public class SchemaSnapshotWriter {
         if (dialect == DatabaseDialect.SQLSERVER && (size <= 0 || size >= 10_000)) {
             return type + "(MAX)" + nullable;
         }
+        // Oracle MAX_STRING_SIZE=EXTENDED allows up to 32767.
         if (dialect == DatabaseDialect.ORACLE && national) {
-            return (size > 0 && size < 10_000 ? "NVARCHAR2(" + size + ")" : "NVARCHAR2(2000)") + nullable;
+            return (size > 0 && size <= 32_767 ? "NVARCHAR2(" + size + ")" : "NVARCHAR2(2000)") + nullable;
         }
         if (dialect == DatabaseDialect.ORACLE && !national) {
-            return (size > 0 && size < 10_000 ? "VARCHAR2(" + size + ")" : "VARCHAR2(4000)") + nullable;
+            return (size > 0 && size <= 32_767 ? "VARCHAR2(" + size + ")" : "VARCHAR2(4000)") + nullable;
         }
         if (size > 0 && size < 10_000) {
             return type + "(" + size + ")" + nullable;

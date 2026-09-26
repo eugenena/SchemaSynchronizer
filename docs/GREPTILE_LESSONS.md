@@ -88,6 +88,45 @@
   closed with an actionable message for exclusion constraints that need an explicit
   ordered change set. Cross-schema replay tests must verify enforcement, not just DDL.
 
+## 2026-09-26 — PR #12 — Oracle/SQL Server correctness and guardrail review rounds
+
+- **Bug (verification scope regression):** Commit d7f0dd6 applied the change-set
+  namespace check to `verificationSql`, so any `alias.column` failed as a foreign schema.
+  The PostgreSQL integration test that caught it had not been run since.
+- **Bug (savepoints):** Change sets released savepoints with `Connection.releaseSavepoint`,
+  which mssql-jdbc and ojdbc do not support and which fails on MySQL after DDL
+  implicitly commits. On SQL Server every successful statement was rolled back and
+  rethrown; on Oracle/MySQL with auto-commit off the history row was never written.
+- **Bug (dialect correctness):** SQL Server `ALTER COLUMN` ran on columns referenced by
+  computed columns, table-level CHECKs, statistics, or filtered-index predicates;
+  `NCHAR`→`CHAR` and `BINARY` resizes were planned as widens (data loss); Oracle unbounded
+  `NUMBER` snapshotted as ANSI `NUMERIC` (= `NUMBER(38,0)`, fractional data truncated on
+  replay); MySQL `MODIFY COLUMN` reset undeclared charset/`ON UPDATE`/comments.
+- **Bug (guardrail):** Oracle `ALTER TABLE … ADD (…) SET UNUSED (…)`, logon/database
+  triggers, `@dblink`, three-part names, catalog write targets, and DDL inside trigger
+  bodies all passed the additive-only allowlist.
+- **Missed because:** Integration tests were only run on the engine being edited, never
+  with `failOnPending=true` on a second sync or by replaying a snapshot into an empty
+  schema. Type normalization folded types for convenience without asking whether the
+  fold hides a lossy conversion. Allowlist checks matched the leading clause of a
+  statement and never looked at trailing top-level clauses. The JDBC savepoint API was
+  assumed to be portable.
+- **Prevention:**
+  - Every dialect-touching change runs the full five-engine suite (180+ tests, zero
+    skipped) before commit; see CONTRIBUTING.
+  - `strictResyncAndSnapshotReplayHaveNoPendingDrift` integration tests (MySQL,
+    SQL Server, Oracle) sync twice with `failOnPending=true` and replay the snapshot
+    into an empty schema; PostgreSQL covers replay in
+    `serializedDefinitionReplaysIntoDifferentSchema`.
+  - `DialectDeclarationContractTest#nationalAndFixedBinaryTypesNeverSilentlyConvert`,
+    `SchemaSynchronizerTest#sqlServerBlockReasonCoversEveryDependencyKind`,
+    `DialectDeclarationContractTest#mysqlModifyColumnIsPendingWhenItWouldResetUndeclaredAttributes`.
+  - `GuardrailBypassTest` holds one counterexample per bypass plus its legitimate
+    neighbour; `SchemaSynchronizerSqlServerIntegrationTest#appliesChangeSetsWithAndWithoutACallerOwnedTransaction`
+    covers savepoints on a live server.
+  - Rule: a type normalization may only merge two types when every engine stores them
+    identically; otherwise keep them distinct and send conversions to pending.
+
 ## 2026-09-23 — PR #10 — document observed normalization behavior
 
 - **Miss:** The schema reference repeated the intended lower-case-only boundary as
