@@ -215,6 +215,11 @@ class SchemaSynchronizerTest {
         assertThat(SchemaSynchronizer.sqlServerColumnPlan(
                 "items", "label", "VARCHAR(100) NOT NULL", widen).applySql())
                 .containsExactly("ALTER TABLE items ALTER COLUMN label VARCHAR(100) NOT NULL");
+        NonDestructiveAlterPlanner.Plan widenWithDefault = SchemaSynchronizer.sqlServerColumnPlan(
+                "items", "label", "VARCHAR(100) NOT NULL DEFAULT 'x'", widen, true);
+        assertThat(widenWithDefault.applySql()).isEmpty();
+        assertThat(widenWithDefault.pendingSql()).isNotEmpty()
+                .anyMatch(sql -> sql.contains("DEFAULT constraint"));
         assertThat(SchemaSynchronizer.oracleColumnPlan(
                 "items", "label", "VARCHAR2(100) NOT NULL", widen).applySql())
                 .containsExactly("ALTER TABLE items MODIFY (label VARCHAR2(100))");

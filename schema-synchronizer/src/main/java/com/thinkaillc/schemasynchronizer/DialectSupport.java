@@ -188,8 +188,13 @@ final class DialectSupport {
                         namespace.toLowerCase(Locale.ROOT), advisoryLockId), 1_073_741_823);
                 int legacyLockId = Math.floorMod(Long.hashCode(advisoryLockId), 1_073_741_823);
                 requestOracleLock(conn, lockId);
-                if (legacyLockId != lockId) {
-                    requestOracleLock(conn, legacyLockId);
+                try {
+                    if (legacyLockId != lockId) {
+                        requestOracleLock(conn, legacyLockId);
+                    }
+                } catch (RuntimeException | SQLException error) {
+                    releaseOracleLockId(conn, lockId);
+                    throw error;
                 }
                 yield Integer.toString(lockId) + ":" + legacyLockId;
             }
@@ -222,18 +227,7 @@ final class DialectSupport {
                     if (part.isBlank()) {
                         continue;
                     }
-                    int lockId = Integer.parseInt(part);
-                    try (var statement = conn.prepareCall("{ ? = call DBMS_LOCK.RELEASE(?) }")) {
-                        statement.registerOutParameter(1, Types.INTEGER);
-                        statement.setInt(2, lockId);
-                        statement.execute();
-                        int status = statement.getInt(1);
-                        // 0 = success, 3 = parameter error ignored when lock already gone, 4 = do not own
-                        if (status != 0 && status != 3 && status != 4) {
-                            throw new SQLException("Could not release oracle schema synchronization lock (status="
-                                    + status + ")");
-                        }
-                    }
+                    releaseOracleLockId(conn, Integer.parseInt(part));
                 }
             }
             case POSTGRESQL -> {
@@ -304,11 +298,14 @@ final class DialectSupport {
         boolean legacy = false;
         try (Statement statement = conn.createStatement()) {
             while (!(primary && legacy)) {
+                // Strict order: never hold the legacy lock without the primary. Two
+                // synchronizers each holding a different half would otherwise deadlock
+                // until the 30s deadline.
                 if (!primary) {
                     primary = tryPostgresLock(statement,
                             "SELECT pg_try_advisory_xact_lock(" + key1 + ", " + key2 + ")");
                 }
-                if (!legacy) {
+                if (primary && !legacy) {
                     legacy = tryPostgresLock(statement,
                             "SELECT pg_try_advisory_xact_lock(" + legacyKey + ")");
                 }
@@ -347,6 +344,20 @@ final class DialectSupport {
             if (status != 0 && status != 4) {
                 throw new IllegalStateException(
                         "Could not acquire oracle schema synchronization lock (status=" + status + ")");
+            }
+        }
+    }
+
+    private static void releaseOracleLockId(Connection conn, int lockId) throws SQLException {
+        try (var statement = conn.prepareCall("{ ? = call DBMS_LOCK.RELEASE(?) }")) {
+            statement.registerOutParameter(1, Types.INTEGER);
+            statement.setInt(2, lockId);
+            statement.execute();
+            int status = statement.getInt(1);
+            // 0 = success, 3 = parameter error ignored when lock already gone, 4 = do not own
+            if (status != 0 && status != 3 && status != 4) {
+                throw new SQLException("Could not release oracle schema synchronization lock (status="
+                        + status + ")");
             }
         }
     }

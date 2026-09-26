@@ -61,13 +61,9 @@ class SchemaSynchronizerMySqlIntegrationTest {
         }
 
         Path snapshot = tempDir.resolve("schema-definition.json");
-        SchemaSnapshotWriter.main(new String[]{
-                System.getProperty("schema.test.mysql.jdbc.url"),
-                System.getProperty("schema.test.mysql.jdbc.user"),
-                System.getProperty("schema.test.mysql.jdbc.password"),
-                catalog(),
-                snapshot.toString()
-        });
+        try (Connection connection = connection()) {
+            SchemaSnapshotWriter.writeSnapshot(connection, catalog(), snapshot);
+        }
         SchemaDefinition serialized = new ObjectMapper().readValue(snapshot.toFile(), SchemaDefinition.class);
         assertThat(serialized.declaredDialect()).isEqualTo(DatabaseDialect.MYSQL);
         assertThat(serialized.tables()).containsKey("mysql_items");
