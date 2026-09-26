@@ -57,6 +57,13 @@ public enum DatabaseDialect {
         return this == POSTGRESQL || this == SQLSERVER;
     }
 
+    /** Unquoted identifier length limit for this dialect. */
+    public int maxIdentifierLength() {
+        return this == POSTGRESQL || isMySqlFamily()
+                ? SqlIdentifiers.DEFAULT_MAX_LENGTH
+                : SqlIdentifiers.EXTENDED_MAX_LENGTH;
+    }
+
     public static DatabaseDialect detect(DatabaseMetaData metadata) throws SQLException {
         String product = metadata.getDatabaseProductName();
         String normalized = product == null ? "" : product.toLowerCase(Locale.ROOT);
@@ -149,9 +156,10 @@ public enum DatabaseDialect {
 
 
     public String qualifyHistoryTable(String configuredNamespace, String historyTable) {
+        int max = maxIdentifierLength();
         if (usesCatalogNamespace()) {
-            return SqlIdentifiers.requireIdentifier(historyTable, "history table");
+            return SqlIdentifiers.requireIdentifier(historyTable, "history table", max);
         }
-        return SqlIdentifiers.qualified(configuredNamespace, historyTable);
+        return SqlIdentifiers.qualified(configuredNamespace, historyTable, max);
     }
 }

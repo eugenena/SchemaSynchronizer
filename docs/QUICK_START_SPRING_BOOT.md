@@ -1,6 +1,6 @@
 # Five-minute Spring Boot quick start
 
-This guide adds SchemaSynchronizer 1.3.0 to an existing Spring Boot application.
+This guide adds SchemaSynchronizer 1.3.1 to an existing Spring Boot application.
 It requires Java 21, a configured JDBC `DataSource`, and PostgreSQL 16+, MariaDB
 10.3+, or MySQL 8.0+.
 
@@ -10,7 +10,7 @@ It requires Java 21, a configured JDBC `DataSource`, and PostgreSQL 16+, MariaDB
 <dependency>
   <groupId>com.thinkaillc</groupId>
   <artifactId>schema-synchronizer</artifactId>
-  <version>1.3.0</version>
+  <version>1.3.1</version>
 </dependency>
 ```
 

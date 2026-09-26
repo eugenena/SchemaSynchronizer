@@ -45,15 +45,23 @@ will keep the pending work visible.
 
 ## Dry run
 
-PostgreSQL can roll back supported DDL selected during a dry run. MariaDB and MySQL
-may commit DDL implicitly, so their dry-run mode cannot promise a side-effect-free
-rehearsal. Use disposable database instances for reliable preflight testing.
+Dry-run plans declarative DDL and unapplied change-set statements without executing them
+and **does not run `verificationSql`** (verification can call admin UDFs). PostgreSQL and
+SQL Server can also roll back supported DDL selected during a dry run when using the
+transactional path. MariaDB, MySQL, and Oracle may commit DDL implicitly on a live apply;
+their dry-run mode still skips statement execution, but use disposable instances for any
+preflight that must touch the database at all.
 
 ## Transactions and locks
 
 When the Java API receives a connection already inside a caller-owned transaction,
 SchemaSynchronizer does not commit it. Changes and the transaction-scoped PostgreSQL
 advisory lock remain active until the caller commits or rolls back.
+
+PostgreSQL uses a two-key advisory lock mixing the configured schema namespace with the
+advisory lock id. MySQL/MariaDB `GET_LOCK` resource names are capped at 64 characters
+(longer names are hashed). Oracle `DBMS_LOCK` uses `release_on_commit=false` so implicit
+DDL commits do not release the lock mid-sync.
 
 ## Recovery
 

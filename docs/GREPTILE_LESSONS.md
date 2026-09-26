@@ -1,5 +1,21 @@
 # Greptile lessons
 
+## 2026-09-26 — 1.3.1 — schema scope and routine-body policy bypasses
+
+- **Bug:** Change-set schema binding only matched bare `ident.ident` after masking
+  double quotes, so `"other"."t"`, `[other].[t]`, and `` `other`.`t` `` escaped.
+  `SELECT set_config('search_path', …)` remained allowed and defeated unqualified
+  binding. Function-body DROP scanning covered dollar quotes but not
+  `AS 'BEGIN DROP … END'`.
+- **Missed because:** Scope was treated as a simple regex on scannable SQL; session
+  mutators and alternate quote forms were not in the contract matrix. Body scan reused
+  `scannableSql`, which blanks single-quoted AS bodies.
+- **Prevention:** Target-position qualified-name matching with quote forms; reject
+  search_path / CURRENT_SCHEMA / USE; extract AS body (dollar or single-quoted) before
+  forbidden-token scan. Contracts in `ChangeSetSchemaScopeTest` and
+  `NonDestructiveSqlPolicyTest`. Publish `needs: [oracle-verify]`; dual-acquire legacy
+  PG/Oracle locks across the 1.3.0→1.3.1 lock-key change.
+
 ## 2026-09-26 — 1.2.0 — fail-closed uniqueness when skipping already-exists DDL
 
 - **Bug risk:** Message-only `"already exists"` matching could treat PostgreSQL
