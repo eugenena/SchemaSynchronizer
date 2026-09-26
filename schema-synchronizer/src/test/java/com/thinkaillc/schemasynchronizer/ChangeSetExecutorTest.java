@@ -62,7 +62,8 @@ class ChangeSetExecutorTest {
         SchemaDefinition.ChangeSet change = new SchemaDefinition.ChangeSet(
                 "cross", "bad", List.of("UPDATE other.items SET note = 'x'"));
 
-        assertThatThrownBy(() -> new ChangeSetExecutor().validate(List.of(change), mariaOptions()))
+        assertThatThrownBy(() -> new ChangeSetExecutor().validate(List.of(change), mariaOptions(),
+                DatabaseDialect.MARIADB))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("other");
     }

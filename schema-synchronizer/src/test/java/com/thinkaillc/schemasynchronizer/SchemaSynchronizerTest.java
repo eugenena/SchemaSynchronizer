@@ -258,6 +258,33 @@ class SchemaSynchronizerTest {
                 .isEqualTo("DROP INDEX IF EXISTS idx;");
         assertThat(SchemaSynchronizer.dropIndexSql(DatabaseDialect.MYSQL, "idx", "items"))
                 .isEqualTo("DROP INDEX idx ON items;");
+        assertThat(SchemaSynchronizer.dropIndexSql(DatabaseDialect.MARIADB, "idx", "items"))
+                .isEqualTo("DROP INDEX idx ON items;");
+        assertThat(SchemaSynchronizer.dropIndexSql(DatabaseDialect.ORACLE, "idx", "items"))
+                .isEqualTo("DROP INDEX idx;");
+        for (DatabaseDialect dialect : DatabaseDialect.values()) {
+            if (dialect != DatabaseDialect.POSTGRESQL) {
+                assertThat(SchemaSynchronizer.dropIndexSql(dialect, "idx", "items"))
+                        .as("%s supported versions reject DROP INDEX IF EXISTS", dialect)
+                        .doesNotContainIgnoringCase("IF EXISTS");
+            }
+        }
+    }
+
+    @Test
+    void pendingIndexRecreateSqlIsExecutableOnEveryDialect() {
+        String declared = "CREATE INDEX IF NOT EXISTS idx_items_note ON items (note)";
+        for (DatabaseDialect dialect : DatabaseDialect.values()) {
+            String sql = SchemaSynchronizer.dialectCompatibleIndexSql(declared, dialect);
+            if (dialect.supportsCreateIndexIfNotExists()) {
+                assertThat(sql).isEqualTo(declared);
+            } else {
+                assertThat(sql).as("%s", dialect)
+                        .isEqualTo("CREATE INDEX idx_items_note ON items (note)");
+            }
+        }
+        assertThat(DatabaseDialect.ORACLE.supportsCreateIndexIfNotExists()).isFalse();
+        assertThat(DatabaseDialect.SQLSERVER.supportsCreateIndexIfNotExists()).isFalse();
     }
 
     @Test

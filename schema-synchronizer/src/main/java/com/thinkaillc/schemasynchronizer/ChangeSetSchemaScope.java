@@ -44,8 +44,8 @@ final class ChangeSetSchemaScope {
                     + "|(?:\"([^\"]+)\"|\\[([^\\]]+)\\]|`([^`]+)`|([A-Za-z_][A-Za-z0-9_]*))"
                     + "\\s*\\.\\s*\\*)");
 
-    private static final Pattern GRANT_DATABASE_COLON = Pattern.compile(
-            "(?i)\\bON\\s+DATABASE\\s*::\\s*" + IDENT);
+    /** {@code ON DATABASE x} (PostgreSQL) and {@code ON DATABASE::x} (SQL Server). */
+    private static final Pattern GRANT_ON_DATABASE = Pattern.compile("(?i)\\bON\\s+DATABASE\\b");
 
     private static final Pattern GRANT_KEYWORD = Pattern.compile("(?i)\\bGRANT\\b");
 
@@ -60,11 +60,17 @@ final class ChangeSetSchemaScope {
     private ChangeSetSchemaScope() {
     }
 
-    static void requireScoped(String sql, String configuredNamespace) {
+    /**
+     * Namespace comparison follows the dialect's identifier folding: PostgreSQL folds
+     * unquoted names to lower case, Oracle to upper case, and quoted names are exact.
+     * MySQL/MariaDB catalog and SQL Server schema case sensitivity depends on server
+     * settings / collation, so those compare exactly (fail closed).
+     */
+    static void requireScoped(String sql, String configuredNamespace, DatabaseDialect dialect) {
         if (sql == null || sql.isBlank()) {
             return;
         }
-        String allowed = configuredNamespace.toLowerCase(Locale.ROOT);
+        Namespace allowed = new Namespace(canonical(configuredNamespace, false, dialect), dialect);
         // Session mutators are checked on comment-stripped SQL so string contents of
         // set_config('search_path', …) remain visible.
         if (SESSION_NAMESPACE.matcher(stripComments(sql)).find()) {
@@ -102,7 +108,24 @@ final class ChangeSetSchemaScope {
         }
     }
 
-    private static void rejectUnsafeGrants(String scannable, String allowed, String configuredNamespace,
+    private record Namespace(String canonical, DatabaseDialect dialect) {
+        boolean matches(String raw, boolean quoted) {
+            return canonical.equals(ChangeSetSchemaScope.canonical(raw, quoted, dialect));
+        }
+    }
+
+    static String canonical(String identifier, boolean quoted, DatabaseDialect dialect) {
+        if (quoted) {
+            return identifier;
+        }
+        return switch (dialect) {
+            case POSTGRESQL -> identifier.toLowerCase(Locale.ROOT);
+            case ORACLE -> identifier.toUpperCase(Locale.ROOT);
+            case MYSQL, MARIADB, SQLSERVER -> identifier;
+        };
+    }
+
+    private static void rejectUnsafeGrants(String scannable, Namespace allowed, String configuredNamespace,
                                            String sql) {
         Matcher star = GRANT_ON_DB_STAR.matcher(scannable);
         while (star.find()) {
@@ -116,24 +139,20 @@ final class ChangeSetSchemaScope {
                                 + summarize(sql));
             }
             String db = optionalCapture(star, 2, 3, 4, 5);
-            if (db == null || !db.toLowerCase(Locale.ROOT).equals(allowed)) {
+            boolean quoted = star.group(5) == null;
+            if (db == null || !allowed.matches(db, quoted)) {
                 throw new IllegalArgumentException(
                         "schema change SQL GRANT targets database '" + (db == null ? "?" : db)
                                 + "' but synchronizer is configured for '" + configuredNamespace
                                 + "': " + summarize(sql));
             }
         }
-        Matcher database = GRANT_DATABASE_COLON.matcher(scannable);
+        Matcher database = GRANT_ON_DATABASE.matcher(scannable);
         while (database.find()) {
-            if (!grantKeywordInCurrentStatement(scannable, database.start())) {
-                continue;
-            }
-            String db = firstNonNull(database, 1, 2, 3, 4).toLowerCase(Locale.ROOT);
-            if (!db.equals(allowed)) {
+            if (grantKeywordInCurrentStatement(scannable, database.start())) {
                 throw new IllegalArgumentException(
-                        "schema change SQL GRANT targets DATABASE::'" + firstNonNull(database, 1, 2, 3, 4)
-                                + "' but synchronizer is configured for '" + configuredNamespace
-                                + "': " + summarize(sql));
+                        "schema change SQL must not GRANT database-level privileges "
+                                + "(exceeds the configured namespace binding): " + summarize(sql));
             }
         }
     }
@@ -144,14 +163,14 @@ final class ChangeSetSchemaScope {
         return GRANT_KEYWORD.matcher(scannable.substring(statementStart, offset)).find();
     }
 
-    private static void rejectForeignSchema(Matcher matcher, String allowed, String configuredNamespace,
+    private static void rejectForeignSchema(Matcher matcher, Namespace allowed, String configuredNamespace,
                                             String sql, String verb) {
         while (matcher.find()) {
-            String schema = firstNonNull(matcher, 1, 2, 3, 4).toLowerCase(Locale.ROOT);
-            if (isSystemCatalog(schema)) {
+            String schema = firstNonNull(matcher, 1, 2, 3, 4);
+            if (isSystemCatalog(schema.toLowerCase(Locale.ROOT))) {
                 continue;
             }
-            if (!schema.equals(allowed)) {
+            if (!allowed.matches(schema, matcher.group(4) == null)) {
                 throw new IllegalArgumentException(
                         "schema change SQL " + verb + " '" + firstNonNull(matcher, 1, 2, 3, 4)
                                 + "' but synchronizer is configured for '" + configuredNamespace

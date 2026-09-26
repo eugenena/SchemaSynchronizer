@@ -30,7 +30,7 @@ final class ChangeSetExecutor {
     Result apply(Connection conn, List<SchemaDefinition.ChangeSet> changes, SchemaSynchronizerOptions options,
                  DatabaseDialect dialect)
             throws Exception {
-        List<SchemaDefinition.ChangeSet> safeChanges = validate(changes, options);
+        List<SchemaDefinition.ChangeSet> safeChanges = validate(changes, options, dialect);
         if (safeChanges.isEmpty()) {
             return new Result(0, List.of());
         }
@@ -109,7 +109,7 @@ final class ChangeSetExecutor {
     }
 
     List<SchemaDefinition.ChangeSet> validate(List<SchemaDefinition.ChangeSet> changes,
-                                              SchemaSynchronizerOptions options) {
+                                              SchemaSynchronizerOptions options, DatabaseDialect dialect) {
         if (changes == null || changes.isEmpty()) {
             return List.of();
         }
@@ -133,11 +133,11 @@ final class ChangeSetExecutor {
             }
             change.statements().forEach(statement -> {
                 NonDestructiveSqlPolicy.requireSafe(statement);
-                ChangeSetSchemaScope.requireScoped(statement, options.schema());
+                ChangeSetSchemaScope.requireScoped(statement, options.schema(), dialect);
             });
             if (change.verificationSql() != null) {
                 NonDestructiveSqlPolicy.requireReadOnlyVerification(change.verificationSql());
-                ChangeSetSchemaScope.requireScoped(change.verificationSql(), options.schema());
+                ChangeSetSchemaScope.requireScoped(change.verificationSql(), options.schema(), dialect);
             }
         }
         return List.copyOf(changes);
