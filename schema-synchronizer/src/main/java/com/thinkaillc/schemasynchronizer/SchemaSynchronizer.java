@@ -733,11 +733,10 @@ public class SchemaSynchronizer {
             String catalog = dialect.metadataCatalog(conn, options.schema());
             String schemaPattern = dialect.metadataSchemaPattern(options.schema());
             String metadataTable = dialect.metadataObjectName(tableName);
-            Set<String> omittedLive = new HashSet<>();
-            omittedLive.addAll(SchemaSnapshotWriter.uniqueConstraintIndexNames(
-                    conn, dialect, catalog, schemaPattern, metadataTable));
-            omittedLive.addAll(SchemaSnapshotWriter.complexSqlServerIndexNames(
-                    conn, dialect, catalog, schemaPattern, metadataTable));
+            Set<String> uniqueConstraintIndexes = SchemaSnapshotWriter.uniqueConstraintIndexNames(
+                    conn, dialect, catalog, schemaPattern, metadataTable);
+            Set<String> complexIndexes = SchemaSnapshotWriter.complexSqlServerIndexNames(
+                    conn, dialect, catalog, schemaPattern, metadataTable);
             for (String sql : SchemaSnapshotWriter.readJdbcIndexes(meta, dialect,
                     catalog, schemaPattern, metadataTable)) {
                 IndexDefinition index = IndexDefinition.parse(sql);
@@ -745,10 +744,14 @@ public class SchemaSynchronizer {
                     throw new IllegalStateException("duplicate live index name: " + index.name());
                 }
             }
-            // Constraint-backed / filter/INCLUDE indexes are omitted from JDBC reconstruction
-            // but still exist live — treat their names as present so we neither CREATE nor DROP.
-            for (String name : omittedLive) {
-                live.putIfAbsent(name, "-- omitted-live-index:" + name);
+            // UNIQUE-constraint indexes exist live but are omitted from JDBC reconstruct —
+            // treat as present so we neither CREATE nor DROP.
+            for (String name : uniqueConstraintIndexes) {
+                live.putIfAbsent(name, "-- omitted-unique-constraint:" + name);
+            }
+            // FILTER / INCLUDE indexes cannot be compared to a simple CREATE INDEX declaration.
+            for (String name : complexIndexes) {
+                live.putIfAbsent(name, "-- omitted-complex-index:" + name);
             }
         }
         Set<String> expected = new HashSet<>();
@@ -761,8 +764,15 @@ public class SchemaSynchronizer {
                     if (applyChanges) {
                         execute(conn, dialectCompatibleIndexSql(sql, dialect));
                     }
-                } else if (liveSql.startsWith("-- omitted-live-index:")) {
-                    // Present via UNIQUE constraint or complex SQL Server index; do not recreate.
+                } else if (liveSql.startsWith("-- omitted-unique-constraint:")) {
+                    // Present via UNIQUE constraint; do not recreate.
+                } else if (liveSql.startsWith("-- omitted-complex-index:")) {
+                    pendingSql.add("-- pending: live index " + target.name()
+                            + " on " + tableName
+                            + " has FILTER/INCLUDE (or similar) and cannot be compared to the declared "
+                            + "definition; manage replacement via change sets");
+                    pendingSql.add(dropIndexSql(dialect, target.name(), tableName));
+                    pendingSql.add(terminated(sql));
                 } else if (!target.hasSameStructure(IndexDefinition.parse(liveSql))) {
                     addIndexReplacement(pendingSql, target, IndexDefinition.parse(liveSql), sql,
                             tableName, dialect);
@@ -778,14 +788,24 @@ public class SchemaSynchronizer {
         for (String liveName : live.keySet().stream().sorted().toList()) {
             if (!expected.contains(liveName)) {
                 String liveSql = live.get(liveName);
-                if (liveSql != null && liveSql.startsWith("-- omitted-live-index:")) {
+                if (liveSql != null && (liveSql.startsWith("-- omitted-unique-constraint:")
+                        || liveSql.startsWith("-- omitted-complex-index:"))) {
                     continue;
                 }
-                pendingSql.add(dialect.isMySqlFamily()
-                        ? "DROP INDEX " + liveName + " ON " + tableName + ";"
-                        : "DROP INDEX IF EXISTS " + liveName + "; -- table=" + tableName);
+                pendingSql.add(dropIndexSql(dialect, liveName, tableName)
+                        + (dialect.isMySqlFamily() || dialect == DatabaseDialect.SQLSERVER
+                        ? "" : " -- table=" + tableName));
             }
         }
+    }
+
+    static String dropIndexSql(DatabaseDialect dialect, String indexName, String tableName) {
+        return switch (dialect) {
+            case MYSQL, MARIADB, SQLSERVER ->
+                    "DROP INDEX " + indexName + " ON " + tableName + ";";
+            case POSTGRESQL, ORACLE ->
+                    "DROP INDEX IF EXISTS " + indexName + ";";
+        };
     }
 
     private void addIndexReplacement(List<String> pendingSql, IndexDefinition target,
@@ -793,9 +813,7 @@ public class SchemaSynchronizer {
                                      DatabaseDialect dialect) {
         pendingSql.add("-- replace index definition drift for " + target.name()
                 + "; live: " + live.canonicalSql());
-        pendingSql.add(dialect.isMySqlFamily()
-                ? "DROP INDEX " + target.name() + " ON " + tableName + ";"
-                : "DROP INDEX IF EXISTS " + target.name() + ";");
+        pendingSql.add(dropIndexSql(dialect, target.name(), tableName));
         pendingSql.add(terminated(createSql));
     }
 
