@@ -7,9 +7,14 @@ import java.sql.Connection;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.sql.Types;
+import java.util.Locale;
+import java.util.Objects;
 
 /** Dialect-specific locking and history DDL helpers. */
 final class DialectSupport {
+    /** MySQL GET_LOCK resource names truncate at 64 characters. */
+    static final int MYSQL_LOCK_NAME_MAX = 64;
+
     private DialectSupport() {
     }
 
@@ -56,13 +61,20 @@ final class DialectSupport {
             throws SQLException {
         return switch (dialect) {
             case POSTGRESQL -> {
+                // Two-key lock mixes schema namespace with the configured id so products
+                // sharing one Postgres cluster do not serialize on the default id alone.
+                // Also acquire the 1.3.0 single-key form so rolling upgrades still exclude
+                // peers still on the old lock space (the two spaces are independent).
+                int key1 = namespaceLockKey(namespace);
+                int key2 = Math.floorMod(Long.hashCode(advisoryLockId), Integer.MAX_VALUE);
                 try (Statement statement = conn.createStatement()) {
+                    statement.execute("SELECT pg_advisory_xact_lock(" + key1 + ", " + key2 + ")");
                     statement.execute("SELECT pg_advisory_xact_lock(" + advisoryLockId + ")");
                 }
                 yield null;
             }
             case MARIADB, MYSQL -> {
-                String resource = "schema_synchronizer_" + namespace;
+                String resource = mysqlLockResource(namespace);
                 try (var statement = conn.prepareStatement("SELECT GET_LOCK(?, 30)")) {
                     statement.setString(1, resource);
                     try (var row = statement.executeQuery()) {
@@ -75,7 +87,7 @@ final class DialectSupport {
                 yield resource;
             }
             case SQLSERVER -> {
-                String resource = "schema_synchronizer_" + namespace;
+                String resource = "schema_synchronizer_" + namespace.toLowerCase(Locale.ROOT);
                 try (var statement = conn.prepareStatement(
                         "DECLARE @result INT; "
                                 + "EXEC @result = sp_getapplock @Resource = ?, @LockMode = 'Exclusive', "
@@ -92,19 +104,18 @@ final class DialectSupport {
                 yield resource;
             }
             case ORACLE -> {
-                int lockId = Math.floorMod(Long.hashCode(advisoryLockId), 1_073_741_823);
-                try (var statement = conn.prepareCall("{ ? = call DBMS_LOCK.REQUEST(?, 6, 30, true) }")) {
-                    statement.registerOutParameter(1, Types.INTEGER);
-                    statement.setInt(2, lockId);
-                    statement.execute();
-                    int status = statement.getInt(1);
-                    // 0 = success, 4 = already owned by this session
-                    if (status != 0 && status != 4) {
-                        throw new IllegalStateException(
-                                "Could not acquire oracle schema synchronization lock (status=" + status + ")");
-                    }
+                // release_on_commit=false: Oracle DDL implicitly commits; a transaction-
+                // scoped lock would evaporate after the first CREATE/ALTER.
+                // Acquire both 1.3.1 namespaced and 1.3.0 advisory-only lock ids so a
+                // rolling upgrade still excludes peers on the prior hash.
+                int lockId = Math.floorMod(Objects.hash("schema_synchronizer",
+                        namespace.toLowerCase(Locale.ROOT), advisoryLockId), 1_073_741_823);
+                int legacyLockId = Math.floorMod(Long.hashCode(advisoryLockId), 1_073_741_823);
+                requestOracleLock(conn, lockId);
+                if (legacyLockId != lockId) {
+                    requestOracleLock(conn, legacyLockId);
                 }
-                yield Integer.toString(lockId);
+                yield Integer.toString(lockId) + ":" + legacyLockId;
             }
         };
     }
@@ -130,21 +141,56 @@ final class DialectSupport {
                 }
             }
             case ORACLE -> {
-                int lockId = Integer.parseInt(lockToken);
-                try (var statement = conn.prepareCall("{ ? = call DBMS_LOCK.RELEASE(?) }")) {
-                    statement.registerOutParameter(1, Types.INTEGER);
-                    statement.setInt(2, lockId);
-                    statement.execute();
-                    int status = statement.getInt(1);
-                    // 0 = success, 3 = parameter error ignored when lock already gone, 4 = do not own
-                    if (status != 0 && status != 3 && status != 4) {
-                        throw new SQLException("Could not release oracle schema synchronization lock (status="
-                                + status + ")");
+                for (String part : lockToken.split(":")) {
+                    if (part.isBlank()) {
+                        continue;
+                    }
+                    int lockId = Integer.parseInt(part);
+                    try (var statement = conn.prepareCall("{ ? = call DBMS_LOCK.RELEASE(?) }")) {
+                        statement.registerOutParameter(1, Types.INTEGER);
+                        statement.setInt(2, lockId);
+                        statement.execute();
+                        int status = statement.getInt(1);
+                        // 0 = success, 3 = parameter error ignored when lock already gone, 4 = do not own
+                        if (status != 0 && status != 3 && status != 4) {
+                            throw new SQLException("Could not release oracle schema synchronization lock (status="
+                                    + status + ")");
+                        }
                     }
                 }
             }
             case POSTGRESQL -> {
                 // transaction-scoped advisory lock released on commit/rollback
+            }
+        }
+    }
+
+    /** Package-visible for contract tests. */
+    static String mysqlLockResource(String namespace) {
+        String full = "schema_synchronizer_" + namespace.toLowerCase(Locale.ROOT);
+        if (full.length() <= MYSQL_LOCK_NAME_MAX) {
+            return full;
+        }
+        // MySQL truncates GET_LOCK names at 64 chars — hash to avoid silent collisions.
+        return "ss_" + Integer.toHexString(full.hashCode());
+    }
+
+    /** Package-visible for contract tests. */
+    static int namespaceLockKey(String namespace) {
+        return Math.floorMod(("schema_synchronizer_" + namespace.toLowerCase(Locale.ROOT)).hashCode(),
+                Integer.MAX_VALUE);
+    }
+
+    private static void requestOracleLock(Connection conn, int lockId) throws SQLException {
+        try (var statement = conn.prepareCall("{ ? = call DBMS_LOCK.REQUEST(?, 6, 30, false) }")) {
+            statement.registerOutParameter(1, Types.INTEGER);
+            statement.setInt(2, lockId);
+            statement.execute();
+            int status = statement.getInt(1);
+            // 0 = success, 4 = already owned by this session
+            if (status != 0 && status != 4) {
+                throw new IllegalStateException(
+                        "Could not acquire oracle schema synchronization lock (status=" + status + ")");
             }
         }
     }

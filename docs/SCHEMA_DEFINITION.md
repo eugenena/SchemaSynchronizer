@@ -60,11 +60,18 @@ Rules:
   on newly created tables or columns.
 - `verificationSql` must return exactly one row containing one non-null boolean.
 - Verification queries must be read-only and must not call side-effecting functions.
+- Change-set statements and verification SQL must target the configured schema
+  namespace (or system catalogs such as `information_schema` / `pg_catalog` / `sys`).
+  Any `other.object` reference is rejected. Prefer unqualified column names in
+  `SET` clauses (`SET note = …`); `SET items.note = …` is treated as a namespace
+  reference and will fail unless `items` is the configured schema.
+  Session namespace mutators (`SET search_path`, `set_config`, `USE`,
+  `ALTER SESSION SET CURRENT_SCHEMA`) are rejected.
 
-MariaDB and MySQL can commit DDL implicitly. Every unapplied change set for those
-dialects therefore requires `verificationSql`; if verification is false, the change
-set must contain exactly one statement. Split multi-step work into ordered change
-sets.
+MariaDB, MySQL, and Oracle can commit DDL implicitly. Every unapplied change set for
+those dialects therefore requires `verificationSql`; if verification is false, the
+change set must contain exactly one statement. Split multi-step work into ordered
+change sets.
 
 ## What is automatic
 

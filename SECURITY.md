@@ -19,6 +19,9 @@ release when appropriate, and credit the reporter unless anonymity is requested.
 
 ## Scope clarification
 
-Schema definitions are trusted application artifacts. The SQL policy protects
-against accidental destructive operations; it is not a sandbox for hostile SQL.
-Applications must restrict who can modify definitions and deployment artifacts.
+Schema definitions are trusted application artifacts. The SQL policy rejects accidental
+destructive DDL (including forbidden tokens inside `CREATE FUNCTION` / `TRIGGER` /
+`PROCEDURE` bodies) and binds change-set SQL to the configured schema namespace. It is
+still not a sandbox for hostile SQL: `UPDATE` / `INSERT` / `GRANT` remain allowed for
+intentional data backfills and privileges. Applications must restrict who can modify
+definitions and deployment artifacts.

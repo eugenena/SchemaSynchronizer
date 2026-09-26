@@ -201,6 +201,12 @@ public class SchemaSynchronizer {
         if (def.effectiveFormatVersion() > SchemaDefinition.CURRENT_FORMAT_VERSION) {
             throw new IllegalStateException("Unsupported schema format version: " + def.effectiveFormatVersion());
         }
+        int maxId = targetDialect.maxIdentifierLength();
+        if (options.schema().length() > maxId || options.historyTable().length() > maxId) {
+            throw new IllegalArgumentException(targetDialect.id() + " identifiers must be at most "
+                    + maxId + " characters (schema='" + options.schema() + "', history='"
+                    + options.historyTable() + "')");
+        }
         if (targetDialect.ddlMayCommitImplicitly()) {
             return synchronizeImplicitDdlDialect(conn, def, targetDialect);
         }
@@ -215,7 +221,7 @@ public class SchemaSynchronizer {
         String previousSearchPath = null;
         ChangeSetExecutor executor = new ChangeSetExecutor();
         validateDeclarativeDefinition(def, dialect);
-        List<SchemaDefinition.ChangeSet> allChanges = executor.validate(def.changes());
+        List<SchemaDefinition.ChangeSet> allChanges = executor.validate(def.changes(), options);
         plannedSql.set(new ArrayList<>());
         Exception primaryFailure = null;
         String lockToken = null;
@@ -299,7 +305,7 @@ public class SchemaSynchronizer {
                                                                       DatabaseDialect dialect) throws Exception {
         validateDeclarativeDefinition(def, dialect);
         ChangeSetExecutor executor = new ChangeSetExecutor();
-        List<SchemaDefinition.ChangeSet> allChanges = executor.validate(def.changes());
+        List<SchemaDefinition.ChangeSet> allChanges = executor.validate(def.changes(), options);
         plannedSql.set(new ArrayList<>());
         if (dialect.usesCatalogNamespace()
                 && conn.getCatalog() != null
@@ -644,7 +650,7 @@ public class SchemaSynchronizer {
                 for (String sql : tableDef.indexes()) {
                     NonDestructiveSqlPolicy.requireCreateIndex(sql, dialect.supportsCreateIndexIfNotExists());
                     IndexDefinition index = IndexDefinition.parse(sql);
-                    if ((index.schema() != null && !options.schema().equals(index.schema()))
+                    if ((index.schema() != null && !options.schema().equalsIgnoreCase(index.schema()))
                             || !table.equals(index.table())) {
                         throw new IllegalArgumentException("index target does not match table definition: "
                                 + index.name());

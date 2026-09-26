@@ -1,5 +1,39 @@
 # Changelog
 
+## 1.3.1 — 2026-09-26
+
+Hardening from the enterprise audit (P0/P1 correctness and packaging):
+
+- **Oracle lock (SS-001):** `DBMS_LOCK.REQUEST` now uses `release_on_commit=false` so
+  implicit DDL commits do not drop the session lock mid-sync. Lock id mixes schema
+  namespace with the configured advisory id.
+- **Change-set schema scope (SS-002):** change-set and verification SQL must target the
+  configured namespace (or system catalogs); cross-schema `schema.object` (including
+  quoted / bracket / backtick forms) and `IN SCHEMA other` references are rejected.
+  Session namespace mutators (`SET search_path`, `set_config('search_path')`,
+  `ALTER SESSION SET CURRENT_SCHEMA`, `USE`) are rejected so unqualified DDL cannot
+  escape the bound namespace.
+- **Function-body policy (SS-003):** forbidden tokens are scanned inside
+  `CREATE FUNCTION` / `TRIGGER` / `PROCEDURE` dollar-quoted bodies (string literals
+  still masked).
+- **Postgres lock namespace (SS-005):** `pg_advisory_xact_lock(key1, key2)` mixes schema
+  namespace with the configured lock id so multi-schema clusters do not serialize on
+  the default id alone. During 1.3.1 the legacy single-key lock is also acquired so
+  rolling upgrades still exclude 1.3.0 peers (the two Postgres lock spaces are
+  independent). Oracle acquires both namespaced and legacy `DBMS_LOCK` ids for the
+  same reason.
+- **Optional JDBC drivers (SS-006):** library drivers are Maven `<optional>`; apps
+  declare the engines they use. The standalone CLI still shades all five drivers.
+- **Dry-run (SS-007):** dry-run no longer executes `verificationSql`.
+- **Identifier length (SS-011):** SQL Server and Oracle allow 128-character unquoted
+  identifiers; PostgreSQL/MySQL family remain at 63.
+- **MySQL GET_LOCK (SS-013):** lock resource names longer than 64 characters are
+  hashed instead of silently truncating.
+- **Index schema compare (SS-015):** index schema binding uses case-insensitive match.
+- Publish workflow runs Oracle verify before Central deploy (`needs: oracle-verify`)
+  and includes SQL Server in the publish job; docs clarify trusted-artifact policy,
+  locking, and dry-run side effects.
+
 ## 1.3.0 — 2026-09-26
 
 - Added SQL Server and Oracle dialects with detection, history DDL, session locking,

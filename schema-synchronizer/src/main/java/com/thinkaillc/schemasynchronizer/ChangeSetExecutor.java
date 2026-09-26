@@ -30,7 +30,7 @@ final class ChangeSetExecutor {
     Result apply(Connection conn, List<SchemaDefinition.ChangeSet> changes, SchemaSynchronizerOptions options,
                  DatabaseDialect dialect)
             throws Exception {
-        List<SchemaDefinition.ChangeSet> safeChanges = validate(changes);
+        List<SchemaDefinition.ChangeSet> safeChanges = validate(changes, options);
         if (safeChanges.isEmpty()) {
             return new Result(0, List.of());
         }
@@ -52,7 +52,10 @@ final class ChangeSetExecutor {
                 continue;
             }
             unrecordedCount++;
-            if (!isVerified(conn, change)) {
+            // Dry-run must not execute verificationSql (UDFs / admin SELECT side effects).
+            if (options.dryRun()) {
+                planned.addAll(change.statements());
+            } else if (!isVerified(conn, change)) {
                 planned.addAll(change.statements());
             }
         }
@@ -105,7 +108,8 @@ final class ChangeSetExecutor {
         return new Result(appliedCount, List.copyOf(planned));
     }
 
-    List<SchemaDefinition.ChangeSet> validate(List<SchemaDefinition.ChangeSet> changes) {
+    List<SchemaDefinition.ChangeSet> validate(List<SchemaDefinition.ChangeSet> changes,
+                                              SchemaSynchronizerOptions options) {
         if (changes == null || changes.isEmpty()) {
             return List.of();
         }
@@ -127,9 +131,13 @@ final class ChangeSetExecutor {
             if (change.statements() == null || change.statements().isEmpty()) {
                 throw new IllegalArgumentException("schema change has no statements: " + change.id());
             }
-            change.statements().forEach(NonDestructiveSqlPolicy::requireSafe);
+            change.statements().forEach(statement -> {
+                NonDestructiveSqlPolicy.requireSafe(statement);
+                ChangeSetSchemaScope.requireScoped(statement, options.schema());
+            });
             if (change.verificationSql() != null) {
                 NonDestructiveSqlPolicy.requireReadOnlyVerification(change.verificationSql());
+                ChangeSetSchemaScope.requireScoped(change.verificationSql(), options.schema());
             }
         }
         return List.copyOf(changes);
