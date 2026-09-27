@@ -565,6 +565,10 @@ mvn verify \
   -Dschema.test.mariadb.jdbc.password="$SCHEMA_DB_PASSWORD"
 ```
 
+The MySQL suite uses `schema.test.mysql.jdbc.url`, `.user`, and `.password`. When you also pass
+`schema.test.mysql.jdbc.admin.user` and `.admin.password` (an account that can create users),
+it runs the convergence test as a least-privilege account too.
+
 ## Author
 
 SchemaSynchronizer was created by [Eugene Naoumov](https://github.com/eugenena),
