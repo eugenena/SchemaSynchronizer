@@ -1187,19 +1187,36 @@ public class SchemaSynchronizer {
     }
 
     private static final Pattern MYSQL_COLUMN_CLAUSE = Pattern.compile(
-            "(?i)\\b(?:COLLATE|CHARACTER\\s+SET|CHARSET|COMMENT)\\b");
+            "(?i)\\b(?:COLLATE|CHARACTER\\s+SET|CHAR\\s+SET|CHARSET|COMMENT|ASCII|UNICODE|BYTE|SIGNED)\\b"
+                    + "|\\S\\s+BINARY\\b");
 
     /**
-     * After DEFAULT the parser keeps COLLATE, CHARACTER SET and COMMENT as part of the default,
-     * so the charset checks would miss them and ADD/MODIFY could fail or never converge.
+     * The parser reads charset, collation, and comment clauses as part of the type or default, so
+     * the charset checks would miss them and ADD/MODIFY could fail or never converge. A leading
+     * {@code BINARY(n)} is the type; {@code BINARY} after a type is the {@code _bin} collation.
+     * Parenthesized text is skipped: it holds lengths, ENUM values, and expression defaults such as
+     * {@code (CAST(x AS SIGNED))}, where these words are not column attributes.
      */
     static void requireNoMySqlColumnClauses(String definition, DatabaseDialect dialect, String column) {
         if (!dialect.isMySqlFamily()) {
             return;
         }
-        if (MYSQL_COLUMN_CLAUSE.matcher(SqlLexer.mask(definition, SqlLexer.Mode.MYSQL, false, false)).find()) {
-            throw new IllegalArgumentException("COLLATE, CHARACTER SET and COMMENT are not supported in a column"
-                    + " definition; declare them in createSql: " + column);
+        String masked = SqlLexer.mask(definition, SqlLexer.Mode.MYSQL, false, false);
+        StringBuilder outsideParens = new StringBuilder(masked.length());
+        int depth = 0;
+        for (int i = 0; i < masked.length(); i++) {
+            char c = masked.charAt(i);
+            if (c == ')' && depth > 0) {
+                depth--;
+            }
+            outsideParens.append(depth == 0 ? c : ' ');
+            if (c == '(') {
+                depth++;
+            }
+        }
+        if (MYSQL_COLUMN_CLAUSE.matcher(depth == 0 ? outsideParens : masked).find()) {
+            throw new IllegalArgumentException("character set, collation, BINARY, SIGNED, and COMMENT attributes"
+                    + " are not supported in a column definition; declare them in createSql: " + column);
         }
     }
 

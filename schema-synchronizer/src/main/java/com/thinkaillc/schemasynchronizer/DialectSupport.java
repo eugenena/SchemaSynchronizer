@@ -149,7 +149,7 @@ final class DialectSupport {
             }
             case MARIADB, MYSQL -> {
                 String resource = mysqlLockResource(namespace);
-                String legacy = mysqlLockResourceLegacy(namespace);
+                String legacy = mysqlLockResourceLegacy(dialect, namespace);
                 acquireMysqlLock(conn, dialect, resource);
                 if (!legacy.equals(resource)) {
                     try {
@@ -186,8 +186,7 @@ final class DialectSupport {
             case ORACLE -> {
                 // release_on_commit=false: Oracle DDL implicitly commits; a transaction-
                 // scoped lock would evaporate after the first CREATE/ALTER.
-                // Acquire both the namespaced and the advisory-only lock ids so a
-                // rolling upgrade still excludes peers on the prior hash.
+                // The advisory-only id is acquired too, matching the PostgreSQL legacy key.
                 int lockId = Math.floorMod(Objects.hash("schema_synchronizer",
                         namespace.toLowerCase(Locale.ROOT), advisoryLockId), 1_073_741_823);
                 int legacyLockId = Math.floorMod(Long.hashCode(advisoryLockId), 1_073_741_823);
@@ -307,13 +306,15 @@ final class DialectSupport {
         }
     }
 
-    /** The 1.2.0 name for names up to 64 characters — dual-acquired with {@link #mysqlLockResource} during upgrades. */
-    static String mysqlLockResourceLegacy(String namespace) {
-        String full = "schema_synchronizer_" + namespace.toLowerCase(Locale.ROOT);
-        if (full.length() <= MYSQL_LOCK_NAME_MAX) {
-            return full;
-        }
-        return "ss_" + Integer.toHexString(full.hashCode());
+    /**
+     * The lock name 1.2.0 used, dual-acquired with {@link #mysqlLockResource} so a rolling upgrade
+     * excludes 1.2.0 peers. It keeps the schema's case: MariaDB compares lock names case-sensitively.
+     * MySQL rejects lock names over 64 characters, so 1.2.0 never held those there; MariaDB accepts them.
+     */
+    static String mysqlLockResourceLegacy(DatabaseDialect dialect, String namespace) {
+        String full = "schema_synchronizer_" + namespace;
+        return dialect == DatabaseDialect.MARIADB || full.length() <= MYSQL_LOCK_NAME_MAX
+                ? full : mysqlLockResource(namespace);
     }
 
     /** Package-visible for contract tests. */

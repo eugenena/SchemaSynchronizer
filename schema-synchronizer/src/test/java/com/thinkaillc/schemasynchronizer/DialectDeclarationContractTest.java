@@ -624,7 +624,10 @@ class DialectDeclarationContractTest {
     void mySqlColumnClausesAfterTheDefaultFailValidation() {
         for (String definition : List.of("VARCHAR(10) DEFAULT '日本' COLLATE latin1_bin",
                 "VARCHAR(10) DEFAULT 'a' CHARACTER SET latin1", "VARCHAR(10) DEFAULT 'a' charset latin1",
-                "INT DEFAULT 1 COMMENT 'n'")) {
+                "INT DEFAULT 1 COMMENT 'n'", "TEXT BINARY", "TEXT CHAR SET latin1", "VARCHAR(5) ASCII",
+                "VARCHAR(5) UNICODE", "INT SIGNED", "CHAR(4) BINARY NOT NULL",
+                "INT DEFAULT (1) COMMENT 'n'", "ENUM('a','b') COLLATE latin1_bin",
+                "VARCHAR(10 COLLATE latin1_bin")) {
             assertThatThrownBy(() -> SchemaSynchronizer.requireNoMySqlColumnClauses(
                     definition, DatabaseDialect.MARIADB, "t.c"))
                     .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("t.c");
@@ -633,6 +636,12 @@ class DialectDeclarationContractTest {
         SchemaSynchronizer.requireNoMySqlColumnClauses("VARCHAR(20) DEFAULT 'COLLATE x COMMENT'",
                 DatabaseDialect.MYSQL, "t.c");
         SchemaSynchronizer.requireNoMySqlColumnClauses("NATIONAL CHARACTER VARYING(5)", DatabaseDialect.MYSQL, "t.c");
+        for (String type : List.of("BINARY(16) NOT NULL", "VARBINARY(8) DEFAULT X'00'", "INT UNSIGNED",
+                "BIGINT UNSIGNED ZEROFILL", "VARCHAR(10) DEFAULT 'binary signed'",
+                "INT DEFAULT (ASCII('a'))", "BIGINT DEFAULT (CAST(1 AS SIGNED))",
+                "VARBINARY(4) DEFAULT (CAST('x' AS BINARY))", "INT DEFAULT ((1 + CAST(2 AS SIGNED)))")) {
+            SchemaSynchronizer.requireNoMySqlColumnClauses(type, DatabaseDialect.MYSQL, "t.c");
+        }
         SchemaSynchronizer.requireNoMySqlColumnClauses("VARCHAR(10) COLLATE \"C\"", DatabaseDialect.POSTGRESQL, "t.c");
     }
 

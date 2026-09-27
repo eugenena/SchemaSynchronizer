@@ -173,7 +173,8 @@ final class ChangeSetExecutor {
                             + " schema change requires verificationSql: "
                             + change.id());
                 }
-                if (!isVerified(conn, change) && change.statements().size() != 1) {
+                // Dry-run executes nothing, so it neither runs verificationSql nor needs recoverable commits.
+                if (change.statements().size() != 1 && !options.dryRun() && !isVerified(conn, change)) {
                     throw new IllegalArgumentException("unapplied " + dialect.id()
                             + " schema change must contain exactly one "
                             + "statement so implicit DDL commits are recoverable: " + change.id());
@@ -193,7 +194,8 @@ final class ChangeSetExecutor {
         Map<String, String> applied = historyExists(conn, options, dialect) ? readHistory(conn, history) : Map.of();
         List<SchemaDefinition.ChangeSet> pending = new ArrayList<>();
         for (SchemaDefinition.ChangeSet change : changes) {
-            if (!applied.containsKey(change.id()) && !isVerified(conn, change)) {
+            // Dry-run must not execute verificationSql.
+            if (!applied.containsKey(change.id()) && (options.dryRun() || !isVerified(conn, change))) {
                 pending.add(change);
             }
         }

@@ -96,10 +96,10 @@
   `CliCredentials`; Oracle dual-lock leak and PG dual-lock AB-BA wait; `GRANT *.*` /
   `SCHEMA::` escaped binding; UNIQUE/filter/INCLUDE indexes and DEFAULT-blocked
   `ALTER COLUMN` mis-handled; 63-char validation despite 128-char dialects; internal
-  audit/resume/LinkedIn drafts committed to a public repo.
+  drafts committed to a public repo.
 - **Missed because:** Workflow quoting and IT serialize paths were not exercised in the
   unit suite; lock dual-acquire lacked failure/ordering contracts; GRANT forms beyond
-  `schema.object` were out of the scope matrix; career/audit docs were treated as
+  `schema.object` were out of the scope matrix; internal drafts were treated as
   project docs.
 - **Prevention:** Quote JDBC `-D` URLs; `SchemaSnapshotWriter.writeSnapshot(Connection…)`;
   release Oracle lock on partial failure; acquire PG locks primary-then-legacy only;
@@ -109,17 +109,17 @@
   `docs/DESIGN.md` only. Contracts in `ChangeSetSchemaScopeTest` and
   `SchemaSynchronizerTest`.
 
-## 2026-09-26 — 1.4.0 — P2 hardening before release
+## 2026-09-26 — pre-1.3.0 — least-privilege defaults
 
 - **Bug / gaps:** Boot on-by-default DDL; argv passwords; message-only duplicate
   classification; unbounded PG advisory wait; history without actor; dry-run API
   unused; `public` default misleading on SQL Server/Oracle/MySQL.
-- **Missed because:** Audit P2s deferred after P0/P1 1.3.1 pass.
+- **Missed because:** Defaults were chosen for convenience, not least privilege.
 - **Prevention:** `enabled` default false; `CliCredentials` env-only password;
   SQLState/vendor-code-only `DuplicateObjectSql`; `pg_try_*` 30s; `applied_by`;
   dialect schema reject for `public` on non-PG; wire `supportsTransactionalDryRun`.
 
-## 2026-09-26 — 1.3.1 — schema scope and routine-body policy bypasses
+## 2026-09-26 — pre-1.3.0 — schema scope and routine-body policy bypasses
 
 - **Bug:** Change-set schema binding only matched bare `ident.ident` after masking
   double quotes, so `"other"."t"`, `[other].[t]`, and `` `other`.`t` `` escaped.
@@ -132,8 +132,8 @@
 - **Prevention:** Target-position qualified-name matching with quote forms; reject
   search_path / CURRENT_SCHEMA / USE; extract AS body (dollar or single-quoted) before
   forbidden-token scan. Contracts in `ChangeSetSchemaScopeTest` and
-  `NonDestructiveSqlPolicyTest`. Publish `needs: [oracle-verify]`; dual-acquire legacy
-  PG/Oracle locks across the 1.3.0→1.3.1 lock-key change.
+  `NonDestructiveSqlPolicyTest`. Publish `needs: [oracle-verify]`; dual-acquire the 1.2.0
+  lock alongside the schema-scoped lock.
 
 ## 2026-09-26 — 1.2.0 — fail-closed uniqueness when skipping already-exists DDL
 
@@ -302,7 +302,7 @@
   validation.
 - **Prevention:** Trace public input through normalization and validation before
   documenting whether an unsupported shape is rejected, normalized, or ignored.
-- **Coverage:** The schema reference, troubleshooting guide, and production audit now
+- **Coverage:** The schema reference and troubleshooting guide now
   consistently describe lowercase normalization and quoted-identifier rejection.
 
 ## 2026-09-23 — PR #8 — database readiness must cross the SQL boundary
