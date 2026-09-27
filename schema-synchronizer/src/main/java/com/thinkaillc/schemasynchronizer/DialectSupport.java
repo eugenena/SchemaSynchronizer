@@ -57,7 +57,7 @@ final class DialectSupport {
         };
     }
 
-    /** Adds {@code applied_by} to an existing history table created before 1.4.0. */
+    /** Adds {@code applied_by} to an existing history table created before 1.3.0. */
     static String addAppliedByColumnDdl(DatabaseDialect dialect, String qualifiedHistory) {
         return switch (dialect) {
             case POSTGRESQL -> "ALTER TABLE " + qualifiedHistory
@@ -138,7 +138,7 @@ final class DialectSupport {
             case POSTGRESQL -> {
                 // Two-key lock mixes schema namespace with the configured id so products
                 // sharing one Postgres cluster do not serialize on the default id alone.
-                // Also acquire the 1.3.0 single-key form so rolling upgrades still exclude
+                // Also acquire the 1.2.0 single-key form so rolling upgrades still exclude
                 // peers still on the old lock space (the two spaces are independent).
                 // pg_try_* with a 30s deadline matches MySQL/SQL Server lock timeouts
                 // (pg_advisory_xact_lock waits forever).
@@ -186,7 +186,7 @@ final class DialectSupport {
             case ORACLE -> {
                 // release_on_commit=false: Oracle DDL implicitly commits; a transaction-
                 // scoped lock would evaporate after the first CREATE/ALTER.
-                // Acquire both 1.3.1 namespaced and 1.3.0 advisory-only lock ids so a
+                // Acquire both the namespaced and the advisory-only lock ids so a
                 // rolling upgrade still excludes peers on the prior hash.
                 int lockId = Math.floorMod(Objects.hash("schema_synchronizer",
                         namespace.toLowerCase(Locale.ROOT), advisoryLockId), 1_073_741_823);
@@ -290,7 +290,7 @@ final class DialectSupport {
         }
     }
 
-    /** Package-visible for contract tests. SHA-256 form used from 1.4.0. */
+    /** Package-visible for contract tests. SHA-256 form used from 1.3.0. */
     static String mysqlLockResource(String namespace) {
         String full = "schema_synchronizer_" + namespace.toLowerCase(Locale.ROOT);
         if (full.length() <= MYSQL_LOCK_NAME_MAX) {
@@ -307,7 +307,7 @@ final class DialectSupport {
         }
     }
 
-    /** 1.3.1 hashCode form — dual-acquired with {@link #mysqlLockResource} during upgrades. */
+    /** The 1.2.0 name for names up to 64 characters — dual-acquired with {@link #mysqlLockResource} during upgrades. */
     static String mysqlLockResourceLegacy(String namespace) {
         String full = "schema_synchronizer_" + namespace.toLowerCase(Locale.ROOT);
         if (full.length() <= MYSQL_LOCK_NAME_MAX) {
