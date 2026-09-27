@@ -589,10 +589,18 @@ class DialectDeclarationContractTest {
         List<String> tables = List.of("events", "orders");
         assertThat(SchemaSynchronizer.referencedTable(List.of("ALTER TABLE events ADD INDEX i (id)"), tables))
                 .isEqualTo("events");
-        assertThat(SchemaSynchronizer.referencedTable(List.of("CREATE INDEX i ON `Orders` (id)"), tables))
-                .isEqualTo("orders");
-        assertThat(SchemaSynchronizer.referencedTable(List.of("UPDATE app.orders SET x = 1"), tables))
-                .isEqualTo("orders");
+        assertThat(SchemaSynchronizer.referencedTable(List.of("ALTER TABLE `Orders` ALTER COLUMN ts SET DEFAULT NULL"),
+                tables)).isEqualTo("orders");
+        assertThat(SchemaSynchronizer.referencedTable(List.of("CREATE TABLE IF NOT EXISTS app.orders (id INT)"),
+                tables)).isEqualTo("orders");
+        for (String tableDdl : List.of("DROP TABLE orders", "DROP TEMPORARY TABLE IF EXISTS orders",
+                "RENAME TABLE orders_old TO orders", "ALTER IGNORE TABLE orders ADD COLUMN n INT",
+                "CREATE OR REPLACE TABLE orders (id INT)")) {
+            assertThat(SchemaSynchronizer.referencedTable(List.of(tableDdl), tables)).as(tableDdl).isEqualTo("orders");
+        }
+        // Statements that cannot change a TIMESTAMP column do not refuse the sync.
+        assertThat(SchemaSynchronizer.referencedTable(List.of("CREATE INDEX i ON orders (id)",
+                "UPDATE app.orders SET x = 1", "INSERT INTO events VALUES (1)"), tables)).isNull();
         // Substrings, literals, and comments are not references.
         assertThat(SchemaSynchronizer.referencedTable(List.of("CREATE TABLE events_archive (id INT)",
                 "CREATE TABLE preorders (id INT)", "INSERT INTO log VALUES ('events')",
@@ -608,6 +616,24 @@ class DialectDeclarationContractTest {
         assertThat(SchemaSynchronizer.indexedColumnAmong(index, Set.of("flag"))).isEqualTo("flag");
         assertThat(SchemaSynchronizer.indexedColumnAmong(index, Set.of("not", "ote", "i"))).isNull();
         assertThat(SchemaSynchronizer.indexedColumnAmong(index, Set.of())).isNull();
+        IndexDefinition literal = IndexDefinition.parse("CREATE INDEX ix ON t (flag) WHERE flag = 'note'");
+        assertThat(SchemaSynchronizer.indexedColumnAmong(literal, Set.of("note"))).isNull();
+    }
+
+    @Test
+    void mySqlColumnClausesAfterTheDefaultFailValidation() {
+        for (String definition : List.of("VARCHAR(10) DEFAULT '日本' COLLATE latin1_bin",
+                "VARCHAR(10) DEFAULT 'a' CHARACTER SET latin1", "VARCHAR(10) DEFAULT 'a' charset latin1",
+                "INT DEFAULT 1 COMMENT 'n'")) {
+            assertThatThrownBy(() -> SchemaSynchronizer.requireNoMySqlColumnClauses(
+                    definition, DatabaseDialect.MARIADB, "t.c"))
+                    .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("t.c");
+        }
+        // The words inside a literal, a national type, or another engine are fine.
+        SchemaSynchronizer.requireNoMySqlColumnClauses("VARCHAR(20) DEFAULT 'COLLATE x COMMENT'",
+                DatabaseDialect.MYSQL, "t.c");
+        SchemaSynchronizer.requireNoMySqlColumnClauses("NATIONAL CHARACTER VARYING(5)", DatabaseDialect.MYSQL, "t.c");
+        SchemaSynchronizer.requireNoMySqlColumnClauses("VARCHAR(10) COLLATE \"C\"", DatabaseDialect.POSTGRESQL, "t.c");
     }
 
     @Test

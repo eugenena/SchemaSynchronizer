@@ -911,6 +911,10 @@ public class SchemaSynchronizer {
     static String referencedTable(List<String> statements, List<String> tables) {
         for (String statement : statements) {
             String code = SqlLexer.mask(statement, SqlLexer.Mode.MYSQL, true, false);
+            // Only table DDL can change what the next pass does to a TIMESTAMP column.
+            if (!MYSQL_TABLE_DDL_HEAD.matcher(code).lookingAt()) {
+                continue;
+            }
             for (String table : tables) {
                 if (namesToken(code, table)) {
                     return table;
@@ -920,10 +924,20 @@ public class SchemaSynchronizer {
         return null;
     }
 
+    private static final Pattern MYSQL_TABLE_DDL_HEAD = Pattern.compile(
+            "(?is)\\s*(?:CREATE|ALTER|DROP|RENAME)\\s+(?:[A-Z_]+\\s+)*?TABLES?\\b");
+
     /** The first of {@code columns} (sorted) that an index names in its key or predicate, or null. */
     static String indexedColumnAmong(IndexDefinition index, Set<String> columns) {
-        String text = index.structure() + (index.predicateSql() == null ? "" : " " + index.predicateSql());
-        return columns.stream().sorted().filter(column -> namesToken(text, column)).findFirst().orElse(null);
+        String raw = index.structure() + (index.predicateSql() == null ? "" : " " + index.predicateSql());
+        String text;
+        try {
+            text = SqlLexer.mask(raw, SqlLexer.Mode.POSTGRES, true, false);
+        } catch (IllegalArgumentException untokenizable) {
+            text = raw;
+        }
+        String code = text;
+        return columns.stream().sorted().filter(column -> namesToken(code, column)).findFirst().orElse(null);
     }
 
     private static boolean namesToken(String text, String name) {
@@ -1172,6 +1186,23 @@ public class SchemaSynchronizer {
         }
     }
 
+    private static final Pattern MYSQL_COLUMN_CLAUSE = Pattern.compile(
+            "(?i)\\b(?:COLLATE|CHARACTER\\s+SET|CHARSET|COMMENT)\\b");
+
+    /**
+     * After DEFAULT the parser keeps COLLATE, CHARACTER SET and COMMENT as part of the default,
+     * so the charset checks would miss them and ADD/MODIFY could fail or never converge.
+     */
+    static void requireNoMySqlColumnClauses(String definition, DatabaseDialect dialect, String column) {
+        if (!dialect.isMySqlFamily()) {
+            return;
+        }
+        if (MYSQL_COLUMN_CLAUSE.matcher(SqlLexer.mask(definition, SqlLexer.Mode.MYSQL, false, false)).find()) {
+            throw new IllegalArgumentException("COLLATE, CHARACTER SET and COMMENT are not supported in a column"
+                    + " definition; declare them in createSql: " + column);
+        }
+    }
+
     /** MySQL accepts ON UPDATE CURRENT_TIMESTAMP only on DATETIME/TIMESTAMP, with the column's precision. */
     static void requireSupportedOnUpdate(ColumnSpec spec, String definition, DatabaseDialect dialect, String column) {
         String onUpdate = ColumnDefinitionParser.onUpdateExpr(definition);
@@ -1308,7 +1339,7 @@ public class SchemaSynchronizer {
             return "MODIFY COLUMN would change the TINYINT display width to (1), which Connector/J reads as BOOLEAN"
                     + (zerofill ? "" : "; declare TINYINT" + (liveAttributes.isEmpty() ? "" : " " + liveAttributes));
         }
-        // The parser rejects COMMENT, COLLATE and CHARACTER SET clauses, so a declaration can never keep them.
+        // Validation rejects COMMENT, COLLATE and CHARACTER SET clauses, so a declaration can never keep them.
         if (facts.comment() != null && !facts.comment().isEmpty()) {
             return "column COMMENT would be dropped by MODIFY COLUMN";
         }
@@ -1603,6 +1634,7 @@ public class SchemaSynchronizer {
                         ColumnSpec spec = ColumnDefinitionParser.parse(column.definition());
                         requireSupportedFractionalPrecision(spec, dialect, table + "." + name);
                         requireMySqlOnlyAttributes(spec, column.definition(), dialect, table + "." + name);
+                        requireNoMySqlColumnClauses(column.definition(), dialect, table + "." + name);
                         requireSupportedOnUpdate(spec, column.definition(), dialect, table + "." + name);
                         requireMySqlDefaultFits(spec, column.definition(), dialect, table + "." + name);
                         columnSpecs.put(name, spec);

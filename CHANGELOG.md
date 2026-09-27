@@ -79,6 +79,8 @@ Changes that can alter what an existing definition reports after upgrading:
   `'日本'` on a `latin1` table) are pending for `MODIFY COLUMN` and `ADD COLUMN`, as is an index
   on such a column, instead of failing in strict `sql_mode` or being stored as `'??'` and
   re-applied on every sync. An index on a missing column with no definition is pending too.
+  `COLLATE`, `CHARACTER SET`, and `COMMENT` in a MySQL/MariaDB column definition fail
+  validation (they were read as part of the default); declare them in `createSql`.
 - **MySQL Connector/J against MariaDB** is detected as `mariadb`; definitions declaring
   `"dialect": "mysql"` for a MariaDB server must switch to `mariadb` (or re-snapshot).
 - **MySQL/MariaDB validation** rejects defaults the server would reject at DDL time (odd-length
