@@ -1115,6 +1115,9 @@ public class SchemaSnapshotWriter {
             // Oracle NUMBER without precision is unbounded; ANSI NUMERIC there means NUMBER(38,0).
             case "NUMERIC", "DECIMAL", "NUMBER" -> dialect == DatabaseDialect.ORACLE && size <= 0
                     ? "NUMBER" : numericType(size, scale);
+            // Oracle REAL is FLOAT(63); bare FLOAT is FLOAT(126).
+            case "FLOAT" -> dialect == DatabaseDialect.ORACLE && size > 0
+                    && size != SchemaSynchronizer.ORACLE_FLOAT_MAX_PRECISION ? "FLOAT(" + size + ")" : typeName;
             case "INT2" -> "SMALLINT";
             case "VECTOR" -> "vector(" + size + ")";
             // Fractional-second precision; SQL Server legacy DATETIME has no precision argument.

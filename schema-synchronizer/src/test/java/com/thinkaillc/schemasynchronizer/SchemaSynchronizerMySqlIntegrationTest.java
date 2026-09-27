@@ -548,6 +548,31 @@ class SchemaSynchronizerMySqlIntegrationTest {
     }
 
     @Test
+    void nationalColumnsCompareTheCollationEvenWhenTheTypeMatches() throws Exception {
+        try (Connection connection = connection(); var statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE mysql_strict (id BIGINT NOT NULL PRIMARY KEY, nick NVARCHAR(20), "
+                    + "binned VARCHAR(20) CHARACTER SET utf8mb3 COLLATE utf8mb3_bin, "
+                    + "wide VARCHAR(20) CHARACTER SET utf8mb4) "
+                    + "DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci");
+        }
+        SchemaDefinition declared = new SchemaDefinition(2, "mysql", Map.of("mysql_strict",
+                new SchemaDefinition.TableDef(null, List.of(
+                        new SchemaDefinition.ColumnDef("id", "BIGINT NOT NULL"),
+                        new SchemaDefinition.ColumnDef("nick", "NVARCHAR(20)"),
+                        new SchemaDefinition.ColumnDef("binned", "NVARCHAR(20)"),
+                        new SchemaDefinition.ColumnDef("wide", "NCHAR VARYING(20)")), List.of())),
+                List.of());
+        try (Connection connection = connection()) {
+            SchemaSynchronizationResult result = synchronizer().synchronizeWithResult(connection, declared);
+            assertThat(result.columnsAltered()).isZero();
+            assertThat(result.pendingSql()).hasSize(2)
+                    .anyMatch(sql -> sql.contains("MODIFY COLUMN binned") && sql.contains("utf8mb3_bin"))
+                    .anyMatch(sql -> sql.contains("MODIFY COLUMN wide") && sql.contains("utf8mb4"))
+                    .noneMatch(sql -> sql.contains("nick"));
+        }
+    }
+
+    @Test
     void nationalCharsetCollationAndPrecisionDriftArePending() throws Exception {
         try (Connection connection = connection(); var statement = connection.createStatement()) {
             statement.execute("CREATE TABLE mysql_strict (id BIGINT NOT NULL PRIMARY KEY, "

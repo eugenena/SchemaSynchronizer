@@ -73,6 +73,10 @@ or the JVM `user.name`.
 ## Recovery
 
 - Preserve the original failure; cleanup errors are attached as suppressed causes.
+- A sync that succeeded returns its result even when releasing the lock or restoring
+  auto-commit fails afterwards; that failure is logged as a warning. MySQL/MariaDB, SQL Server,
+  and Oracle locks are session-scoped, so the session keeps the lock until the connection
+  closes; a pooled connection should be discarded.
 - On MariaDB/MySQL, inspect the database before retrying after a connection failure
   because DDL may have committed before history recording.
 - Verification queries and single-statement change sets allow safe retry decisions.

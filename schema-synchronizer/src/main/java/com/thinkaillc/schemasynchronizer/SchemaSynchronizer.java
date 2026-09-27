@@ -328,10 +328,17 @@ public class SchemaSynchronizer {
                 if (primaryFailure != null) {
                     primaryFailure.addSuppressed(cleanupFailure);
                 } else {
-                    throw cleanupFailure;
+                    logCleanupFailure(dialect, cleanupFailure);
                 }
             }
         }
+    }
+
+    /** Runs after the work is committed (or handed to the caller's transaction); throwing would misreport it. */
+    private static void logCleanupFailure(DatabaseDialect dialect, Exception cleanupFailure) {
+        log.warn("[SchemaSynchronizer] Synchronization completed, but releasing the {} lock or restoring "
+                + "the connection failed; the session may keep the lock until the connection closes",
+                dialect.id(), cleanupFailure);
     }
 
     private SchemaSynchronizationResult synchronizeImplicitDdlDialect(Connection conn, SchemaDefinition def,
@@ -400,9 +407,10 @@ public class SchemaSynchronizer {
                 DialectSupport.releaseLock(conn, dialect, lockToken);
             } catch (SQLException | RuntimeException releaseFailure) {
                 if (primaryFailure == null) {
-                    throw releaseFailure;
+                    logCleanupFailure(dialect, releaseFailure);
+                } else {
+                    primaryFailure.addSuppressed(releaseFailure);
                 }
-                primaryFailure.addSuppressed(releaseFailure);
             }
         }
     }
@@ -535,6 +543,9 @@ public class SchemaSynchronizer {
                         ColumnSpec target = withDefaultNumericPrecision(withDefaultFractionalPrecision(
                                 foldNationalType(ColumnDefinitionParser.parse(col.definition()), dialect), dialect),
                                 col.definition(), dialect);
+                        if (dialect == DatabaseDialect.ORACLE) {
+                            target = oracleComparableTarget(target);
+                        }
                         LiveColumn comparableLive = dialect == DatabaseDialect.ORACLE
                                 ? oracleComparableLive(liveColumns.get(colName), target)
                                 : liveColumns.get(colName);
@@ -1536,10 +1547,12 @@ public class SchemaSynchronizer {
                 && (defaultExpr.contains("nextval(") || defaultExpr.matches("(?is).*\\.\\s*nextval\\b.*"));
     }
 
+    static final int ORACLE_FLOAT_MAX_PRECISION = 126;
+
     /**
-     * Oracle stores INTEGER/INT/SMALLINT as {@code NUMBER(38,0)}, and DOUBLE PRECISION/REAL as FLOAT;
-     * compare those as the declared type. ANSI NUMERIC/DECIMAL without precision already carry
-     * (38,0) from {@link #withDefaultNumericPrecision}.
+     * Oracle stores INTEGER/INT/SMALLINT as {@code NUMBER(38,0)}; compare those as the declared type.
+     * ANSI NUMERIC/DECIMAL without precision already carry (38,0) from {@link #withDefaultNumericPrecision}.
+     * A FLOAT without a reported binary precision is {@code FLOAT(126)}.
      */
     static LiveColumn oracleComparableLive(LiveColumn live, ColumnSpec target) {
         boolean integerStorage = "NUMERIC".equals(live.baseType())
@@ -1549,10 +1562,34 @@ public class SchemaSynchronizer {
             return new LiveColumn(target.baseType(), target.length(), target.scale(), live.notNull(),
                     live.defaultExpr());
         }
-        if ("FLOAT".equals(live.baseType()) && ColumnDefinitionParser.floatRank(target.baseType()) > 0) {
-            return new LiveColumn(target.baseType(), null, null, live.notNull(), live.defaultExpr());
+        if ("FLOAT".equals(live.baseType()) && live.length() == null) {
+            return new LiveColumn("FLOAT", ORACLE_FLOAT_MAX_PRECISION, null, live.notNull(), live.defaultExpr());
         }
         return live;
+    }
+
+    /**
+     * Oracle stores the float family as FLOAT with a binary precision: FLOAT and DOUBLE PRECISION are
+     * {@code FLOAT(126)}, REAL is {@code FLOAT(63)}. The declaration compares as that FLOAT(n).
+     */
+    static ColumnSpec oracleComparableTarget(ColumnSpec target) {
+        Integer binaryPrecision = switch (target.baseType()) {
+            case "FLOAT" -> target.length() == null ? ORACLE_FLOAT_MAX_PRECISION : target.length();
+            case "DOUBLE PRECISION" -> ORACLE_FLOAT_MAX_PRECISION;
+            case "REAL" -> 63;
+            default -> null;
+        };
+        return binaryPrecision == null ? target
+                : new ColumnSpec("FLOAT", binaryPrecision, null, target.notNull(), target.defaultExpr());
+    }
+
+    /** Oracle rejects FLOAT(n) outside 1..126 at DDL time. */
+    static void requireSupportedFloatPrecision(ColumnSpec spec, DatabaseDialect dialect, String column) {
+        if (dialect == DatabaseDialect.ORACLE && "FLOAT".equals(spec.baseType()) && spec.length() != null
+                && (spec.length() < 1 || spec.length() > ORACLE_FLOAT_MAX_PRECISION)) {
+            throw new IllegalArgumentException("oracle FLOAT binary precision is 1.." + ORACLE_FLOAT_MAX_PRECISION
+                    + ": " + column + " FLOAT(" + spec.length() + ")");
+        }
     }
 
     public static boolean isIgnorableSchemaTable(String tableName) {
@@ -1650,6 +1687,7 @@ public class SchemaSynchronizer {
                     if (column.definition() != null) {
                         ColumnSpec spec = ColumnDefinitionParser.parse(column.definition());
                         requireSupportedFractionalPrecision(spec, dialect, table + "." + name);
+                        requireSupportedFloatPrecision(spec, dialect, table + "." + name);
                         requireMySqlOnlyAttributes(spec, column.definition(), dialect, table + "." + name);
                         requireNoMySqlColumnClauses(column.definition(), dialect, table + "." + name);
                         requireSupportedOnUpdate(spec, column.definition(), dialect, table + "." + name);
@@ -2040,6 +2078,9 @@ public class SchemaSynchronizer {
                 } else if (ColumnDefinitionParser.isNumeric(normalized) && size > 0 && size <= 1_000) {
                     length = size;
                     scale = decimalDigitsNull ? null : decimalDigits;
+                } else if (dialect == DatabaseDialect.ORACLE && "FLOAT".equals(normalized) && size > 0) {
+                    // ojdbc reports the binary precision (DATA_PRECISION) of FLOAT, REAL, and DOUBLE PRECISION.
+                    length = size;
                 } else if (dialect == DatabaseDialect.POSTGRESQL && "VECTOR".equals(normalized)) {
                     length = readVectorDimension(meta.getConnection(), tableName, name);
                 } else if (ColumnDefinitionParser.hasFractionalPrecision(normalized)) {

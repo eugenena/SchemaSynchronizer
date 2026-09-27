@@ -117,6 +117,11 @@ public final class NonDestructiveAlterPlanner {
                 return liveLen == null || targetLen == null || liveLen.equals(targetLen)
                         ? TypeChange.SAME : TypeChange.INCOMPATIBLE;
             }
+            // Only Oracle reads a live FLOAT precision (binary digits); a higher one keeps every stored value.
+            if ("FLOAT".equals(liveType) && liveLen != null && targetLen != null) {
+                return targetLen > liveLen ? TypeChange.WIDEN
+                        : targetLen < liveLen ? TypeChange.NARROW : TypeChange.SAME;
+            }
             if ("VECTOR".equals(liveType)) {
                 return java.util.Objects.equals(liveLen, targetLen)
                         ? TypeChange.SAME : TypeChange.INCOMPATIBLE;

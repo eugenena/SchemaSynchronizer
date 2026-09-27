@@ -511,6 +511,31 @@ class SchemaSynchronizerMariaDbIntegrationTest {
         }
     }
 
+    @Test
+    void nationalColumnsCompareTheCollationEvenWhenTheTypeMatches() throws Exception {
+        // `utf8` is utf8mb3 on every supported MariaDB; 10.6+ reports it as utf8mb3.
+        try (Connection connection = connection(); var statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE maria_items (id BIGINT NOT NULL PRIMARY KEY, nick NVARCHAR(20), "
+                    + "binned VARCHAR(20) CHARACTER SET utf8 COLLATE utf8_bin, "
+                    + "wide VARCHAR(20) CHARACTER SET utf8mb4) DEFAULT CHARSET = utf8mb4");
+        }
+        SchemaDefinition declared = new SchemaDefinition(2, "mariadb", Map.of("maria_items",
+                new SchemaDefinition.TableDef(null, List.of(
+                        new SchemaDefinition.ColumnDef("id", "BIGINT NOT NULL"),
+                        new SchemaDefinition.ColumnDef("nick", "NVARCHAR(20)"),
+                        new SchemaDefinition.ColumnDef("binned", "NVARCHAR(20)"),
+                        new SchemaDefinition.ColumnDef("wide", "NCHAR VARYING(20)")), List.of())),
+                List.of());
+        try (Connection connection = connection()) {
+            SchemaSynchronizationResult result = synchronizer().synchronizeWithResult(connection, declared);
+            assertThat(result.columnsAltered()).isZero();
+            assertThat(result.pendingSql()).hasSize(2)
+                    .anyMatch(sql -> sql.contains("MODIFY COLUMN binned") && sql.contains("utf8_bin"))
+                    .anyMatch(sql -> sql.contains("MODIFY COLUMN wide") && sql.contains("utf8mb4"))
+                    .noneMatch(sql -> sql.contains("nick"));
+        }
+    }
+
     private SchemaDefinition labelDefinition(String label) {
         return new SchemaDefinition(2, "mariadb", Map.of("maria_items",
                 new SchemaDefinition.TableDef("CREATE TABLE IF NOT EXISTS maria_items (id BIGINT NOT NULL PRIMARY KEY)",

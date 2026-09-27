@@ -401,11 +401,129 @@ class SchemaSynchronizerTest {
         assertThat(comparable(live, "NUMBER")).as("Oracle NUMBER is unbounded, not NUMBER(38,0)").isSameAs(live);
         assertThat(planFor("NUMBER NOT NULL", comparable(live, "NUMBER NOT NULL")).applySql())
                 .as("unbounded NUMBER widens NUMBER(38,0)").isNotEmpty();
-        LiveColumn floatLive = new LiveColumn("FLOAT", null, null, false, null);
-        assertThat(comparable(floatLive, "DOUBLE PRECISION").baseType()).isEqualTo("DOUBLE PRECISION");
-        assertThat(comparable(floatLive, "REAL").baseType()).isEqualTo("REAL");
         assertThat(SchemaSynchronizer.shouldSkipAlter("NUMBER(19) NOT NULL",
                 new LiveColumn("NUMERIC", 19, 0, true, "\"APP\".\"ISEQ$$_7\".nextval"))).isTrue();
+    }
+
+    @Test
+    void oracleFloatFamilyComparesByBinaryPrecision() {
+        record Cell(String declared, Integer liveBinaryPrecision, String expected) {}
+        List<Cell> cells = List.of(
+                new Cell("FLOAT", 126, "same"),
+                new Cell("FLOAT", null, "same"),
+                new Cell("DOUBLE PRECISION", 126, "same"),
+                new Cell("REAL", 63, "same"),
+                new Cell("FLOAT(126)", 126, "same"),
+                new Cell("FLOAT(63)", 63, "same"),
+                new Cell("FLOAT(10)", 10, "same"),
+                new Cell("REAL", 126, "pending"),
+                new Cell("REAL", null, "pending"),
+                new Cell("FLOAT(10)", 126, "pending"),
+                new Cell("FLOAT(10)", 63, "pending"),
+                new Cell("FLOAT(63)", 126, "pending"),
+                new Cell("FLOAT", 63, "MODIFY (c FLOAT)"),
+                new Cell("DOUBLE PRECISION", 63, "MODIFY (c DOUBLE PRECISION)"),
+                new Cell("FLOAT(126)", 10, "MODIFY (c FLOAT(126))"),
+                new Cell("REAL", 10, "MODIFY (c REAL)"),
+                new Cell("NUMBER(10)", 126, "pending"),
+                new Cell("BINARY_DOUBLE", 126, "pending"));
+        for (Cell cell : cells) {
+            NonDestructiveAlterPlanner.Plan plan = oracleFloatPlan(cell.declared(),
+                    new LiveColumn("FLOAT", cell.liveBinaryPrecision(), null, false, null));
+            switch (cell.expected()) {
+                case "same" -> {
+                    assertThat(plan.applySql()).as(cell.toString()).isEmpty();
+                    assertThat(plan.pendingSql()).as(cell.toString()).isEmpty();
+                }
+                case "pending" -> {
+                    assertThat(plan.applySql()).as(cell.toString()).isEmpty();
+                    assertThat(plan.pendingSql()).as(cell.toString()).singleElement().asString()
+                            .contains("MODIFY (c " + cell.declared() + ")");
+                }
+                default -> {
+                    assertThat(plan.pendingSql()).as(cell.toString()).isEmpty();
+                    assertThat(plan.applySql()).as(cell.toString())
+                            .containsExactly("ALTER TABLE t " + cell.expected());
+                }
+            }
+        }
+        // Another engine's live FLOAT carries no precision, so a declared FLOAT(n) is not compared there.
+        assertThat(NonDestructiveAlterPlanner.plan("t", "c", ColumnDefinitionParser.parse("FLOAT(10)"),
+                new LiveColumn("FLOAT", null, null, false, null)).pendingSql()).isEmpty();
+        // BINARY_FLOAT is a different type, not a FLOAT precision.
+        assertThat(oracleFloatPlan("REAL", new LiveColumn("BINARY_FLOAT", null, null, false, null))
+                .pendingSql()).isNotEmpty();
+    }
+
+    @Test
+    void oracleFloatPrecisionOutsideTheEngineRangeFailsValidation() {
+        for (String invalid : List.of("FLOAT(0)", "FLOAT(127)")) {
+            assertThatThrownBy(() -> SchemaSynchronizer.requireSupportedFloatPrecision(
+                    ColumnDefinitionParser.parse(invalid), DatabaseDialect.ORACLE, "t.c"))
+                    .as(invalid).isInstanceOf(IllegalArgumentException.class).hasMessageContaining("1..126");
+        }
+        for (String valid : List.of("FLOAT", "FLOAT(1)", "FLOAT(126)", "REAL", "DOUBLE PRECISION")) {
+            SchemaSynchronizer.requireSupportedFloatPrecision(
+                    ColumnDefinitionParser.parse(valid), DatabaseDialect.ORACLE, "t.c");
+        }
+        SchemaSynchronizer.requireSupportedFloatPrecision(
+                ColumnDefinitionParser.parse("FLOAT(200)"), DatabaseDialect.POSTGRESQL, "t.c");
+    }
+
+    @Test
+    void oracleSnapshotsKeepANonDefaultFloatPrecision() {
+        assertThat(SchemaSnapshotWriter.columnType("FLOAT", 126, null, DatabaseDialect.ORACLE)).isEqualTo("FLOAT");
+        assertThat(SchemaSnapshotWriter.columnType("FLOAT", 63, null, DatabaseDialect.ORACLE)).isEqualTo("FLOAT(63)");
+        assertThat(SchemaSnapshotWriter.columnType("FLOAT", 10, null, DatabaseDialect.ORACLE)).isEqualTo("FLOAT(10)");
+        assertThat(SchemaSnapshotWriter.columnType("FLOAT", 12, null, DatabaseDialect.MYSQL)).isEqualTo("FLOAT");
+        for (int precision : List.of(1, 10, 63, 126)) {
+            String written = SchemaSnapshotWriter.columnType("FLOAT", precision, null, DatabaseDialect.ORACLE);
+            NonDestructiveAlterPlanner.Plan replay = oracleFloatPlan(written,
+                    new LiveColumn("FLOAT", precision, null, false, null));
+            assertThat(replay.applySql()).as(written).isEmpty();
+            assertThat(replay.pendingSql()).as(written).isEmpty();
+        }
+    }
+
+    @Test
+    void oracleLocalTimeZoneLiveMetadataFoldsLikeTheDeclaration() {
+        record Cell(String declared, String liveTypeName, boolean drift) {}
+        List<Cell> cells = List.of(
+                new Cell("TIMESTAMP WITH LOCAL TIME ZONE", "TIMESTAMP(6) WITH LOCAL TIME ZONE", false),
+                new Cell("TIMESTAMP(6) WITH LOCAL TIME ZONE", "TIMESTAMP(6) WITH LOCAL TIME ZONE", false),
+                new Cell("TIMESTAMP(3) WITH LOCAL TIME ZONE", "TIMESTAMP(3) WITH LOCAL TIME ZONE", false),
+                new Cell("timestamp(3) with local time zone", "TIMESTAMP(3) WITH LOCAL TIME ZONE", false),
+                new Cell("TIMESTAMP(3) WITH LOCAL TIME ZONE", "TIMESTAMP(6) WITH LOCAL TIME ZONE", true),
+                new Cell("TIMESTAMP WITH LOCAL TIME ZONE", "TIMESTAMP(3) WITH LOCAL TIME ZONE", true),
+                new Cell("TIMESTAMP WITH TIME ZONE", "TIMESTAMP(6) WITH LOCAL TIME ZONE", true),
+                new Cell("TIMESTAMP", "TIMESTAMP(6) WITH LOCAL TIME ZONE", true),
+                new Cell("TIMESTAMP WITH LOCAL TIME ZONE", "TIMESTAMP(6) WITH TIME ZONE", true));
+        for (Cell cell : cells) {
+            String liveType = ColumnDefinitionParser.normalizeType(cell.liveTypeName());
+            LiveColumn live = new LiveColumn(liveType, SchemaSynchronizer.liveFractionalPrecision(
+                    cell.liveTypeName(), liveType, null, DatabaseDialect.ORACLE), null, false, null);
+            ColumnSpec target = SchemaSynchronizer.oracleComparableTarget(SchemaSynchronizer
+                    .withDefaultFractionalPrecision(ColumnDefinitionParser.parse(cell.declared()), DatabaseDialect.ORACLE));
+            NonDestructiveAlterPlanner.Plan plan = SchemaSynchronizer.oracleColumnPlan("t", "c", cell.declared(),
+                    NonDestructiveAlterPlanner.plan("t", "c", target, SchemaSynchronizer.oracleComparableLive(live, target)));
+            assertThat(plan.applySql()).as(cell.toString()).isEmpty();
+            assertThat(plan.pendingSql().isEmpty()).as(cell.toString()).isEqualTo(!cell.drift());
+        }
+        // Snapshots write ojdbc's TYPE_NAME, which parses back to the same type and precision.
+        for (int precision : List.of(0, 3, 6, 9)) {
+            String typeName = "TIMESTAMP(" + precision + ") WITH LOCAL TIME ZONE";
+            String written = SchemaSnapshotWriter.columnType(typeName, 11, precision, DatabaseDialect.ORACLE);
+            ColumnSpec replayed = ColumnDefinitionParser.parse(written);
+            assertThat(replayed.baseType()).as(written).isEqualTo("TIMESTAMPLTZ");
+            assertThat(replayed.length()).as(written).isEqualTo(precision);
+        }
+    }
+
+    private static NonDestructiveAlterPlanner.Plan oracleFloatPlan(String declared, LiveColumn live) {
+        ColumnSpec target = SchemaSynchronizer.oracleComparableTarget(ColumnDefinitionParser.parse(declared));
+        NonDestructiveAlterPlanner.Plan plan = NonDestructiveAlterPlanner.plan("t", "c", target,
+                SchemaSynchronizer.oracleComparableLive(live, target));
+        return SchemaSynchronizer.oracleColumnPlan("t", "c", declared, plan);
     }
 
     private static LiveColumn comparable(LiveColumn live, String definition) {

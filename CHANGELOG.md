@@ -37,6 +37,10 @@
 - Dry-run no longer executes `verificationSql`, and uses transactional rollback only on
   engines that support it.
 - Duplicate-object adoption classifies errors by SQLState and vendor code only.
+- A failure to release the lock (or restore auto-commit) after a successful sync is logged as a
+  warning and the result is returned; the work is already committed, or handed to the
+  caller's transaction. After a failed sync it is
+  still attached to the original exception as suppressed.
 - SQL Server and Oracle allow 128-character identifiers; offline `validate` enforces each
   engine's limit for the schema name.
 

@@ -272,6 +272,48 @@ class SchemaSynchronizerSqlServerIntegrationTest {
         }
     }
 
+    @Test
+    void bareDatetime2IsTheEngineDefaultPrecision() throws Exception {
+        String create = "CREATE TABLE sqlserver_strict (id BIGINT NOT NULL, fine DATETIME2 NOT NULL, "
+                + "coarse DATETIME2(3), PRIMARY KEY (id))";
+        try (Connection connection = connection(); var statement = connection.createStatement()) {
+            statement.execute(create);
+        }
+        SchemaDefinition relaxed = strictDefinition(create, List.of(
+                new SchemaDefinition.ColumnDef("id", "BIGINT NOT NULL"),
+                new SchemaDefinition.ColumnDef("fine", "DATETIME2"),
+                new SchemaDefinition.ColumnDef("coarse", "DATETIME2(3)")), List.of());
+        try (Connection connection = connection()) {
+            SchemaSynchronizationResult result = synchronizer(true).synchronizeWithResult(connection, relaxed);
+            assertThat(result.pendingSql()).isEmpty();
+            assertThat(result.columnsAltered()).isEqualTo(1);
+        }
+        try (Connection connection = connection()) {
+            SchemaSynchronizationResult strict = synchronizer(true).synchronizeWithResult(connection, relaxed);
+            assertThat(strict.pendingSql()).isEmpty();
+            assertThat(strict.changed()).isFalse();
+        }
+        try (Connection connection = connection(); var statement = connection.createStatement();
+             var rows = statement.executeQuery("SELECT scale, is_nullable FROM sys.columns "
+                     + "WHERE object_id = OBJECT_ID(N'dbo.sqlserver_strict') AND name = 'fine'")) {
+            assertThat(rows.next()).isTrue();
+            assertThat(rows.getInt(1)).isEqualTo(7);
+            assertThat(rows.getBoolean(2)).isTrue();
+        }
+
+        SchemaDefinition swapped = strictDefinition(create, List.of(
+                new SchemaDefinition.ColumnDef("id", "BIGINT NOT NULL"),
+                new SchemaDefinition.ColumnDef("fine", "DATETIME2(3)"),
+                new SchemaDefinition.ColumnDef("coarse", "DATETIME2")), List.of());
+        try (Connection connection = connection()) {
+            SchemaSynchronizationResult drift = synchronizer(false).synchronizeWithResult(connection, swapped);
+            assertThat(drift.columnsAltered()).isZero();
+            assertThat(drift.pendingSql()).hasSize(2)
+                    .anyMatch(sql -> sql.contains("ALTER COLUMN fine DATETIME2(3)"))
+                    .anyMatch(sql -> sql.contains("ALTER COLUMN coarse DATETIME2"));
+        }
+    }
+
     private static List<SchemaDefinition.ColumnDef> columns(String label, String code, String qty) {
         return List.of(
                 new SchemaDefinition.ColumnDef("id", "BIGINT NOT NULL IDENTITY(1,1)"),

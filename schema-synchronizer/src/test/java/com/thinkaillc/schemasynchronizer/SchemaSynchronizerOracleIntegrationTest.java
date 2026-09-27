@@ -224,6 +224,87 @@ class SchemaSynchronizerOracleIntegrationTest {
         }
     }
 
+    @Test
+    void floatBinaryPrecisionAndLocalTimeZonePrecisionAreCompared(@TempDir Path tempDir) throws Exception {
+        String create = "CREATE TABLE oracle_strict (id NUMBER(10) NOT NULL, single_col REAL, double_col FLOAT, "
+                + "narrow FLOAT(10), widen REAL, local_ts TIMESTAMP WITH LOCAL TIME ZONE, "
+                + "local_ms TIMESTAMP(3) WITH LOCAL TIME ZONE, PRIMARY KEY (id))";
+        List<SchemaDefinition.ColumnDef> matching = List.of(
+                new SchemaDefinition.ColumnDef("id", "NUMBER(10) NOT NULL"),
+                new SchemaDefinition.ColumnDef("single_col", "REAL"),
+                new SchemaDefinition.ColumnDef("double_col", "DOUBLE PRECISION"),
+                new SchemaDefinition.ColumnDef("narrow", "FLOAT(10)"),
+                new SchemaDefinition.ColumnDef("widen", "FLOAT(63)"),
+                new SchemaDefinition.ColumnDef("local_ts", "TIMESTAMP(6) WITH LOCAL TIME ZONE"),
+                new SchemaDefinition.ColumnDef("local_ms", "TIMESTAMP(3) WITH LOCAL TIME ZONE"));
+        try (Connection connection = connection()) {
+            assertThat(synchronizer(true).synchronizeWithResult(connection,
+                    strictDefinition(create, matching, List.of())).tablesCreated()).isEqualTo(1);
+        }
+        try (Connection connection = connection()) {
+            SchemaSynchronizationResult strict = synchronizer(true)
+                    .synchronizeWithResult(connection, strictDefinition(create, matching, List.of()));
+            assertThat(strict.pendingSql()).isEmpty();
+            assertThat(strict.changed()).isFalse();
+        }
+
+        List<SchemaDefinition.ColumnDef> drifted = List.of(
+                new SchemaDefinition.ColumnDef("id", "NUMBER(10) NOT NULL"),
+                new SchemaDefinition.ColumnDef("single_col", "FLOAT"),
+                new SchemaDefinition.ColumnDef("double_col", "REAL"),
+                new SchemaDefinition.ColumnDef("narrow", "FLOAT(126)"),
+                new SchemaDefinition.ColumnDef("widen", "DOUBLE PRECISION"),
+                new SchemaDefinition.ColumnDef("local_ts", "TIMESTAMP(3) WITH LOCAL TIME ZONE"),
+                new SchemaDefinition.ColumnDef("local_ms", "TIMESTAMP WITH LOCAL TIME ZONE"));
+        try (Connection connection = connection()) {
+            SchemaSynchronizationResult result = synchronizer(false)
+                    .synchronizeWithResult(connection, strictDefinition(create, drifted, List.of()));
+            // A higher binary precision keeps every stored value; a lower one or any temporal change does not.
+            assertThat(result.columnsAltered()).isEqualTo(3);
+            assertThat(result.pendingSql()).hasSize(3)
+                    .anyMatch(sql -> sql.contains("MODIFY (double_col REAL)"))
+                    .anyMatch(sql -> sql.contains("MODIFY (local_ts TIMESTAMP(3) WITH LOCAL TIME ZONE)"))
+                    .anyMatch(sql -> sql.contains("MODIFY (local_ms TIMESTAMP WITH LOCAL TIME ZONE)"));
+        }
+        try (Connection connection = connection(); var statement = connection.createStatement();
+             var rows = statement.executeQuery("SELECT column_name, data_precision FROM user_tab_columns "
+                     + "WHERE table_name = 'ORACLE_STRICT' AND data_type = 'FLOAT'")) {
+            Map<String, Integer> precisions = new java.util.HashMap<>();
+            while (rows.next()) {
+                precisions.put(rows.getString(1).toLowerCase(Locale.ROOT), rows.getInt(2));
+            }
+            assertThat(precisions).containsEntry("single_col", 126).containsEntry("double_col", 126)
+                    .containsEntry("narrow", 126).containsEntry("widen", 126);
+        }
+
+        try (Connection connection = connection(); var statement = connection.createStatement()) {
+            dropIfExists(statement, "oracle_strict");
+        }
+        try (Connection connection = connection()) {
+            synchronizer(true).synchronizeWithResult(connection, strictDefinition(create, matching, List.of()));
+        }
+        Path snapshot = tempDir.resolve("schema-definition.json");
+        try (Connection connection = connection()) {
+            SchemaSnapshotWriter.writeSnapshot(connection, schema(), snapshot);
+        }
+        SchemaDefinition serialized = new ObjectMapper().readValue(snapshot.toFile(), SchemaDefinition.class);
+        assertThat(serialized.tables().get("oracle_strict").columns())
+                .extracting(SchemaDefinition.ColumnDef::definition)
+                .contains("FLOAT(63)", "FLOAT", "FLOAT(10)", "TIMESTAMP(6) WITH LOCAL TIME ZONE",
+                        "TIMESTAMP(3) WITH LOCAL TIME ZONE");
+        try (Connection connection = connection(); var statement = connection.createStatement()) {
+            dropIfExists(statement, "oracle_strict");
+        }
+        try (Connection connection = connection()) {
+            assertThat(synchronizer(true).synchronizeWithResult(connection, serialized).tablesCreated()).isEqualTo(1);
+        }
+        try (Connection connection = connection()) {
+            SchemaSynchronizationResult replayed = synchronizer(true).synchronizeWithResult(connection, serialized);
+            assertThat(replayed.pendingSql()).isEmpty();
+            assertThat(replayed.changed()).isFalse();
+        }
+    }
+
     private SchemaDefinition strictDefinition(String create, List<SchemaDefinition.ColumnDef> columns,
                                               List<String> indexes) {
         return new SchemaDefinition(2, "oracle", Map.of("oracle_strict",
