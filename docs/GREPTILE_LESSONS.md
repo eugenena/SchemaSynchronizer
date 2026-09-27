@@ -88,6 +88,103 @@
   closed with an actionable message for exclusion constraints that need an explicit
   ordered change set. Cross-schema replay tests must verify enforcement, not just DDL.
 
+## 2026-09-26 — PR #12 (review 4) — attributes invisible to the type comparison
+
+- **Bug:** `NVARCHAR` over a live `utf8mb4` `VARCHAR` of the same length was reported as
+  converged: the national check ran only when some other change was planned. A national
+  widen over `utf8mb3_bin` reset the collation. MySQL `VARCHAR DEFAULT 'CURRENT_TIMESTAMP'`
+  snapshotted as the expression `CURRENT_TIMESTAMP`. Fractional-second precision was
+  discarded on both sides for every engine, so `TIMESTAMP(3) WITH TIME ZONE` vs `(6)` (and
+  `DATETIME(3)` vs `DATETIME`) never drifted; Oracle `WITH LOCAL TIME ZONE` folded into
+  `WITH TIME ZONE`.
+- **Also found while fixing:** Connector/J and MariaDB Connector/J return `DECIMAL_DIGITS = null`
+  for `DATETIME`/`TIMESTAMP`/`TIME`, so the MySQL snapshot rule `DATETIME(scale)` never fired
+  and `DATETIME(3)` snapshots replayed as `DATETIME`. The unit test passed a scale the driver
+  never supplies. The internal review also found that MySQL expression defaults snapshotted
+  as `DEFAULT uuid()` (MySQL requires parentheses), and that `shouldSkipAlter` substring-matched
+  `IDENTITY`/`SERIAL` inside string literals, silently skipping the whole column comparison.
+  A later round found MySQL defaults that the server stores rewritten (`NOW(3)` becomes
+  `CURRENT_TIMESTAMP(3)`, `1` becomes `1.00`, `'… 00:00:00'` becomes `'… 00:00:00.000'`) were
+  auto-applied with `MODIFY COLUMN` on every sync, because nothing tested apply-then-resync.
+  Masking literals in `shouldSkipAlter` then exposed that the parser stripped `IDENTITY` and
+  `AUTO_INCREMENT` inside quoted defaults (`'my IDENTITY'` became `'my'`): a fix to one
+  literal-blind matcher must audit every other matcher applied to the same text.
+- **Missed because:** Attribute checks (charset, collation) were gated on "the planner
+  proposed a change", but an attribute that the type comparison ignores can never cause a
+  proposed change. Type normalization stripped precision "for comparison" without a cell
+  asserting that a precision change drifts. Unit tests fed JDBC metadata values from memory
+  instead of from a real driver.
+- **Prevention:**
+  - Rule (CONTRIBUTING): an attribute the planner does not compare must be checked on
+    every sync, not only when a change is planned; add a "types equal, attribute differs"
+    cell.
+  - Rule (CONTRIBUTING): JDBC metadata fields used by snapshot/compare code must be proven
+    against each real driver in an integration test, not assumed in unit tests.
+  - `DialectDeclarationContractTest#temporalPrecisionChangesAreNeverSilent`,
+    `#mysqlNationalDeclarationReportsCharsetDriftEvenWhenTypesMatch`,
+    `#mysqlUnquotedLiteralDefaultsAreQuotedButExpressionsAndNumbersAreNot`,
+    `#zonedTemporalFormsParseWithPrecision` (per-engine precision limits),
+    `SchemaSynchronizerTest#skipsNextvalIdentityDefaults` (keywords inside literals).
+  - Rule (CONTRIBUTING): every auto-applied change needs an apply-then-resync cell; a
+    server that stores the value rewritten must not re-apply on the next sync.
+    `DialectDeclarationContractTest#mysqlModifyColumnIsPendingWhenItWouldResetUndeclaredAttributes`
+    (default lattice), `SchemaSynchronizerMySqlIntegrationTest` and
+    `SchemaSynchronizerMariaDbIntegrationTest#appliedDefaultsThatTheServerRewritesConvergeOnTheNextSync`.
+  - Integration: `SchemaSynchronizerMySqlIntegrationTest#nationalCharsetCollationAndPrecisionDriftArePending`,
+    `SchemaSynchronizerMariaDbIntegrationTest#nationalAndTemporalDeclarationsConvergeAndDriftIsPending`,
+    temporal columns and precision-drift cells in the PostgreSQL, SQL Server, and Oracle
+    round-trip tests.
+- **Round 12 (same class, still missed):** `mySqlBlockReason` accepted `DEFAULT 'COLLATE'`,
+  `'CHARACTER SET'`, or `'COMMENT'` as the declared clause, so `MODIFY COLUMN` reset a live
+  collation, charset, or comment. The literal-blind audit above covered the parser and
+  `shouldSkipAlter`, not this third matcher. MySQL binary defaults (`0x6162`) were quoted into
+  `'0x6162'`: permanent pending, and snapshots that did not replay. The snapshot-replay
+  integration test had no binary column.
+  - Rule (CONTRIBUTING): every keyword check on a column definition runs on
+    `SqlLexer.mask`ed text; each needs a cell with the keyword inside a default literal
+    (`DialectDeclarationContractTest#keywordsInsideDefaultLiteralsDoNotSatisfyMySqlAttributeChecks`).
+  - Rule (CONTRIBUTING): the snapshot-replay integration table covers every type family the
+    snapshot writer has a branch for, with a default
+    (`DialectDeclarationContractTest#mysqlBinaryDefaultsCompareAsBytes`, binary columns in
+    `SchemaSynchronizerMySqlIntegrationTest#strictResyncAndSnapshotReplayHaveNoPendingDrift`).
+- **Round 13:** the parser stripped `ON UPDATE` off the default and nothing compared it, so a
+  drop-not-null `MODIFY` silently added it and snapshots dropped it: the "attribute the
+  planner does not compare" rule was applied to charset/collation, not to clauses the parser
+  itself removes. MariaDB reports non-UTF-8 binary bytes as `?`, and control characters
+  escaped, so those defaults could not round-trip.
+  - Rule (CONTRIBUTING, extended): anything the parser strips from a definition is an attribute
+    the planner does not compare; it needs its own every-sync comparison and a snapshot branch
+    (`DialectDeclarationContractTest#onUpdateIsParsedOutOfTheDefaultAndComparedOnEverySync`,
+    `SchemaSynchronizerMariaDbIntegrationTest#binaryDefaultsAreReadExactlyAndOnUpdateIsCompared`).
+  - A value information_schema reports lossily is read another way or kept pending, never
+    compared in its lossy form. Round 14 found MySQL also truncates binary defaults at the
+    first zero byte, so binary literal defaults were read another way (see rounds 16–17).
+  - Round 15: that read needs table `SELECT`, which a DDL-only account lacks, and it ran after
+    auto-committed `CREATE TABLE`. Rule (CONTRIBUTING): a new metadata query must state its
+    privilege and degrade to pending on access denied, never abort mid-apply
+    (`DialectDeclarationContractTest#binaryDefaultsWithoutTableSelectStayPending`).
+  - Rounds 16–17: new tables with a binary default still stalled for accounts without SELECT.
+    The `DEFAULT(col)` read also answered NULL for every `NOT NULL` column (it needs a real
+    row, and the outer-join row is all NULL), falling back to the lossy value silently. It
+    failed on a column named like the probe's alias. Every binary cell was nullable, and every
+    test account had SELECT, so neither showed up. The read now uses `SHOW CREATE TABLE` with
+    binary results: exact on every supported version and needs no SELECT. Rules
+    (CONTRIBUTING): a metadata read is proven with a `NOT NULL` cell and an empty table, and a
+    least-privilege account runs the convergence test
+    (`SchemaSynchronizerMySqlIntegrationTest#binaryDefaultsConvergeForADdlOnlyAccount`, run
+    with `-Dschema.test.mysql.jdbc.admin.user/.password`;
+    `DialectDeclarationContractTest#binaryDefaultsAreReadFromRawShowCreateTableBytes`).
+  - Round 17: `mySqlBlockReason` let `comment_count` in an expression default count as a
+    `COMMENT` clause. The parser rejects `COMMENT`/`COLLATE`/`CHARACTER SET`, so those now
+    always block; `ON UPDATE`/`AUTO_INCREMENT` match as tokens.
+  - Round 18: a declared binary string literal was encoded as UTF-8 for comparison, but the
+    server stores the session's `character_set_client` bytes. On a latin1 connection `'é'`
+    compared equal to `0xC3A9`, and the widen's `MODIFY COLUMN` rewrote it to `0xE9`. Only
+    ASCII literals are compared as bytes now; others stay pending. Rule (CONTRIBUTING): a value
+    converted for comparison must be converted the way the server does in every session
+    setting, or not compared (`DialectDeclarationContractTest#mysqlBinaryDefaultsCompareAsBytes`,
+    `SchemaSynchronizerMySqlIntegrationTest#nonAsciiBinaryStringDefaultsAreNeverRewrittenByAWiden`).
+
 ## 2026-09-26 — PR #12 — Oracle/SQL Server correctness and guardrail review rounds
 
 - **Bug (verification scope regression):** Commit d7f0dd6 applied the change-set

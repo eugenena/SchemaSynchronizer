@@ -81,7 +81,8 @@ class SchemaSynchronizerOracleIntegrationTest {
                 + "code INTEGER NOT NULL, label VARCHAR2(40) DEFAULT 'new' NOT NULL, "
                 + "qty NUMBER(10,2) DEFAULT 0, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, "
                 + "national_name NVARCHAR2(50), amount NUMBER, total NUMERIC, ratio DOUBLE PRECISION, "
-                + "flag CHAR(1), token RAW(16), PRIMARY KEY (id))";
+                + "flag CHAR(1), token RAW(16), zoned TIMESTAMP(3) WITH TIME ZONE, "
+                + "local_ts TIMESTAMP WITH LOCAL TIME ZONE, coarse TIMESTAMP(0), PRIMARY KEY (id))";
         List<String> indexes = List.of(
                 "CREATE INDEX idx_oracle_strict_label ON oracle_strict (label, code)",
                 "CREATE UNIQUE INDEX idx_oracle_strict_code ON oracle_strict (code);");
@@ -96,7 +97,10 @@ class SchemaSynchronizerOracleIntegrationTest {
                 new SchemaDefinition.ColumnDef("total", "NUMERIC"),
                 new SchemaDefinition.ColumnDef("ratio", "DOUBLE PRECISION"),
                 new SchemaDefinition.ColumnDef("flag", "CHAR(1)"),
-                new SchemaDefinition.ColumnDef("token", "RAW(16)")), indexes);
+                new SchemaDefinition.ColumnDef("token", "RAW(16)"),
+                new SchemaDefinition.ColumnDef("zoned", "TIMESTAMP(3) WITH TIME ZONE"),
+                new SchemaDefinition.ColumnDef("local_ts", "TIMESTAMP WITH LOCAL TIME ZONE"),
+                new SchemaDefinition.ColumnDef("coarse", "TIMESTAMP(0)")), indexes);
 
         try (Connection connection = connection()) {
             assertThat(synchronizer(true).synchronizeWithResult(connection, initial).tablesCreated()).isEqualTo(1);
@@ -122,7 +126,10 @@ class SchemaSynchronizerOracleIntegrationTest {
                 new SchemaDefinition.ColumnDef("total", "NUMERIC"),
                 new SchemaDefinition.ColumnDef("ratio", "DOUBLE PRECISION"),
                 new SchemaDefinition.ColumnDef("flag", "CHAR(1)"),
-                new SchemaDefinition.ColumnDef("token", "RAW(16)")), indexes);
+                new SchemaDefinition.ColumnDef("token", "RAW(16)"),
+                new SchemaDefinition.ColumnDef("zoned", "TIMESTAMP(3) WITH TIME ZONE"),
+                new SchemaDefinition.ColumnDef("local_ts", "TIMESTAMP WITH LOCAL TIME ZONE"),
+                new SchemaDefinition.ColumnDef("coarse", "TIMESTAMP(0)")), indexes);
         try (Connection connection = connection()) {
             SchemaSynchronizationResult altered = synchronizer(true).synchronizeWithResult(connection, relaxed);
             assertThat(altered.pendingSql()).isEmpty();
@@ -130,6 +137,22 @@ class SchemaSynchronizerOracleIntegrationTest {
         }
         try (Connection connection = connection()) {
             assertThat(synchronizer(true).synchronizeWithResult(connection, relaxed).changed()).isFalse();
+        }
+
+        List<SchemaDefinition.ColumnDef> finer = relaxed.tables().get("oracle_strict").columns().stream()
+                .map(column -> switch (column.name()) {
+                    case "zoned" -> new SchemaDefinition.ColumnDef("zoned", "TIMESTAMP(6) WITH TIME ZONE");
+                    case "local_ts" -> new SchemaDefinition.ColumnDef("local_ts", "TIMESTAMP WITH TIME ZONE");
+                    default -> column;
+                })
+                .toList();
+        try (Connection connection = connection()) {
+            SchemaSynchronizationResult drift = synchronizer(false)
+                    .synchronizeWithResult(connection, strictDefinition(create, finer, indexes));
+            assertThat(drift.columnsAltered()).isZero();
+            assertThat(drift.pendingSql())
+                    .anyMatch(sql -> sql.contains("MODIFY (zoned TIMESTAMP(6) WITH TIME ZONE"))
+                    .anyMatch(sql -> sql.contains("MODIFY (local_ts TIMESTAMP WITH TIME ZONE"));
         }
 
         Path snapshot = tempDir.resolve("schema-definition.json");

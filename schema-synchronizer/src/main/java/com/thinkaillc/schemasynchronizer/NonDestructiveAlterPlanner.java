@@ -6,6 +6,7 @@ package com.thinkaillc.schemasynchronizer;
 import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Objects;
 import java.util.Set;
 
@@ -87,8 +88,8 @@ public final class NonDestructiveAlterPlanner {
             String liveType, Integer liveLen, Integer liveScale,
             String targetType, Integer targetLen, Integer targetScale) {
         if (liveType.equals(targetType)) {
-            if ("BINARY".equals(liveType)) {
-                // Resizing fixed-length binary re-pads every stored value.
+            if ("BINARY".equals(liveType) || "BIT".equals(liveType)) {
+                // Resizing fixed-length binary or a bit string re-pads every stored value.
                 return java.util.Objects.equals(liveLen, targetLen) ? TypeChange.SAME : TypeChange.INCOMPATIBLE;
             }
             if (ColumnDefinitionParser.hasLength(liveType)) {
@@ -110,6 +111,11 @@ public final class NonDestructiveAlterPlanner {
                             ? TypeChange.SAME : TypeChange.WIDEN;
                 }
                 return TypeChange.NARROW;
+            }
+            if (ColumnDefinitionParser.hasFractionalPrecision(liveType)) {
+                // Unknown precision on either side is not comparable; any change rounds or rewrites values.
+                return liveLen == null || targetLen == null || liveLen.equals(targetLen)
+                        ? TypeChange.SAME : TypeChange.INCOMPATIBLE;
             }
             if ("VECTOR".equals(liveType)) {
                 return java.util.Objects.equals(liveLen, targetLen)
@@ -151,6 +157,9 @@ public final class NonDestructiveAlterPlanner {
         if ("NUMERIC".equals(baseType) && length != null && length > 0) {
             return scale == null ? "NUMERIC(" + length + ")" : "NUMERIC(" + length + "," + scale + ")";
         }
+        if (ColumnDefinitionParser.hasFractionalPrecision(baseType) && length != null && length >= 0) {
+            return baseType + "(" + length + ")";
+        }
         if ("VECTOR".equals(baseType) && length != null && length > 0) {
             return "VECTOR(" + length + ")";
         }
@@ -170,6 +179,6 @@ public final class NonDestructiveAlterPlanner {
         if (name == null || !name.matches("[a-zA-Z_][a-zA-Z0-9_]*")) {
             throw new IllegalArgumentException("invalid identifier: " + name);
         }
-        return name.toLowerCase();
+        return name.toLowerCase(Locale.ROOT);
     }
 }

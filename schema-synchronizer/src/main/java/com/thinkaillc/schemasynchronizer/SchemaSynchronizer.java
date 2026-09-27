@@ -10,6 +10,7 @@ import org.slf4j.LoggerFactory;
 import javax.sql.DataSource;
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
@@ -433,6 +434,7 @@ public class SchemaSynchronizer {
         int columnsAdded = 0;
         int columnsAltered = 0;
         List<String> pendingSql = new ArrayList<>();
+        Boolean explicitTimestamps = null;
 
         for (Map.Entry<String, SchemaDefinition.TableDef> entry : def.tables().entrySet()) {
             String tableName = entry.getKey().toLowerCase(Locale.ROOT);
@@ -445,6 +447,11 @@ public class SchemaSynchronizer {
             if (!existingTables.contains(tableName)) {
                 if (tableDef.createSql() != null) {
                     NonDestructiveSqlPolicy.requireCreateTable(tableDef.createSql(), dialect);
+                    if (dialect.isMySqlFamily() && declaresTimestampColumn(tableDef.createSql())) {
+                        explicitTimestamps = explicitTimestamps != null ? explicitTimestamps
+                                : mySqlExplicitDefaultsForTimestamp(conn);
+                        requireExplicitTimestampDefaults(explicitTimestamps, "creating table " + tableName);
+                    }
                     if (applyChanges) {
                         execute(conn, dialect.executableSql(tableDef.createSql()));
                         log.info("[SchemaSynchronizer] Created table: {}", tableName);
@@ -462,6 +469,8 @@ public class SchemaSynchronizer {
 
             if (tableDef.columns() != null) {
                 Map<String, LiveColumn> liveColumns = getLiveColumns(meta, tableName, dialect);
+                Map<String, String> liveOnUpdate = dialect.isMySqlFamily() && !liveColumns.isEmpty()
+                        ? SchemaSnapshotWriter.mysqlOnUpdate(conn, tableName) : Map.of();
                 Set<String> targetColumns = new HashSet<>();
 
                 for (SchemaDefinition.ColumnDef col : tableDef.columns()) {
@@ -470,7 +479,13 @@ public class SchemaSynchronizer {
                     targetColumns.add(colName);
                     if (!liveColumns.containsKey(colName)) {
                         if (col.definition() != null) {
-                            ColumnDefinitionParser.parse(col.definition());
+                            ColumnSpec added = ColumnDefinitionParser.parse(col.definition());
+                            if (dialect.isMySqlFamily() && "TIMESTAMP".equals(added.baseType())) {
+                                explicitTimestamps = explicitTimestamps != null ? explicitTimestamps
+                                        : mySqlExplicitDefaultsForTimestamp(conn);
+                                requireExplicitTimestampDefaults(explicitTimestamps,
+                                        "adding column " + tableName + "." + colName);
+                            }
                             String sql = addColumnSql(tableName, col.name(), col.definition(), dialect);
                             if (applyChanges) {
                                 execute(conn, sql);
@@ -488,16 +503,50 @@ public class SchemaSynchronizer {
                         continue;
                     }
                     try {
-                        ColumnSpec target = foldNationalType(ColumnDefinitionParser.parse(col.definition()), dialect);
+                        ColumnSpec target = withDefaultFractionalPrecision(
+                                foldNationalType(ColumnDefinitionParser.parse(col.definition()), dialect), dialect);
                         LiveColumn comparableLive = dialect == DatabaseDialect.ORACLE
                                 ? oracleComparableLive(liveColumns.get(colName), target, col.definition())
                                 : liveColumns.get(colName);
+                        if (dialect.isMySqlFamily()) {
+                            target = new ColumnSpec(target.baseType(), target.length(), target.scale(),
+                                    target.notNull(),
+                                    mySqlComparableDefault(target.defaultExpr(), target.baseType(), target.length()));
+                            comparableLive = new LiveColumn(comparableLive.baseType(), comparableLive.length(),
+                                    comparableLive.scale(), comparableLive.notNull(),
+                                    mySqlComparableDefault(comparableLive.defaultExpr(), target.baseType(),
+                                            comparableLive.length()));
+                        }
+                        if (!dialect.isMySqlFamily() && ColumnDefinitionParser.onUpdateExpr(col.definition()) != null) {
+                            throw new IllegalArgumentException("ON UPDATE is supported only on MySQL/MariaDB");
+                        }
                         NonDestructiveAlterPlanner.Plan plan =
                                 NonDestructiveAlterPlanner.plan(tableName, col.name(), target, comparableLive);
                         if (dialect.isMySqlFamily()) {
-                            String blockedReason = plan.applySql().isEmpty() ? null
-                                    : mySqlBlockReason(mySqlColumnFacts(conn, tableName, colName), col.definition());
+                            boolean national = mySqlDeclaresNational(col.definition());
+                            boolean planned = !plan.applySql().isEmpty() || !plan.pendingSql().isEmpty();
+                            MySqlColumnFacts facts = planned || national
+                                    ? mySqlColumnFacts(conn, tableName, colName) : null;
+                            String blockedReason = planned ? mySqlBlockReason(facts, col.definition()) : null;
+                            if (blockedReason == null && mySqlUnpredictableDefaultChange(plan, target)) {
+                                blockedReason = mySqlUnpredictableDefaultReason(
+                                        ColumnDefinitionParser.parse(col.definition()).defaultExpr(),
+                                        liveColumns.get(colName).defaultExpr());
+                            }
                             plan = mySqlFamilyColumnPlan(tableName, col.name(), col.definition(), plan, blockedReason);
+                            plan = mySqlNationalDriftPlan(tableName, col.name(), col.definition(),
+                                    mySqlOnUpdateDrift(ColumnDefinitionParser.onUpdateExpr(col.definition()),
+                                            liveOnUpdate.get(colName)), plan);
+                            if (!plan.applySql().isEmpty() && "TIMESTAMP".equals(target.baseType())) {
+                                explicitTimestamps = explicitTimestamps != null ? explicitTimestamps
+                                        : mySqlExplicitDefaultsForTimestamp(conn);
+                                requireExplicitTimestampDefaults(explicitTimestamps,
+                                        "modifying column " + tableName + "." + colName);
+                            }
+                            if (national && plan.applySql().isEmpty() && plan.pendingSql().isEmpty()) {
+                                plan = mySqlNationalDriftPlan(tableName, col.name(), col.definition(),
+                                        mySqlNationalDrift(facts), plan);
+                            }
                         } else if (dialect == DatabaseDialect.SQLSERVER) {
                             LiveColumn liveCol = liveColumns.get(colName);
                             plan = sqlServerColumnPlan(tableName, col.name(), col.definition(), plan,
@@ -611,7 +660,8 @@ public class SchemaSynchronizer {
         if (!plan.pendingSql().isEmpty()) {
             return new NonDestructiveAlterPlanner.Plan(List.of(), List.of(
                     "ALTER TABLE " + tableName + " MODIFY COLUMN " + columnName
-                            + " " + definition + "; -- pending: unsafe type/nullability change"));
+                            + " " + definition + "; -- pending: unsafe type/nullability change"
+                            + (blockedReason == null ? "" : "; also " + blockedReason)));
         }
         if (!plan.applySql().isEmpty()) {
             return new NonDestructiveAlterPlanner.Plan(List.of(
@@ -621,44 +671,319 @@ public class SchemaSynchronizer {
         return plan;
     }
 
+    private static final Pattern MYSQL_NOW_SYNONYM = Pattern.compile(
+            "(?i)^(CURRENT_TIMESTAMP|LOCALTIMESTAMP|LOCALTIME|NOW)\\s*(\\(\\s*(\\d*)\\s*\\))?$");
+    private static final Pattern MYSQL_TEMPORAL_FRACTION = Pattern.compile("^'([^']*?)\\.(\\d*)'$");
+    private static final Pattern MYSQL_CURRENT_TIMESTAMP = Pattern.compile("^CURRENT_TIMESTAMP(?:\\((\\d+)\\))?$");
+    private static final Pattern MYSQL_DATETIME_LITERAL = Pattern.compile(
+            "^'\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}(?:\\.(\\d+))?'$");
+    private static final Pattern MYSQL_TIME_LITERAL = Pattern.compile("^'\\d{2}:\\d{2}:\\d{2}(?:\\.(\\d+))?'$");
+    private static final Pattern MYSQL_DECIMAL_LITERAL = Pattern.compile("^-?\\d+(?:\\.(\\d+))?$");
+    private static final Pattern MYSQL_BIT_LITERAL = Pattern.compile("^(?i)b'([01]+)'$");
+    private static final Pattern MYSQL_HEX_LITERAL = Pattern.compile("^(?:0x([0-9A-Fa-f]+)|[xX]'([0-9A-Fa-f]*)')$");
+    private static final Pattern MYSQL_STRING_LITERAL = Pattern.compile("^'(?:[^'\\\\]|'')*'$");
+    private static final Set<String> MYSQL_NUMERIC_DEFAULT_TYPES = Set.of("INTEGER", "BIGINT", "SMALLINT",
+            "TINYINT", "MEDIUMINT", "NUMERIC", "REAL", "DOUBLE PRECISION", "FLOAT", "BOOLEAN", "BIT");
+    private static final Set<String> MYSQL_INTEGER_DEFAULT_TYPES = Set.of("INTEGER", "BIGINT", "SMALLINT",
+            "TINYINT", "MEDIUMINT");
+    private static final Set<String> MYSQL_TEMPORAL_DEFAULT_TYPES = Set.of("DATE", "DATETIME", "TIMESTAMP", "TIME");
+
+    /**
+     * A MySQL/MariaDB default in the form the server stores it: NOW()/LOCALTIMESTAMP synonyms fold to
+     * CURRENT_TIMESTAMP[(n)], numeric and bit literals compare by value, zero fraction digits are dropped.
+     * YEAR is left alone: quoted and unquoted values map to different years.
+     */
+    static String mySqlComparableDefault(String defaultExpr, String normalizedType) {
+        return mySqlComparableDefault(defaultExpr, normalizedType, null);
+    }
+
+    static String mySqlComparableDefault(String defaultExpr, String normalizedType, Integer length) {
+        if (defaultExpr == null) {
+            return null;
+        }
+        String d = ColumnDefinitionParser.stripOuterParentheses(defaultExpr);
+        if (normalizedType.equals("BINARY") || normalizedType.equals("VARBINARY")) {
+            return mySqlBinaryDefault(d, normalizedType.equals("BINARY") ? length : null, defaultExpr);
+        }
+        Matcher now = MYSQL_NOW_SYNONYM.matcher(d);
+        if (now.matches() && (now.group(2) != null || !now.group(1).equalsIgnoreCase("NOW"))) {
+            String digits = now.group(3);
+            return digits == null || digits.isEmpty() || Integer.parseInt(digits) == 0
+                    ? "CURRENT_TIMESTAMP" : "CURRENT_TIMESTAMP(" + Integer.parseInt(digits) + ")";
+        }
+        if (MYSQL_NUMERIC_DEFAULT_TYPES.contains(normalizedType)) {
+            Matcher bits = MYSQL_BIT_LITERAL.matcher(d);
+            if (bits.matches()) {
+                return new java.math.BigInteger(bits.group(1), 2).toString();
+            }
+            if (d.equalsIgnoreCase("TRUE")) {
+                return "1";
+            }
+            if (d.equalsIgnoreCase("FALSE")) {
+                return "0";
+            }
+            String literal = d.length() >= 2 && d.startsWith("'") && d.endsWith("'") ? d.substring(1, d.length() - 1) : d;
+            try {
+                return new java.math.BigDecimal(literal.trim()).stripTrailingZeros().toPlainString();
+            } catch (NumberFormatException notNumeric) {
+                return defaultExpr;
+            }
+        }
+        if (MYSQL_TEMPORAL_DEFAULT_TYPES.contains(normalizedType)) {
+            Matcher fraction = MYSQL_TEMPORAL_FRACTION.matcher(d);
+            if (fraction.matches()) {
+                String digits = fraction.group(2).replaceFirst("0+$", "");
+                return "'" + fraction.group(1) + (digits.isEmpty() ? "" : "." + digits) + "'";
+            }
+        }
+        return defaultExpr;
+    }
+
+    /**
+     * MySQL reports binary defaults as {@code 0x6162}, MariaDB as {@code 'ab'}; both, and {@code X'6162'},
+     * compare as {@code X'6162'}. BINARY(n) pads with zero bytes to n.
+     */
+    private static String mySqlBinaryDefault(String d, Integer fixedLength, String original) {
+        String hex;
+        Matcher hexLiteral = MYSQL_HEX_LITERAL.matcher(d);
+        if (hexLiteral.matches()) {
+            hex = (hexLiteral.group(1) != null ? hexLiteral.group(1) : hexLiteral.group(2)).toUpperCase(Locale.ROOT);
+            if (hex.length() % 2 != 0) {
+                hex = "0" + hex;
+            }
+        } else if (MYSQL_STRING_LITERAL.matcher(d).matches() && d.chars().allMatch(c -> c < 0x80)) {
+            // The server stores a string literal in the session's character_set_client; only ASCII is the same bytes in all of them.
+            byte[] bytes = d.substring(1, d.length() - 1).replace("''", "'").getBytes(StandardCharsets.US_ASCII);
+            hex = java.util.HexFormat.of().withUpperCase().formatHex(bytes);
+        } else {
+            return original;
+        }
+        if (fixedLength != null && hex.length() < fixedLength * 2) {
+            hex = hex + "0".repeat(fixedLength * 2 - hex.length());
+        }
+        return "X'" + hex + "'";
+    }
+
+    /**
+     * MySQL/MariaDB round, truncate, and rewrite defaults (expressions, BIT, YEAR, FLOAT, excess
+     * scale or fraction digits), so auto-applying such a SET DEFAULT would re-run MODIFY COLUMN on
+     * every sync. Dropping a default always converges.
+     */
+    static boolean mySqlUnpredictableDefaultChange(NonDestructiveAlterPlanner.Plan plan, ColumnSpec comparableTarget) {
+        return plan.applyOps().contains(NonDestructiveAlterPlanner.Op.SET_DEFAULT)
+                && !mySqlStoredAsDeclared(comparableTarget);
+    }
+
+    /** Whether the server stores this canonical default exactly, for the column's type, scale and precision. */
+    static boolean mySqlStoredAsDeclared(ColumnSpec comparableTarget) {
+        String d = comparableTarget.defaultExpr();
+        if (d == null) {
+            return true;
+        }
+        String type = comparableTarget.baseType();
+        int precision = comparableTarget.length() == null ? 0 : comparableTarget.length();
+        if (type.equals("DATETIME") || type.equals("TIMESTAMP")) {
+            Matcher now = MYSQL_CURRENT_TIMESTAMP.matcher(d);
+            if (now.matches()) {
+                return (now.group(1) == null ? 0 : Integer.parseInt(now.group(1))) == precision;
+            }
+            // TIMESTAMP literals are stored in UTC and read back in the session time zone.
+            return type.equals("DATETIME") && fractionDigits(MYSQL_DATETIME_LITERAL.matcher(d)) <= precision;
+        }
+        if (type.equals("TIME")) {
+            return fractionDigits(MYSQL_TIME_LITERAL.matcher(d)) <= precision;
+        }
+        if (type.equals("DATE")) {
+            return d.matches("^'\\d{4}-\\d{2}-\\d{2}'$");
+        }
+        if (MYSQL_INTEGER_DEFAULT_TYPES.contains(type)) {
+            return d.matches("^-?\\d+$");
+        }
+        if (type.equals("NUMERIC")) {
+            int scale = comparableTarget.scale() == null ? 0 : comparableTarget.scale();
+            return fractionDigits(MYSQL_DECIMAL_LITERAL.matcher(d)) <= scale;
+        }
+        if (ColumnDefinitionParser.hasLength(type) && !type.contains("BINARY") && !type.equals("BIT")) {
+            // MariaDB reports control characters backslash-escaped, so they never compare equal.
+            return MYSQL_STRING_LITERAL.matcher(d).matches() && !d.matches("(?s).*\\s'$")
+                    && !d.matches("(?s).*\\p{Cntrl}.*");
+        }
+        return false;
+    }
+
+    /** Fraction digits of a matched literal (group 1), or {@link Integer#MAX_VALUE} if it does not match. */
+    private static int fractionDigits(Matcher literal) {
+        if (!literal.matches()) {
+            return Integer.MAX_VALUE;
+        }
+        return literal.group(1) == null ? 0 : literal.group(1).length();
+    }
+
+    static String mySqlUnpredictableDefaultReason(String declaredDefault, String liveDefault) {
+        return "DEFAULT " + declaredDefault + " is not auto-applied because the server may store it rewritten"
+                + " (server reports " + (liveDefault == null ? "no default" : liveDefault)
+                + "); declare it as a snapshot writes it";
+    }
+
+    /** MySQL Connector/J returns SQL NULL for "no default"; the text NULL is the string default 'NULL'. */
+    static boolean reportsNoDefaultAsNullText(DatabaseDialect dialect) {
+        return dialect != DatabaseDialect.POSTGRESQL && dialect != DatabaseDialect.MYSQL;
+    }
+
+    private static final Pattern TIMESTAMP_COLUMN_TYPE = Pattern.compile(
+            "(?i)(?:^|[,(])\\s*(?:`[^`]+`\\s*|\"[^\"]+\"\\s*|[\\p{L}\\p{N}_$#@]+\\s+)TIMESTAMP\\b");
+
+    /** Whether a MySQL CREATE TABLE declares a column of type TIMESTAMP (not a column named timestamp). */
+    static boolean declaresTimestampColumn(String createSql) {
+        return createSql != null && TIMESTAMP_COLUMN_TYPE.matcher(
+                SqlLexer.mask(createSql, SqlLexer.Mode.MYSQL, true, false)).find();
+    }
+
+    /**
+     * With explicit_defaults_for_timestamp OFF (the MariaDB default before 10.10), CREATE, ADD, and
+     * MODIFY give a TIMESTAMP column an undeclared NOT NULL and DEFAULT/ON UPDATE CURRENT_TIMESTAMP.
+     */
+    static void requireExplicitTimestampDefaults(boolean explicitDefaultsForTimestamp, String action) {
+        if (!explicitDefaultsForTimestamp) {
+            throw new IllegalStateException("explicit_defaults_for_timestamp is OFF, so " + action
+                    + " would give a TIMESTAMP column an undeclared NOT NULL and DEFAULT/ON UPDATE CURRENT_TIMESTAMP;"
+                    + " enable it in the server configuration, or with"
+                    + " sessionVariables=explicit_defaults_for_timestamp=1 where the server allows a session value");
+        }
+    }
+
+    static boolean mySqlExplicitDefaultsForTimestamp(Connection conn) throws SQLException {
+        try (var statement = conn.createStatement();
+             ResultSet rows = statement.executeQuery("SELECT @@explicit_defaults_for_timestamp")) {
+            return rows.next() && rows.getInt(1) == 1;
+        }
+    }
+
+    /** MySQL accepts ON UPDATE CURRENT_TIMESTAMP only on DATETIME/TIMESTAMP, with the column's precision. */
+    static void requireSupportedOnUpdate(ColumnSpec spec, String definition, DatabaseDialect dialect, String column) {
+        String onUpdate = ColumnDefinitionParser.onUpdateExpr(definition);
+        if (onUpdate == null) {
+            return;
+        }
+        if (!dialect.isMySqlFamily()) {
+            throw new IllegalArgumentException("ON UPDATE is supported only on MySQL/MariaDB: " + column);
+        }
+        if (!spec.baseType().equals("DATETIME") && !spec.baseType().equals("TIMESTAMP")) {
+            throw new IllegalArgumentException("ON UPDATE requires a DATETIME or TIMESTAMP column: " + column);
+        }
+        Matcher now = MYSQL_CURRENT_TIMESTAMP.matcher(
+                mySqlComparableDefault(onUpdate.toUpperCase(Locale.ROOT), "TIMESTAMP"));
+        int onUpdatePrecision = now.matches() && now.group(1) != null ? Integer.parseInt(now.group(1)) : 0;
+        int columnPrecision = spec.length() == null ? 0 : spec.length();
+        if (onUpdatePrecision != columnPrecision) {
+            throw new IllegalArgumentException("ON UPDATE precision " + onUpdatePrecision
+                    + " differs from the column precision " + columnPrecision + ": " + column);
+        }
+    }
+
+    /**
+     * ON UPDATE is not part of the compared column spec, so a difference in either direction is
+     * reported on every sync; MODIFY COLUMN would silently add or drop it.
+     */
+    static String mySqlOnUpdateDrift(String declaredOnUpdate, String liveOnUpdate) {
+        String declared = declaredOnUpdate == null ? null
+                : mySqlComparableDefault(declaredOnUpdate.toUpperCase(Locale.ROOT), "TIMESTAMP");
+        String live = liveOnUpdate == null ? null
+                : mySqlComparableDefault(liveOnUpdate.toUpperCase(Locale.ROOT), "TIMESTAMP");
+        if (java.util.Objects.equals(declared, live)) {
+            return null;
+        }
+        return "ON UPDATE differs (declared " + (declared == null ? "none" : declared)
+                + ", server reports " + (live == null ? "none" : live) + ")";
+    }
+
+    /** A national column whose type already matches still reports charset/collation drift. */
+    static NonDestructiveAlterPlanner.Plan mySqlNationalDriftPlan(
+            String tableName, String columnName, String definition, String driftReason,
+            NonDestructiveAlterPlanner.Plan plan) {
+        if (driftReason == null) {
+            return plan;
+        }
+        return new NonDestructiveAlterPlanner.Plan(List.of(), List.of(
+                "ALTER TABLE " + tableName + " MODIFY COLUMN " + columnName + " " + definition
+                        + "; -- pending: " + driftReason + "; handle this change in a reviewed change set"));
+    }
+
     /** Live MySQL/MariaDB column attributes that {@code MODIFY COLUMN <definition>} would rewrite. */
     record MySqlColumnFacts(boolean found, String collation, String tableCollation, String characterSet,
-                            String extra, String comment, String generationExpression) {}
+                            String extra, String comment, String generationExpression,
+                            String charsetDefaultCollation) {}
 
     /**
      * {@code MODIFY COLUMN} replaces the whole column definition: attributes the declaration
      * does not repeat (charset/collation, ON UPDATE, AUTO_INCREMENT, INVISIBLE, COMMENT,
      * generation expression) are silently reset, so such columns are pending instead.
      */
+    private static final Pattern MYSQL_ON_UPDATE_TOKEN = Pattern.compile("\\bON\\s+UPDATE\\b");
+    private static final Pattern MYSQL_AUTO_INCREMENT_TOKEN = Pattern.compile("\\bAUTO_INCREMENT\\b");
+
     static String mySqlBlockReason(MySqlColumnFacts facts, String declaredDefinition) {
         if (!facts.found()) {
             return "column was not found in information_schema";
         }
-        String declared = declaredDefinition.toUpperCase(Locale.ROOT);
+        String declared;
+        try {
+            // Keywords inside a default literal ('COLLATE', 'COMMENT') are not clauses.
+            declared = SqlLexer.mask(declaredDefinition, SqlLexer.Mode.MYSQL, false, false).toUpperCase(Locale.ROOT);
+        } catch (IllegalArgumentException untokenizable) {
+            return "definition could not be tokenized: " + untokenizable.getMessage();
+        }
         String extra = facts.extra() == null ? "" : facts.extra().toLowerCase(Locale.ROOT);
         if (facts.generationExpression() != null && !facts.generationExpression().isBlank()) {
             return "generated column";
         }
-        if (extra.contains("on update") && !declared.contains("ON UPDATE")) {
+        if (extra.contains("on update") && !MYSQL_ON_UPDATE_TOKEN.matcher(declared).find()) {
             return "ON UPDATE attribute would be dropped by MODIFY COLUMN";
         }
-        if (extra.contains("auto_increment") && !declared.contains("AUTO_INCREMENT")) {
+        if (extra.contains("auto_increment") && !MYSQL_AUTO_INCREMENT_TOKEN.matcher(declared).find()) {
             return "AUTO_INCREMENT would be dropped by MODIFY COLUMN";
         }
         if (extra.contains("invisible")) {
             return "INVISIBLE attribute would be dropped by MODIFY COLUMN";
         }
-        if (facts.comment() != null && !facts.comment().isEmpty() && !declared.contains("COMMENT")) {
+        // The parser rejects COMMENT, COLLATE and CHARACTER SET clauses, so a declaration can never keep them.
+        if (facts.comment() != null && !facts.comment().isEmpty()) {
             return "column COMMENT would be dropped by MODIFY COLUMN";
         }
-        boolean national = declared.matches("(?s)^\\s*(?:NVARCHAR|NCHAR|NATIONAL)\\b.*");
-        String charset = facts.characterSet() == null ? "" : facts.characterSet().toLowerCase(Locale.ROOT);
-        if (national && !charset.isEmpty() && !charset.equals("utf8mb3") && !charset.equals("utf8")) {
-            return "NVARCHAR/NCHAR would change the character set from " + charset + " to utf8mb3";
+        boolean national = mySqlDeclaresNational(declaredDefinition);
+        if (national) {
+            return mySqlNationalDrift(facts);
         }
-        if (!national && facts.collation() != null && !facts.collation().equals(facts.tableCollation())
-                && !declared.contains("COLLATE") && !declared.contains("CHARACTER SET")) {
+        if (facts.collation() != null && !facts.collation().equals(facts.tableCollation())) {
             return "column collation " + facts.collation() + " differs from the table default and would be reset";
+        }
+        return null;
+    }
+
+    static boolean mySqlDeclaresNational(String declaredDefinition) {
+        return declaredDefinition != null
+                && declaredDefinition.matches("(?is)^\\s*(?:NVARCHAR|NCHAR|NATIONAL)\\b.*");
+    }
+
+    /**
+     * NVARCHAR/NCHAR mean utf8mb3 with its default collation. A live column with another
+     * character set or collation has drifted from the declaration, and MODIFY COLUMN would reset it.
+     */
+    static String mySqlNationalDrift(MySqlColumnFacts facts) {
+        if (!facts.found()) {
+            return "column was not found in information_schema";
+        }
+        String charset = facts.characterSet() == null ? "" : facts.characterSet().toLowerCase(Locale.ROOT);
+        if (!charset.equals("utf8mb3") && !charset.equals("utf8")) {
+            return "NVARCHAR/NCHAR is utf8mb3 but the column character set is "
+                    + (charset.isEmpty() ? "unknown" : charset);
+        }
+        if (facts.charsetDefaultCollation() == null) {
+            return "the default collation of " + charset + " could not be determined";
+        }
+        if (facts.collation() == null || !facts.collation().equals(facts.charsetDefaultCollation())) {
+            return "NVARCHAR/NCHAR uses the utf8mb3 default collation but the column collation is "
+                    + facts.collation();
         }
         return null;
     }
@@ -667,10 +992,12 @@ public class SchemaSynchronizer {
             throws SQLException {
         String sql = """
                 SELECT c.COLLATION_NAME, t.TABLE_COLLATION, c.CHARACTER_SET_NAME, c.EXTRA, c.COLUMN_COMMENT,
-                       c.GENERATION_EXPRESSION
+                       c.GENERATION_EXPRESSION, cs.DEFAULT_COLLATE_NAME
                 FROM information_schema.COLUMNS c
                 JOIN information_schema.TABLES t
                   ON t.TABLE_SCHEMA = c.TABLE_SCHEMA AND t.TABLE_NAME = c.TABLE_NAME
+                LEFT JOIN information_schema.CHARACTER_SETS cs
+                  ON cs.CHARACTER_SET_NAME = c.CHARACTER_SET_NAME
                 WHERE c.TABLE_SCHEMA = DATABASE() AND c.TABLE_NAME = ? AND c.COLUMN_NAME = ?
                 """;
         try (var statement = conn.prepareStatement(sql)) {
@@ -678,15 +1005,18 @@ public class SchemaSynchronizer {
             statement.setString(2, columnName);
             try (ResultSet rs = statement.executeQuery()) {
                 if (!rs.next()) {
-                    return new MySqlColumnFacts(false, null, null, null, null, null, null);
+                    return new MySqlColumnFacts(false, null, null, null, null, null, null, null);
                 }
                 return new MySqlColumnFacts(true, rs.getString(1), rs.getString(2), rs.getString(3),
-                        rs.getString(4), rs.getString(5), rs.getString(6));
+                        rs.getString(4), rs.getString(5), rs.getString(6), rs.getString(7));
             }
         }
     }
 
-    /** MySQL/MariaDB and PostgreSQL store NVARCHAR/NCHAR as VARCHAR/CHAR (national charset or none). */
+    /**
+     * MySQL/MariaDB and PostgreSQL store NVARCHAR/NCHAR as VARCHAR/CHAR (national charset or none);
+     * MySQL/MariaDB store BOOLEAN as TINYINT(1).
+     */
     static ColumnSpec foldNationalType(ColumnSpec spec, DatabaseDialect dialect) {
         if (!dialect.isMySqlFamily() && dialect != DatabaseDialect.POSTGRESQL) {
             return spec;
@@ -694,20 +1024,23 @@ public class SchemaSynchronizer {
         return switch (spec.baseType()) {
             case "NVARCHAR" -> new ColumnSpec("VARCHAR", spec.length(), spec.scale(), spec.notNull(), spec.defaultExpr());
             case "NCHAR" -> new ColumnSpec("CHAR", spec.length(), spec.scale(), spec.notNull(), spec.defaultExpr());
+            case "BOOLEAN" -> dialect.isMySqlFamily()
+                    ? new ColumnSpec("TINYINT", null, null, spec.notNull(), spec.defaultExpr()) : spec;
             default -> spec;
         };
     }
+
+    private static final Pattern SINGLE_QUOTED_LITERAL = Pattern.compile("'(?:[^']|'')*'");
+    private static final Pattern IDENTITY_KEYWORD = Pattern.compile(
+            "\\b(?:BIGSERIAL|SMALLSERIAL|SERIAL|AUTO_INCREMENT|IDENTITY)\\b", Pattern.CASE_INSENSITIVE);
 
     /** Identity / serial columns must not get DROP DEFAULT from nextval noise. */
     public static boolean shouldSkipAlter(String definition, LiveColumn live) {
         if (definition == null) {
             return true;
         }
-        String upper = definition.toUpperCase(Locale.ROOT);
-        if (upper.contains("BIGSERIAL") || upper.matches("(?s).*\\bSERIAL\\b.*")
-                || upper.contains("AUTO_INCREMENT")
-                || upper.contains("IDENTITY")
-                || (upper.contains("GENERATED") && upper.contains("IDENTITY"))) {
+        String code = SINGLE_QUOTED_LITERAL.matcher(definition).replaceAll("''");
+        if (IDENTITY_KEYWORD.matcher(code).find()) {
             return true;
         }
         String liveDef = live.defaultExpr();
@@ -833,7 +1166,10 @@ public class SchemaSynchronizer {
                         throw new IllegalArgumentException("duplicate column definition: " + table + "." + name);
                     }
                     if (column.definition() != null) {
-                        columnSpecs.put(name, ColumnDefinitionParser.parse(column.definition()));
+                        ColumnSpec spec = ColumnDefinitionParser.parse(column.definition());
+                        requireSupportedFractionalPrecision(spec, dialect, table + "." + name);
+                        requireSupportedOnUpdate(spec, column.definition(), dialect, table + "." + name);
+                        columnSpecs.put(name, spec);
                     }
                 }
             }
@@ -1117,6 +1453,19 @@ public class SchemaSynchronizer {
         Set<String> generatedDefaults = dialect == DatabaseDialect.MYSQL
                 ? SchemaSnapshotWriter.mysqlGeneratedDefaultColumns(meta.getConnection(), tableName)
                 : Set.of();
+        Map<String, Integer> datetimePrecisions = dialect.isMySqlFamily()
+                ? SchemaSnapshotWriter.mysqlDatetimePrecisions(meta.getConnection(), tableName)
+                : Map.of();
+        Map<String, String> mysqlDataTypes = dialect.isMySqlFamily()
+                ? SchemaSnapshotWriter.mysqlDataTypes(meta.getConnection(), tableName)
+                : Map.of();
+        Map<String, String> mariaDbDefaults = dialect == DatabaseDialect.MARIADB
+                ? SchemaSnapshotWriter.mariaDbColumnDefaults(meta.getConnection(), tableName)
+                : Map.of();
+        Map<String, String> binaryDefaults = dialect.isMySqlFamily()
+                ? SchemaSnapshotWriter.mysqlBinaryDefaults(meta.getConnection(), tableName,
+                        dialect == DatabaseDialect.MARIADB)
+                : Map.of();
         try (ResultSet rs = meta.getColumns(dialect.metadataCatalog(meta.getConnection(), options.schema()),
                 dialect.metadataSchemaPattern(options.schema()),
                 dialect.metadataObjectName(tableName.toLowerCase(Locale.ROOT)), "%")) {
@@ -1124,17 +1473,26 @@ public class SchemaSynchronizer {
                 // Oracle JDBC exposes COLUMN_DEF as LONG — read it before any other column.
                 String colDefault = rs.getString("COLUMN_DEF");
                 String name = rs.getString("COLUMN_NAME").toLowerCase(Locale.ROOT);
+                if (mariaDbDefaults.containsKey(name)) {
+                    colDefault = mariaDbDefaults.get(name);
+                }
                 String typeName = rs.getString("TYPE_NAME");
+                if (dialect.isMySqlFamily()) {
+                    typeName = SchemaSnapshotWriter.mysqlTypeName(typeName, mysqlDataTypes.get(name));
+                }
                 int size = rs.getInt("COLUMN_SIZE");
                 int decimalDigits = rs.getInt("DECIMAL_DIGITS");
                 boolean decimalDigitsNull = rs.wasNull();
                 boolean notNull = "NO".equalsIgnoreCase(rs.getString("IS_NULLABLE"));
-                if (dialect != DatabaseDialect.POSTGRESQL && "NULL".equalsIgnoreCase(colDefault)) {
+                if (reportsNoDefaultAsNullText(dialect) && "NULL".equalsIgnoreCase(colDefault)) {
                     colDefault = null;
                 }
                 if (dialect == DatabaseDialect.MYSQL) {
                     colDefault = SchemaSnapshotWriter.mysqlLiteralDefault(colDefault, typeName,
                             generatedDefaults.contains(name));
+                }
+                if (binaryDefaults.containsKey(name)) {
+                    colDefault = binaryDefaults.get(name);
                 }
                 Integer length = null;
                 Integer scale = null;
@@ -1155,11 +1513,95 @@ public class SchemaSynchronizer {
                     scale = decimalDigitsNull ? null : decimalDigits;
                 } else if (dialect == DatabaseDialect.POSTGRESQL && "VECTOR".equals(normalized)) {
                     length = readVectorDimension(meta.getConnection(), tableName, name);
+                } else if (ColumnDefinitionParser.hasFractionalPrecision(normalized)) {
+                    Integer reported = datetimePrecisions.containsKey(name) ? datetimePrecisions.get(name)
+                            : decimalDigitsNull ? null : decimalDigits;
+                    length = liveFractionalPrecision(typeName, normalized, reported, dialect);
                 }
                 columns.put(name, new LiveColumn(normalized, length, scale, notNull, colDefault));
             }
         }
         return columns;
+    }
+
+    private static final Pattern ORACLE_TIMESTAMP_PRECISION = Pattern.compile("^TIMESTAMP\\s*\\((\\d+)\\)",
+            Pattern.CASE_INSENSITIVE);
+
+    /** Fractional-second precision of a live temporal column, or null when the engine has none to compare. */
+    static Integer liveFractionalPrecision(String typeName, String normalizedType, Integer decimalDigits,
+                                           DatabaseDialect dialect) {
+        if (defaultFractionalPrecision(normalizedType, dialect) == null) {
+            return null;
+        }
+        if (dialect == DatabaseDialect.ORACLE) {
+            Matcher matcher = ORACLE_TIMESTAMP_PRECISION.matcher(typeName.trim());
+            return matcher.find() ? Integer.valueOf(matcher.group(1)) : null;
+        }
+        return decimalDigits;
+    }
+
+    /**
+     * Precision an engine applies when a temporal type is declared without one; null where the
+     * engine has no precision argument for that type (SQL Server legacy DATETIME, Oracle DATE).
+     */
+    static Integer defaultFractionalPrecision(String normalizedType, DatabaseDialect dialect) {
+        return switch (dialect) {
+            case POSTGRESQL -> switch (normalizedType) {
+                case "TIMESTAMP", "TIMESTAMPTZ", "TIME", "TIMETZ" -> 6;
+                default -> null;
+            };
+            case ORACLE -> switch (normalizedType) {
+                case "TIMESTAMP", "TIMESTAMPTZ", "TIMESTAMPLTZ" -> 6;
+                default -> null;
+            };
+            case MYSQL, MARIADB -> switch (normalizedType) {
+                case "TIMESTAMP", "DATETIME", "TIME" -> 0;
+                default -> null;
+            };
+            case SQLSERVER -> switch (normalizedType) {
+                case "DATETIME2", "DATETIMEOFFSET", "TIME" -> 7;
+                default -> null;
+            };
+        };
+    }
+
+    static int maxFractionalPrecision(DatabaseDialect dialect) {
+        return switch (dialect) {
+            case POSTGRESQL, MYSQL, MARIADB -> 6;
+            case SQLSERVER -> 7;
+            case ORACLE -> 9;
+        };
+    }
+
+    /**
+     * Rejects temporal precision the engine cannot store before any DDL runs: PostgreSQL silently
+     * caps it (never converges); MySQL, SQL Server, and Oracle reject the statement mid-sync.
+     */
+    static void requireSupportedFractionalPrecision(ColumnSpec spec, DatabaseDialect dialect, String column) {
+        if (spec.length() == null || !ColumnDefinitionParser.hasFractionalPrecision(spec.baseType())) {
+            return;
+        }
+        if (defaultFractionalPrecision(spec.baseType(), dialect) == null) {
+            throw new IllegalArgumentException(dialect.id() + " " + spec.baseType()
+                    + " does not accept a fractional-second precision: " + column);
+        }
+        int max = maxFractionalPrecision(dialect);
+        if (spec.length() < 0 || spec.length() > max) {
+            throw new IllegalArgumentException(dialect.id() + " fractional-second precision is 0.." + max
+                    + ": " + column + " " + spec.baseType() + "(" + spec.length() + ")");
+        }
+    }
+
+    /** Declared temporal type with the engine's implicit precision filled in, so both sides compare. */
+    static ColumnSpec withDefaultFractionalPrecision(ColumnSpec spec, DatabaseDialect dialect) {
+        Integer fallback = defaultFractionalPrecision(spec.baseType(), dialect);
+        if (fallback == null) {
+            return ColumnDefinitionParser.hasFractionalPrecision(spec.baseType()) && spec.length() != null
+                    ? new ColumnSpec(spec.baseType(), null, spec.scale(), spec.notNull(), spec.defaultExpr())
+                    : spec;
+        }
+        return spec.length() != null ? spec
+                : new ColumnSpec(spec.baseType(), fallback, spec.scale(), spec.notNull(), spec.defaultExpr());
     }
 
     private String mariaCatalog(DatabaseMetaData metadata) throws SQLException {
@@ -1257,7 +1699,11 @@ public class SchemaSynchronizer {
         if (dependents.nonDefaultCollation()) {
             return "column has a non-default collation that ALTER COLUMN would reset";
         }
-        if (dependents.parameterizedType() && !declaredTypeText.contains("(")) {
+        // A bare temporal type means the default precision, which the planner already matched to the live column.
+        boolean defaultPrecision = ColumnDefinitionParser.hasFractionalPrecision(target.baseType())
+                && target.length() != null
+                && target.length().equals(defaultFractionalPrecision(target.baseType(), DatabaseDialect.SQLSERVER));
+        if (dependents.parameterizedType() && !declaredTypeText.contains("(") && !defaultPrecision) {
             return "declared type omits the live length/precision, so ALTER COLUMN would change it";
         }
         boolean lengthOnlyWiden = !baseTypeChanges

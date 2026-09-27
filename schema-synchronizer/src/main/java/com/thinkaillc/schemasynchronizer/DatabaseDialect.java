@@ -72,7 +72,9 @@ public enum DatabaseDialect {
             return MARIADB;
         }
         if (normalized.contains("mysql")) {
-            return MYSQL;
+            // MySQL Connector/J reports "MySQL" for MariaDB servers; the version is e.g. "10.11.9-MariaDB".
+            String version = metadata.getDatabaseProductVersion();
+            return version != null && version.toLowerCase(Locale.ROOT).contains("mariadb") ? MARIADB : MYSQL;
         }
         if (normalized.contains("postgresql")) {
             return POSTGRESQL;

@@ -11,7 +11,11 @@ Use this checklist before enabling SchemaSynchronizer in a production applicatio
 - Use `spring.jpa.hibernate.ddl-auto=validate` when Hibernate is present.
 - Keep `fail-on-pending=true` and `require-definition=true` unless a documented
   operational reason requires otherwise.
-- Give the database account only the catalog-read and DDL privileges it needs.
+- Give the database account only the catalog-read and DDL privileges it needs. On
+  MySQL/MariaDB, `information_schema` lists a table's columns only to an account with a
+  column-level privilege; `REFERENCES` is enough and reads no data (for example
+  `GRANT CREATE, ALTER, INDEX, REFERENCES ON app.*`, plus `SELECT, INSERT, UPDATE, DELETE` on
+  the history table).
 - Keep externally managed tables in another schema.
 
 ## Deployment sequence

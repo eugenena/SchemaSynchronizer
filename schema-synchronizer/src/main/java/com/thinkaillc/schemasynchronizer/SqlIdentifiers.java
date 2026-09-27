@@ -3,6 +3,8 @@
 
 package com.thinkaillc.schemasynchronizer;
 
+import java.util.Locale;
+
 final class SqlIdentifiers {
     /** PostgreSQL / portable default. */
     static final int DEFAULT_MAX_LENGTH = 63;
@@ -14,11 +16,11 @@ final class SqlIdentifiers {
     private SqlIdentifiers() {}
 
     static String requireIdentifier(String value, String label) {
-        return requireIdentifierPreservingCase(value, label, DEFAULT_MAX_LENGTH).toLowerCase();
+        return requireIdentifierPreservingCase(value, label, DEFAULT_MAX_LENGTH).toLowerCase(Locale.ROOT);
     }
 
     static String requireIdentifier(String value, String label, int maxLength) {
-        return requireIdentifierPreservingCase(value, label, maxLength).toLowerCase();
+        return requireIdentifierPreservingCase(value, label, maxLength).toLowerCase(Locale.ROOT);
     }
 
     static String requireIdentifierPreservingCase(String value, String label) {

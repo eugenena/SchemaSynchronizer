@@ -92,7 +92,8 @@ class SchemaSynchronizerSqlServerIntegrationTest {
         String create = "CREATE TABLE sqlserver_strict (id BIGINT IDENTITY(1,1) NOT NULL, code INT NOT NULL, "
                 + "label VARCHAR(40) NOT NULL DEFAULT 'new', qty INT DEFAULT 0, "
                 + "created_at DATETIME2 DEFAULT SYSUTCDATETIME(), national_name NVARCHAR(50), "
-                + "notes NVARCHAR(MAX), PRIMARY KEY (id))";
+                + "notes NVARCHAR(MAX), stamp DATETIME2(3), clock TIME(0), zoned DATETIMEOFFSET, legacy DATETIME, "
+                + "PRIMARY KEY (id))";
         List<String> indexes = List.of(
                 "CREATE INDEX idx_sqlserver_strict_label ON sqlserver_strict (label, code DESC)");
         SchemaDefinition initial = strictDefinition(create, columns("VARCHAR(40) NOT NULL DEFAULT 'new'",
@@ -110,6 +111,18 @@ class SchemaSynchronizerSqlServerIntegrationTest {
             SchemaSynchronizationResult strict = synchronizer(true).synchronizeWithResult(connection, initial);
             assertThat(strict.pendingSql()).isEmpty();
             assertThat(strict.changed()).isFalse();
+        }
+
+        List<SchemaDefinition.ColumnDef> finer = columns("VARCHAR(40) NOT NULL DEFAULT 'new'", "INT NOT NULL",
+                "INT DEFAULT 0").stream()
+                .map(column -> column.name().equals("stamp")
+                        ? new SchemaDefinition.ColumnDef("stamp", "DATETIME2") : column)
+                .toList();
+        try (Connection connection = connection()) {
+            SchemaSynchronizationResult drift = synchronizer(false)
+                    .synchronizeWithResult(connection, strictDefinition(create, finer, indexes));
+            assertThat(drift.columnsAltered()).isZero();
+            assertThat(drift.pendingSql()).anyMatch(sql -> sql.contains("ALTER COLUMN stamp DATETIME2"));
         }
 
         // Indexed VARCHAR with a DEFAULT constraint: a length-only widen is executable on SQL Server.
@@ -211,7 +224,11 @@ class SchemaSynchronizerSqlServerIntegrationTest {
                 new SchemaDefinition.ColumnDef("qty", qty),
                 new SchemaDefinition.ColumnDef("created_at", "DATETIME2 DEFAULT SYSUTCDATETIME()"),
                 new SchemaDefinition.ColumnDef("national_name", "NVARCHAR(50)"),
-                new SchemaDefinition.ColumnDef("notes", "NVARCHAR(MAX)"));
+                new SchemaDefinition.ColumnDef("notes", "NVARCHAR(MAX)"),
+                new SchemaDefinition.ColumnDef("stamp", "DATETIME2(3)"),
+                new SchemaDefinition.ColumnDef("clock", "TIME(0)"),
+                new SchemaDefinition.ColumnDef("zoned", "DATETIMEOFFSET"),
+                new SchemaDefinition.ColumnDef("legacy", "DATETIME"));
     }
 
     private SchemaDefinition strictDefinition(String create, List<SchemaDefinition.ColumnDef> columns,
