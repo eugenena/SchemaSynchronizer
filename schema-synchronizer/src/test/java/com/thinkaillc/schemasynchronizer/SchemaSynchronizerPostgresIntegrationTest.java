@@ -569,6 +569,100 @@ class SchemaSynchronizerPostgresIntegrationTest {
     }
 
     @Test
+    void multiStatementRoutineBodiesAreOneChangeSetStatement() throws Exception {
+        DataSource dataSource = dataSource();
+        String schema = uniqueSchema("routine_body_case");
+        createSchema(dataSource, schema);
+        SchemaDefinition definition = new SchemaDefinition(Map.of(), List.of(new SchemaDefinition.ChangeSet(
+                "001-routine-bodies", "BEGIN ATOMIC and PL/pgSQL bodies", List.of(
+                "CREATE TABLE counters (id INTEGER PRIMARY KEY, hits INTEGER NOT NULL, note TEXT)",
+                "INSERT INTO counters (id, hits) VALUES (1, 0)",
+                "CREATE FUNCTION bump_counter(step integer) RETURNS integer LANGUAGE sql BEGIN ATOMIC "
+                        + "UPDATE counters SET hits = hits + step WHERE id = 1; "
+                        + "UPDATE counters SET note = CASE WHEN step > 0 THEN 'a;b' ELSE 'c' END WHERE id = 1; "
+                        + "SELECT hits FROM counters WHERE id = 1; END",
+                "CREATE FUNCTION counters_note() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN "
+                        + "IF NEW.note IS NULL THEN NEW.note := 'set;by trigger'; END IF; RETURN NEW; END $$",
+                "CREATE TRIGGER trg_counters_note BEFORE INSERT ON counters "
+                        + "FOR EACH ROW EXECUTE FUNCTION counters_note()"
+        ), "SELECT to_regprocedure('bump_counter(integer)') IS NOT NULL")));
+        try (Connection connection = dataSource.getConnection()) {
+            assertThat(synchronizer(dataSource, schema, false).synchronizeWithResult(connection, definition)
+                    .changeSetsApplied()).isEqualTo(1);
+            assertThat(queryLong(connection, "SELECT " + schema + ".bump_counter(2)")).isEqualTo(2);
+            assertThat(queryString(connection, "SELECT note FROM " + schema + ".counters WHERE id = 1"))
+                    .isEqualTo("a;b");
+            statement(connection, "INSERT INTO " + schema + ".counters (id, hits) VALUES (2, 0)");
+            assertThat(queryString(connection, "SELECT note FROM " + schema + ".counters WHERE id = 2"))
+                    .isEqualTo("set;by trigger");
+        }
+    }
+
+    @Test
+    void sqlPolicyGatesOnlyChangeSetsMissingFromHistory() throws Exception {
+        DataSource dataSource = dataSource();
+        String schema = uniqueSchema("history_policy_case");
+        createSchema(dataSource, schema);
+        SchemaDefinition.ChangeSet legacy = new SchemaDefinition.ChangeSet("000-legacy",
+                "applied before the policy", List.of("DROP TABLE keep_me"));
+        SchemaDefinition.ChangeSet first = new SchemaDefinition.ChangeSet("001-first", "safe",
+                List.of("CREATE TABLE first_t (id INTEGER)"));
+        SchemaDefinition.ChangeSet second = new SchemaDefinition.ChangeSet("002-second", "safe",
+                List.of("CREATE TABLE second_t (id INTEGER)"));
+        SchemaDefinition.ChangeSet third = new SchemaDefinition.ChangeSet("003-third", "safe",
+                List.of("CREATE TABLE third_t (id INTEGER)"));
+        SchemaDefinition.ChangeSet forbidden = new SchemaDefinition.ChangeSet("004-forbidden", "destructive",
+                List.of("DROP TABLE keep_me"));
+        try (Connection connection = dataSource.getConnection()) {
+            statement(connection, "CREATE TABLE " + schema + ".keep_me (id INTEGER)");
+
+            // No history table: every change set is checked, and nothing runs.
+            assertThatThrownBy(() -> synchronizer(dataSource, schema, false).synchronizeWithResult(connection,
+                    new SchemaDefinition(Map.of(), List.of(first, legacy))))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("not allowed");
+            assertThat(tableExists(connection, schema, "first_t")).isFalse();
+            assertThat(tableExists(connection, schema, "schema_synchronizer_history")).isFalse();
+
+            assertThat(synchronizer(dataSource, schema, false).synchronizeWithResult(connection,
+                    new SchemaDefinition(Map.of(), List.of(first))).changeSetsApplied()).isEqualTo(1);
+            statement(connection, "INSERT INTO " + schema + ".schema_synchronizer_history "
+                    + "(change_id, checksum, description, execution_ms) VALUES ('000-legacy', '"
+                    + ChangeSetExecutor.checksum(legacy) + "', 'applied before the policy', 0)");
+
+            // Applied with a matching checksum: accepted and not run again, next to an unapplied safe one.
+            SchemaDefinition withLegacy = new SchemaDefinition(Map.of(), List.of(legacy, first, second));
+            assertThat(synchronizer(dataSource, schema, true).synchronizeWithResult(connection, withLegacy)
+                    .plannedSql()).containsExactly("CREATE TABLE second_t (id INTEGER)");
+            assertThat(synchronizer(dataSource, schema, false).synchronizeWithResult(connection, withLegacy)
+                    .changeSetsApplied()).isEqualTo(1);
+            assertThat(tableExists(connection, schema, "keep_me")).isTrue();
+            assertThat(tableExists(connection, schema, "second_t")).isTrue();
+
+            // An unapplied forbidden change set is rejected before an earlier unapplied safe one runs.
+            SchemaDefinition withForbidden = new SchemaDefinition(Map.of(),
+                    List.of(legacy, first, second, third, forbidden));
+            for (boolean dryRun : List.of(true, false)) {
+                assertThatThrownBy(() -> synchronizer(dataSource, schema, dryRun)
+                        .synchronizeWithResult(connection, withForbidden))
+                        .as("dryRun=%s", dryRun)
+                        .isInstanceOf(IllegalArgumentException.class)
+                        .hasMessageContaining("not allowed");
+            }
+            assertThat(tableExists(connection, schema, "third_t")).isFalse();
+            assertThat(tableExists(connection, schema, "keep_me")).isTrue();
+
+            // An edited applied change set is a checksum error, not a policy error.
+            SchemaDefinition.ChangeSet edited = new SchemaDefinition.ChangeSet("000-legacy",
+                    "applied before the policy", List.of("DROP TABLE keep_me CASCADE"));
+            assertThatThrownBy(() -> synchronizer(dataSource, schema, false).synchronizeWithResult(connection,
+                    new SchemaDefinition(Map.of(), List.of(edited, first, second))))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("checksum mismatch");
+        }
+    }
+
+    @Test
     void verificationMustReturnOneNonNullBoolean() throws Exception {
         DataSource dataSource = dataSource();
         String schema = uniqueSchema("verification_shape_case");

@@ -30,8 +30,9 @@ databases can adopt.
 
 Historical migrations may have created constraints, functions, triggers,
 extensions, grants, comments, or data invariants. Express their durable effects as
-ordered change sets with verification queries. Do not blindly mark old migrations
-as applied.
+ordered change sets with verification queries; install extensions during database
+provisioning, because change sets reject `CREATE EXTENSION`. Do not blindly mark old
+migrations as applied.
 
 ## 4. Prove both paths
 

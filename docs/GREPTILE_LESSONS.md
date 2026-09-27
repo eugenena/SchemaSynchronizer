@@ -14,6 +14,73 @@
   `#mySqlColumnClausesAfterTheDefaultFailValidation`,
   `#indexesOnColumnsThatWereNotAddedAreRecognizedByToken`).
 
+## 2026-09-27 — issue #13 — a statement boundary is whatever the engine executes as one
+
+- **Bug:** SQL Server ran `UPDATE t SET a = 1 GRANT CONTROL TO bob` as two statements while the
+  guardrail split only on `;` and checked the leading keyword. `CREATE EXTENSION`, non-SQL
+  PostgreSQL routine languages, a routine `SET role` clause, MySQL `SET GLOBAL`, `BULK INSERT`,
+  and several file/WAL/network functions were accepted. A `CASE` expression's `THEN IF(…)`
+  or `END LOOP` was read as block structure, rejecting valid MySQL and PL/SQL routines, and
+  the three-part-name check was quadratic in the column count.
+- **Missed because:** The single-statement cell assumed every engine needs `;`, the allowlist
+  was reviewed for what it accepts rather than what the accepted statement can run, and block
+  tracking had no cell for block keywords inside expressions.
+- **Prevention:** For each engine, the single-statement check has a cell for a second
+  statement without a separator. Every allowlisted statement kind gets a cell for what its
+  body, options, or clauses can run. Block tracking has cells for block keywords inside
+  expressions. Guardrail scans get a size bound test
+  (`SqlTokenizerTest#sqlServerStatementWithoutSemicolonStartsANewStatement`,
+  `#caseExpressionEndIsNotABlockEnd`, `GuardrailTokenizerContractTest$SqlServerBatchesWithoutSemicolons`,
+  `$PostgresLanguagesAndServerFunctions`, `$RoleAndGlobalSettings`, `$LongLists`).
+- **Second round (same class):** SQL Server ended `1E`, `1.E`, and `0x` as complete numbers,
+  so `SET a = 1EGRANT …` still ran two statements, and `ADD SIGNATURE TO …` (not a reserved
+  word) started a statement the splitter did not know. Oracle `BFILENAME`/`DBMS_LOB` file
+  routines and PostgreSQL `log_*`/`pgaudit.*` settings were accepted.
+- **Missed because:** The number lexer was written from the documented grammar instead of
+  probing the engine at each boundary, and the statement-start list was assembled from
+  memory rather than from the engine's full statement list.
+- **Prevention:** Lexer boundaries come from a live probe table
+  (`SqlTokenizerTest#sqlServerNumericLiteralsEndWhereTheEngineEndsThem`). Every statement form
+  of the engine's reference is iterated after several complete statements and must split
+  exactly at its first word (`#everyTsqlStatementStartsANewStatementAfterAnotherStatement`);
+  forms the engine only accepts after `;` are recorded as such
+  (`#receiveIsAStatementOnlyAfterASemicolon`). Forbidden settings are an explicit list plus
+  prefixes, checked in routine `SET` clauses, body statements, and `set_config`
+  (`GuardrailTokenizerContractTest$RoleAndGlobalSettings`).
+- **Third round (same class):** a bare `\r` ended a `--` comment on PostgreSQL and SQL Server
+  while the lexer waited for `\n`, so the code after it went unchecked. MySQL `/*+ SET_VAR(…) */`
+  hints changed session variables. `LOAD` and `DUMP` were treated as statement words though
+  SQL Server accepts them as column names, and `GET`/`MOVE CONVERSATION` and `SEND ON` split
+  a column followed by its alias. The docs said `set_config` on other parameters was allowed,
+  while the scope check rejects every call.
+- **Missed because:** Comment ends were assumed rather than probed per engine, reserved-word
+  status was taken from documentation, and the docs were written from the policy check alone.
+- **Prevention:** Every lexical boundary (comment end, hint, number) has a per-dialect cell
+  probed on the engine (`SqlTokenizerTest#lineCommentsEndWhereTheEngineEndsThem`,
+  `GuardrailTokenizerContractTest$CarriageReturnLineComments`, `$OptimizerHints`). Each
+  statement word is checked as an unquoted column name on the engine before it may split
+  (`SqlTokenizerTest#unreservedWordsAreColumnsNotStatements`,
+  `#serviceBrokerStatementsStartOnlyAfterASemicolon`). Docs for a rejection are checked
+  against both the policy and the scope check.
+
+## 2026-09-27 — issue #13 — guardrails must read SQL the way the engine does
+
+- **Bug:** The change-set guardrails matched regular expressions against masked text. Quoted
+  admin function names (`"pg_read_file"(…)`, `[xp_cmdshell]`), escaped PostgreSQL bodies
+  (`E'\x44ROP …'`, `U&'\0044ROP …'`), and role or trigger statements inside T-SQL, PL/SQL,
+  and MySQL bodies passed. `UPDATE TOP (@n) sys.objects` and aliased catalog writes were not
+  seen as writes, `dbo.items.id` was reported as a three-part name, verification rejected a
+  column named `"into"`, and PL/SQL bodies with inner `;` could not be applied.
+- **Missed because:** Each check re-derived statement structure from text with its own
+  pattern, and the contract matrix listed forbidden forms without the quoted, escaped, and
+  aliased spellings of each one, per engine.
+- **Prevention:** One per-dialect tokenizer (`SqlTokenizer`) feeds every guardrail; names
+  compare by the engine's folding, and bodies split as one statement with inner statements
+  scanned. Every new forbidden form gets a cell per engine for the quoted/escaped spelling,
+  a look-alike in a literal, identifier, and comment, and a mixed list
+  (`GuardrailTokenizerContractTest`, `SqlTokenizerTest`, and the
+  `multiStatement…` integration tests on all five engines).
+
 ## 2026-09-27 — issue #13 — fail-closed checks must not block converged schemas
 
 - **Bug:** The `explicit_defaults_for_timestamp` refusal was checked in the preflight, but a

@@ -44,7 +44,7 @@ public record SchemaDefinition(Integer formatVersion, String dialect,
 
     /**
      * Ordered, immutable schema change for state that cannot be reconstructed from JDBC
-     * column metadata (backfills, constraints, functions, triggers, extensions, and grants).
+     * column metadata (backfills, constraints, functions, triggers, comments, and grants).
      * Statements are safety-checked and the complete change is checksummed before execution.
      */
     @JsonIgnoreProperties(ignoreUnknown = true)

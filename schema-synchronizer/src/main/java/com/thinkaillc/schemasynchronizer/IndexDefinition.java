@@ -85,7 +85,7 @@ record IndexDefinition(String name, String schema, String table, String structur
             char current = sql.charAt(index);
             char next = index + 1 < sql.length() ? sql.charAt(index + 1) : '\0';
             if (lineComment) {
-                if (current == '\n') lineComment = false;
+                if (current == '\n' || current == '\r') lineComment = false;
                 continue;
             }
             if (blockComment) {

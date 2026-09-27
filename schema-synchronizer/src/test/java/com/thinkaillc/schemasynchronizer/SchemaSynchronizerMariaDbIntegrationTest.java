@@ -28,6 +28,8 @@ class SchemaSynchronizerMariaDbIntegrationTest {
         try (Connection connection = connection(); var statement = connection.createStatement()) {
             statement.execute("DROP TABLE IF EXISTS maria_items");
             statement.execute("DROP TABLE IF EXISTS mariaxitems");
+            statement.execute("DROP TABLE IF EXISTS maria_case_items");
+            statement.execute("DROP FUNCTION IF EXISTS maria_case_tier");
             statement.execute("DROP TABLE IF EXISTS schema_synchronizer_history");
         }
     }
@@ -542,6 +544,75 @@ class SchemaSynchronizerMariaDbIntegrationTest {
                         List.of(new SchemaDefinition.ColumnDef("id", "BIGINT NOT NULL"),
                                 new SchemaDefinition.ColumnDef("label", label)), List.of())),
                 List.of());
+    }
+
+    @Test
+    void multiStatementTriggerBodyIsOneChangeSetStatement() throws Exception {
+        SchemaDefinition withTrigger = new SchemaDefinition(2, "mariadb", Map.of(), List.of(
+                new SchemaDefinition.ChangeSet("001-maria-items", "table",
+                        List.of("CREATE TABLE maria_items (id BIGINT PRIMARY KEY, note VARCHAR(40), qty INT)"),
+                        "SELECT COUNT(*) = 1 FROM information_schema.tables "
+                                + "WHERE table_schema = DATABASE() AND table_name = 'maria_items'"),
+                new SchemaDefinition.ChangeSet("002-maria-trigger", "trigger with a compound body",
+                        List.of("CREATE TRIGGER maria_items_fill BEFORE INSERT ON maria_items FOR EACH ROW BEGIN "
+                                + "IF NEW.note IS NULL THEN SET NEW.note = 'a;b'; END IF; "
+                                + "WHILE NEW.qty IS NULL OR NEW.qty < 3 DO SET NEW.qty = COALESCE(NEW.qty, 0) + 1; "
+                                + "END WHILE; END"),
+                        "SELECT COUNT(*) = 1 FROM information_schema.triggers "
+                                + "WHERE trigger_schema = DATABASE() AND trigger_name = 'maria_items_fill'")));
+        try (Connection connection = connection()) {
+            assertThat(synchronizer().synchronizeWithResult(connection, withTrigger).changeSetsApplied())
+                    .isEqualTo(2);
+        }
+        try (Connection connection = connection(); var statement = connection.createStatement()) {
+            statement.execute("INSERT INTO maria_items (id) VALUES (1)");
+            try (var rows = statement.executeQuery("SELECT note, qty FROM maria_items WHERE id = 1")) {
+                assertThat(rows.next()).isTrue();
+                assertThat(rows.getString(1)).isEqualTo("a;b");
+                assertThat(rows.getInt(2)).isEqualTo(3);
+            }
+        }
+    }
+
+    @Test
+    void caseExpressionsWithIfAndRepeatCallsRunInRoutines() throws Exception {
+        SchemaDefinition withRoutines = new SchemaDefinition(2, "mariadb", Map.of(), List.of(
+                new SchemaDefinition.ChangeSet("001-maria-case-items", "table",
+                        List.of("CREATE TABLE maria_case_items (id BIGINT PRIMARY KEY, note VARCHAR(40), qty INT, "
+                                + "tier INT)"),
+                        "SELECT COUNT(*) = 1 FROM information_schema.tables "
+                                + "WHERE table_schema = DATABASE() AND table_name = 'maria_case_items'"),
+                new SchemaDefinition.ChangeSet("002-maria-case-function", "CASE expression calling IF",
+                        List.of("CREATE FUNCTION maria_case_tier(a INT) RETURNS INT DETERMINISTIC "
+                                + "RETURN CASE WHEN a > 0 THEN IF(a > 10, 2, 1) ELSE 0 END"),
+                        "SELECT COUNT(*) = 1 FROM information_schema.routines "
+                                + "WHERE routine_schema = DATABASE() AND routine_name = 'maria_case_tier'"),
+                new SchemaDefinition.ChangeSet("003-maria-case-note", "CASE expression calling REPEAT",
+                        List.of("CREATE TRIGGER maria_case_note BEFORE INSERT ON maria_case_items FOR EACH ROW "
+                                + "SET NEW.note = CASE WHEN NEW.qty > 0 THEN REPEAT('x', 2) ELSE '' END"),
+                        "SELECT COUNT(*) = 1 FROM information_schema.triggers "
+                                + "WHERE trigger_schema = DATABASE() AND trigger_name = 'maria_case_note'"),
+                new SchemaDefinition.ChangeSet("004-maria-case-tier", "CASE expression calling IF in a block",
+                        List.of("CREATE TRIGGER maria_case_tier_fill BEFORE INSERT ON maria_case_items FOR EACH ROW "
+                                + "FOLLOWS maria_case_note BEGIN SET NEW.tier = CASE WHEN NEW.qty > 0 "
+                                + "THEN IF(NEW.qty > 1, 1, 2) ELSE 0 END; END"),
+                        "SELECT COUNT(*) = 1 FROM information_schema.triggers "
+                                + "WHERE trigger_schema = DATABASE() AND trigger_name = 'maria_case_tier_fill'")));
+        try (Connection connection = connection()) {
+            assertThat(synchronizer().synchronizeWithResult(connection, withRoutines).changeSetsApplied())
+                    .isEqualTo(4);
+        }
+        try (Connection connection = connection(); var statement = connection.createStatement()) {
+            statement.execute("INSERT INTO maria_case_items (id, qty) VALUES (1, 5)");
+            try (var rows = statement.executeQuery(
+                    "SELECT note, tier, maria_case_tier(qty), maria_case_tier(20) FROM maria_case_items")) {
+                assertThat(rows.next()).isTrue();
+                assertThat(rows.getString(1)).isEqualTo("xx");
+                assertThat(rows.getInt(2)).isEqualTo(1);
+                assertThat(rows.getInt(3)).isEqualTo(1);
+                assertThat(rows.getInt(4)).isEqualTo(2);
+            }
+        }
     }
 
     private SchemaSynchronizer synchronizer() throws Exception {

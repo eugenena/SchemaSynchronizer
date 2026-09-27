@@ -222,9 +222,11 @@ extension.
   lookups upper-case
 - Statements: a trailing `;` (including one followed by a comment) is removed before
   execution, except on statements that start with `BEGIN`, `DECLARE`, or
-  `CREATE [OR REPLACE] TRIGGER|PROCEDURE|FUNCTION|PACKAGE|TYPE`. The change-set guardrail
-  accepts one statement per array item, so PL/SQL bodies that contain inner `;` are not
-  supported yet; create such objects outside SchemaSynchronizer.
+  `CREATE [OR REPLACE] TRIGGER|PROCEDURE|FUNCTION|PACKAGE|TYPE`. A PL/SQL trigger or
+  function with inner `;` is one array item: its `BEGIN`/`IF`/`CASE`/`LOOP` … `END` blocks
+  must balance, and every statement inside is checked like a top-level one. Change sets
+  accept `CREATE [OR REPLACE] TRIGGER` and `FUNCTION`; create procedures, packages, and
+  types outside SchemaSynchronizer.
 - Types: `INTEGER` and ANSI `NUMERIC`/`DECIMAL`/`DEC` without precision are stored as
   `NUMBER(38,0)` and compare as that type, so against a live column with a scale they are a
   narrowing and stay pending. `FLOAT`, `DOUBLE PRECISION`, and `REAL` are stored as `FLOAT`

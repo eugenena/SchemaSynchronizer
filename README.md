@@ -68,7 +68,7 @@ A `schema-definition.json` file has two complementary parts:
    indexes. SchemaSynchronizer compares this state with the live database.
 2. `changes` is an ordered, checksummed ledger for operations that cannot be
    inferred reliably from JDBC metadata: backfills, constraints, functions,
-   triggers, extensions, comments, and grants.
+   triggers, comments, and grants. Extensions are installed outside change sets.
 
 On each run SchemaSynchronizer detects the database dialect, validates the
 definition, obtains a database lock, applies safe changes, and records completed

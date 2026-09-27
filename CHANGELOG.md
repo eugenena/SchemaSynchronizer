@@ -21,6 +21,10 @@
   connected user, or the catalog name).
 - MySQL Connector/J connected to MariaDB is detected as `mariadb`; definitions declaring
   `"dialect": "mysql"` for a MariaDB server must switch to `mariadb` (or re-snapshot).
+- `CREATE EXTENSION`, accepted in 1.2.0, is rejected in new change sets: an extension can
+  install code that the guardrails cannot check. Install extensions outside change sets, for
+  example during database provisioning or with a migration role. Change sets already recorded
+  in history are unaffected.
 
 ### Locking and change sets
 
@@ -34,6 +38,68 @@
   cross-schema references and session namespace changes (`SET search_path`, `USE`,
   `ALTER SESSION SET CURRENT_SCHEMA`, …) are rejected. Forbidden statements are also found
   inside routine bodies. These are guardrails against mistakes, not a sandbox.
+- The change-set guardrails read SQL as tokens with each engine's quoting and escape rules
+  instead of matching text:
+  - A function or trigger with a multi-statement body is one change-set statement, and each
+    inner statement is checked: PostgreSQL `BEGIN ATOMIC` and dollar-quoted bodies,
+    MySQL/MariaDB `BEGIN … END`, SQL Server `AS BEGIN … END`, and Oracle PL/SQL triggers and
+    functions with inner `;`. A body with unbalanced `BEGIN`/`END` blocks is rejected.
+  - Admin and dynamic-SQL functions are caught when named through quoted, bracketed,
+    backticked, schema-qualified, or `U&"…"` identifiers, following each engine's case rules.
+  - Routine bodies are also checked for `SET ROLE`, `SET SESSION AUTHORIZATION`,
+    `SET DEFAULT ROLE`, `DENY`, `DISABLE`/`ENABLE TRIGGER`, `LOCK`, `FLUSH`, and
+    table-creating `SELECT … INTO`. PostgreSQL `E'…'` and `U&'…'` bodies are decoded before
+    the check.
+  - System-catalog writes are caught through `TOP (…)`, aliases, CTEs, derived tables, and
+    MySQL multi-table `UPDATE`. `dbo.items.id` in an expression is a column reference, while
+    `otherdb.dbo.items` after `FROM`/`JOIN`/`UPDATE` is still rejected.
+  - Verification SQL may use `"into"`, `[updlock]`, or `` `lock` `` as column names, and the
+    same words inside strings.
+  - A plain PostgreSQL string with a backslash before its closing quote (`'C:\'`) is now
+    rejected because where it ends depends on `standard_conforming_strings`; write
+    `E'C:\\'`.
+  - SQL Server runs a batch of statements with or without `;` between them, so a statement
+    word that starts a second statement (`UPDATE t SET a = 1 GRANT CONTROL TO bob`) is
+    rejected in change sets and verification SQL. Words inside one statement, such as
+    `MERGE … THEN UPDATE`, `INSERT … SELECT`, `ON DELETE SET NULL`, `WITH (NOLOCK)`, or a
+    CTE, are not affected. Numbers end where SQL Server ends them: `1E`, `1.E`, `0x`, and
+    money literals such as `$1` or `£1` are complete, so `SET a = 1EGRANT …` is two
+    statements. `ADD SIGNATURE`, `ADD COUNTERSIGNATURE`, `ADD SENSITIVITY CLASSIFICATION`,
+    and `LINENO` also start a statement; a column named `signature`, `load`, or `dump`
+    does not.
+  - A `--` line comment ends at a bare carriage return on PostgreSQL and SQL Server, as
+    those engines read it, so code after `--…\r` is checked. Oracle and MySQL/MariaDB
+    comments still end only at a line feed, and their optimizer hints (`/*+ … */`, which can set
+    session variables with `SET_VAR`) are rejected like `/*! … */`.
+  - New rejections: PostgreSQL routines in languages other than `sql` and `plpgsql` (their
+    bodies cannot be checked), and routines with an `AS` body but no `LANGUAGE`; PostgreSQL
+    `SET` of `role`, `session_authorization`, `session_replication_role`, `row_security`,
+    `session_preload_libraries`, `local_preload_libraries`, `shared_preload_libraries`,
+    `dynamic_library_path`, `jit_provider`, any `log_*` parameter, or any `pgaudit.*`
+    parameter in a routine's `SET` clause or a statement inside a body; every PostgreSQL
+    `set_config(…)` call, whatever parameter it names, including in verification SQL;
+    PostgreSQL `pg_stat_reset*`, `pg_replication_origin_*`, and
+    `pg_import_system_collations`; MySQL/MariaDB `SET GLOBAL`, `SET PERSIST`,
+    `SET PERSIST_ONLY`, and `SET @@global.…` assignments; SQL Server `BULK INSERT`,
+    `ADD SIGNATURE`, `ADD COUNTERSIGNATURE`, and `ADD SENSITIVITY CLASSIFICATION`, including
+    inside trigger and routine bodies; PostgreSQL server-file, large-object, backup, and WAL
+    functions (`pg_ls_dir`, `pg_stat_file`, `lo_put`, `lo_from_bytea`, `pg_switch_wal`,
+    `pg_create_restore_point`, `pg_logical_emit_message`, …); and Oracle `UTL_HTTP`,
+    `UTL_TCP`, `UTL_SMTP`, `UTL_MAIL`, `UTL_FILE`, `UTL_INADDR`, `DBMS_XMLGEN`,
+    `DBMS_XMLQUERY`, `DBMS_PIPE`, `HTTPURITYPE`, `BFILENAME`, and the `DBMS_LOB` file
+    routines (`FILEOPEN`, `FILEEXISTS`, `LOADFROMFILE`, `LOADBLOBFROMFILE`,
+    `LOADCLOBFROMFILE`, …), which read server files. Verification SQL also rejects
+    `pg_notify`, `txid_current`, `pg_current_xact_id`, and the `PAGLOCK` hint. Change sets
+    already recorded in history are not re-checked (see below).
+  - A `CASE` expression inside a MySQL/MariaDB or Oracle routine no longer confuses block
+    matching: `THEN IF(…)` / `THEN REPEAT(…)` inside `CASE … END` are function calls, and
+    `FOR i IN 1 .. CASE … END LOOP` opens a loop.
+- Sync applies the SQL guardrails only to change sets not yet recorded in history, after
+  checksums are verified and before any DDL or change-set statement (dry-run included). A
+  recorded change set with a matching checksum never runs again and is not re-checked, so
+  change sets applied under an earlier release keep syncing even if they would now be
+  rejected. Offline `validate` has no history and still checks every change set; such a
+  change set can fail `validate` while sync accepts it.
 - Dry-run no longer executes `verificationSql`, and uses transactional rollback only on
   engines that support it.
 - Duplicate-object adoption classifies errors by SQLState and vendor code only.

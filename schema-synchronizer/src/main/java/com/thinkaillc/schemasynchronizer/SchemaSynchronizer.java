@@ -246,7 +246,7 @@ public class SchemaSynchronizer {
         String previousSearchPath = null;
         ChangeSetExecutor executor = new ChangeSetExecutor();
         validateDeclarativeDefinition(def, dialect);
-        List<SchemaDefinition.ChangeSet> allChanges = executor.validate(def.changes(), options, dialect);
+        List<SchemaDefinition.ChangeSet> allChanges = executor.validateStructure(def.changes());
         plannedSql.set(new ArrayList<>());
         Exception primaryFailure = null;
         String lockToken = null;
@@ -265,6 +265,7 @@ public class SchemaSynchronizer {
                 bindSqlServerSchema(conn, options.schema());
             }
             lockToken = DialectSupport.acquireLock(conn, dialect, options.schema(), options.advisoryLockId());
+            // Must precede all DDL: policy rejections for unrecorded change sets happen here.
             executor.validateHistory(conn, allChanges, options, dialect);
             ChangeSetExecutor.Result beforeChanges = executor.apply(conn,
                     changesForPhase(allChanges, SchemaDefinition.ChangeSet.Phase.BEFORE_SCHEMA), options,
@@ -345,7 +346,7 @@ public class SchemaSynchronizer {
                                                                       DatabaseDialect dialect) throws Exception {
         validateDeclarativeDefinition(def, dialect);
         ChangeSetExecutor executor = new ChangeSetExecutor();
-        List<SchemaDefinition.ChangeSet> allChanges = executor.validate(def.changes(), options, dialect);
+        List<SchemaDefinition.ChangeSet> allChanges = executor.validateStructure(def.changes());
         plannedSql.set(new ArrayList<>());
         if (dialect.usesCatalogNamespace()) {
             // Unqualified DDL runs in DATABASE(); metadata reads are bound to the configured schema.
@@ -363,6 +364,7 @@ public class SchemaSynchronizer {
         Exception primaryFailure = null;
         try {
             lockToken = DialectSupport.acquireLock(conn, dialect, options.schema(), options.advisoryLockId());
+            // Must precede all DDL: policy rejections for unrecorded change sets happen here.
             executor.validateHistory(conn, allChanges, options, dialect);
             DeclarativeResult preflight = applyDeclarativeSchema(conn, def, dialect, false);
             if (options.failOnPending() && !preflight.pendingSql().isEmpty()) {

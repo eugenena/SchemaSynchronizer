@@ -305,6 +305,34 @@ class SchemaSynchronizerOracleIntegrationTest {
         }
     }
 
+    @Test
+    void multiStatementPlSqlTriggerIsOneChangeSetStatement() throws Exception {
+        SchemaDefinition withTrigger = new SchemaDefinition(2, "oracle", Map.of(), List.of(
+                new SchemaDefinition.ChangeSet("001-oracle-items", "table",
+                        List.of("CREATE TABLE oracle_items (id NUMBER(10) PRIMARY KEY, note VARCHAR2(40), "
+                                + "qty NUMBER(10))"),
+                        "SELECT COUNT(*) FROM user_tables WHERE table_name = 'ORACLE_ITEMS'"),
+                new SchemaDefinition.ChangeSet("002-oracle-trigger", "PL/SQL trigger with inner semicolons",
+                        List.of("CREATE OR REPLACE TRIGGER oracle_items_fill BEFORE INSERT ON oracle_items "
+                                + "FOR EACH ROW BEGIN "
+                                + "IF :NEW.note IS NULL THEN :NEW.note := 'a;b'; END IF; "
+                                + "FOR i IN 1..3 LOOP :NEW.qty := i; END LOOP; END;"),
+                        "SELECT COUNT(*) FROM user_objects WHERE object_name = 'ORACLE_ITEMS_FILL' "
+                                + "AND object_type = 'TRIGGER' AND status = 'VALID'")));
+        try (Connection connection = connection()) {
+            assertThat(synchronizer().synchronizeWithResult(connection, withTrigger).changeSetsApplied())
+                    .isEqualTo(2);
+        }
+        try (Connection connection = connection(); var statement = connection.createStatement()) {
+            statement.execute("INSERT INTO oracle_items (id) VALUES (1)");
+            try (var rows = statement.executeQuery("SELECT note, qty FROM oracle_items WHERE id = 1")) {
+                assertThat(rows.next()).isTrue();
+                assertThat(rows.getString(1)).isEqualTo("a;b");
+                assertThat(rows.getInt(2)).isEqualTo(3);
+            }
+        }
+    }
+
     private SchemaDefinition strictDefinition(String create, List<SchemaDefinition.ColumnDef> columns,
                                               List<String> indexes) {
         return new SchemaDefinition(2, "oracle", Map.of("oracle_strict",

@@ -30,7 +30,7 @@ final class ChangeSetExecutor {
     Result apply(Connection conn, List<SchemaDefinition.ChangeSet> changes, SchemaSynchronizerOptions options,
                  DatabaseDialect dialect)
             throws Exception {
-        List<SchemaDefinition.ChangeSet> safeChanges = validate(changes, options, dialect);
+        List<SchemaDefinition.ChangeSet> safeChanges = validateStructure(changes);
         if (safeChanges.isEmpty()) {
             return new Result(0, List.of());
         }
@@ -52,6 +52,7 @@ final class ChangeSetExecutor {
                 continue;
             }
             unrecordedCount++;
+            requirePolicy(change, options, dialect);
             // Dry-run must not execute verificationSql (UDFs / admin SELECT side effects).
             if (options.dryRun()) {
                 planned.addAll(change.statements());
@@ -108,8 +109,19 @@ final class ChangeSetExecutor {
         return new Result(appliedCount, List.copyOf(planned));
     }
 
+    /**
+     * Offline validation without history: structure, then the SQL policy for every change set.
+     * A sync applies the policy only to change sets not yet recorded (see {@link #validateHistory}).
+     */
     List<SchemaDefinition.ChangeSet> validate(List<SchemaDefinition.ChangeSet> changes,
                                               SchemaSynchronizerOptions options, DatabaseDialect dialect) {
+        List<SchemaDefinition.ChangeSet> valid = validateStructure(changes);
+        valid.forEach(change -> requirePolicy(change, options, dialect));
+        return valid;
+    }
+
+    /** Ids, lengths, duplicates, and non-empty statement lists; reads no SQL. */
+    List<SchemaDefinition.ChangeSet> validateStructure(List<SchemaDefinition.ChangeSet> changes) {
         if (changes == null || changes.isEmpty()) {
             return List.of();
         }
@@ -131,18 +143,28 @@ final class ChangeSetExecutor {
             if (change.statements() == null || change.statements().isEmpty()) {
                 throw new IllegalArgumentException("schema change has no statements: " + change.id());
             }
-            change.statements().forEach(statement -> {
-                NonDestructiveSqlPolicy.requireSafe(statement, dialect);
-                ChangeSetSchemaScope.requireScoped(statement, options.schema(), dialect);
-            });
-            if (change.verificationSql() != null) {
-                NonDestructiveSqlPolicy.requireReadOnlyVerification(change.verificationSql(), dialect);
-                ChangeSetSchemaScope.requireNoSessionNamespaceChange(change.verificationSql(), dialect);
-            }
         }
         return List.copyOf(changes);
     }
 
+    /** The non-destructive, schema-scope, and read-only verification checks for one change set. */
+    static void requirePolicy(SchemaDefinition.ChangeSet change, SchemaSynchronizerOptions options,
+                              DatabaseDialect dialect) {
+        change.statements().forEach(statement -> {
+            NonDestructiveSqlPolicy.requireSafe(statement, dialect);
+            ChangeSetSchemaScope.requireScoped(statement, options.schema(), dialect);
+        });
+        if (change.verificationSql() != null) {
+            NonDestructiveSqlPolicy.requireReadOnlyVerification(change.verificationSql(), dialect);
+            ChangeSetSchemaScope.requireNoSessionNamespaceChange(change.verificationSql(), dialect);
+        }
+    }
+
+    /**
+     * Checks recorded checksums, then the SQL policy for every change set missing from history
+     * (a recorded change set never runs again), then the implicit-DDL recovery rules, which may
+     * run verification SQL and so must follow the policy check.
+     */
     void validateHistory(Connection conn, List<SchemaDefinition.ChangeSet> changes, SchemaSynchronizerOptions options,
                          DatabaseDialect dialect)
             throws Exception {
@@ -161,6 +183,11 @@ final class ChangeSetExecutor {
             if (!expectedChecksum.equals(entry.getValue())) {
                 throw new IllegalStateException("checksum mismatch for applied schema change '"
                         + entry.getKey() + "': committed changes are immutable");
+            }
+        }
+        for (SchemaDefinition.ChangeSet change : changes) {
+            if (!applied.containsKey(change.id())) {
+                requirePolicy(change, options, dialect);
             }
         }
         if (dialect.ddlMayCommitImplicitly()) {

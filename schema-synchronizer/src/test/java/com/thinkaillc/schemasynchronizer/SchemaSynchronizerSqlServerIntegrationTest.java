@@ -273,6 +273,37 @@ class SchemaSynchronizerSqlServerIntegrationTest {
     }
 
     @Test
+    void multiStatementTriggerBodyIsOneChangeSetStatement() throws Exception {
+        SchemaDefinition withTrigger = new SchemaDefinition(2, "sqlserver", Map.of(), List.of(
+                new SchemaDefinition.ChangeSet("001-sqlserver-items", "table",
+                        List.of("CREATE TABLE sqlserver_items (id BIGINT NOT NULL PRIMARY KEY, label VARCHAR(40), "
+                                + "flag INT NULL)"),
+                        "SELECT CAST(CASE WHEN OBJECT_ID('dbo.sqlserver_items') IS NULL THEN 0 ELSE 1 END AS BIT)",
+                        SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA),
+                new SchemaDefinition.ChangeSet("002-sqlserver-trigger", "trigger with a multi-statement body",
+                        List.of("CREATE TRIGGER sqlserver_items_fill ON sqlserver_items AFTER INSERT AS BEGIN "
+                                + "SET NOCOUNT ON; "
+                                + "UPDATE sqlserver_items SET label = 'a;b' WHERE label IS NULL "
+                                + "AND id IN (SELECT id FROM inserted); "
+                                + "UPDATE sqlserver_items SET flag = 1 WHERE id IN (SELECT id FROM inserted); END"),
+                        "SELECT CAST(CASE WHEN OBJECT_ID('dbo.sqlserver_items_fill', 'TR') IS NULL THEN 0 ELSE 1 END "
+                                + "AS BIT)",
+                        SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA)));
+        try (Connection connection = connection()) {
+            assertThat(synchronizer(true).synchronizeWithResult(connection, withTrigger).changeSetsApplied())
+                    .isEqualTo(2);
+        }
+        try (Connection connection = connection(); var statement = connection.createStatement()) {
+            statement.execute("INSERT INTO dbo.sqlserver_items (id) VALUES (1)");
+            try (var rows = statement.executeQuery("SELECT label, flag FROM dbo.sqlserver_items WHERE id = 1")) {
+                assertThat(rows.next()).isTrue();
+                assertThat(rows.getString(1)).isEqualTo("a;b");
+                assertThat(rows.getInt(2)).isEqualTo(1);
+            }
+        }
+    }
+
+    @Test
     void bareDatetime2IsTheEngineDefaultPrecision() throws Exception {
         String create = "CREATE TABLE sqlserver_strict (id BIGINT NOT NULL, fine DATETIME2 NOT NULL, "
                 + "coarse DATETIME2(3), PRIMARY KEY (id))";
