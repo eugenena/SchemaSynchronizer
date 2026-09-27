@@ -23,8 +23,11 @@ cd SchemaSynchronizer
 mvn test
 ```
 
-Run integration tests against the databases affected by a change. Commands and
-properties are documented in [README.md](README.md#testing-and-development).
+Run integration tests against the databases affected by a change. Changes to shared
+code (planner, type normalization, snapshot writer, change-set guardrails, executor)
+affect every dialect: run the integration suite against all five engines and confirm
+no integration test was skipped. Commands and properties are documented in
+[README.md](README.md#testing-and-development).
 
 ## Pull requests
 
@@ -33,6 +36,45 @@ properties are documented in [README.md](README.md#testing-and-development).
 - Update user documentation for public behavior changes.
 - Preserve fail-closed behavior and the manual boundary for destructive changes.
 - Do not weaken SQL validation to accommodate one input shape.
+- Code that emits SQL (executed or reported as pending) needs a test that loops over
+  every `DatabaseDialect` and asserts syntax valid on the oldest supported version of
+  each (for example, Oracle 19c has no `IF [NOT] EXISTS`).
+- Code that compares schema, catalog, or object names must follow the dialect's
+  identifier folding (`ChangeSetSchemaScope.canonical`), never `equalsIgnoreCase` or
+  `toLowerCase` on both sides; test mixed-case configured names per dialect.
+- Type normalization may merge two type names only when every engine stores them
+  identically (for example `INT`/`INTEGER`). Keep lossy pairs distinct (`NCHAR`/`CHAR`,
+  `BINARY`/`VARBINARY`) and send conversions between them to pending.
+- An attribute the type comparison ignores (character set, collation, precision, and any
+  clause the parser strips, such as `ON UPDATE`) must be checked on every sync, not only when
+  another change is planned, and written by the snapshot; test the cell where the types are
+  equal and the attribute differs. A value the server reports lossily is pending, never
+  compared in its lossy form.
+- JDBC metadata fields that snapshot or compare code relies on (`DECIMAL_DIGITS`,
+  `COLUMN_SIZE`, `TYPE_NAME`) must be proven against each real driver in an integration
+  test; drivers disagree (MySQL and MariaDB drivers report no temporal precision).
+- A column-change path must pass the strict round trip: a second sync with
+  `failOnPending=true` reports nothing, and a snapshot replayed into an empty schema
+  reports nothing.
+- Every auto-applied change needs an apply-then-resync integration cell. Servers rewrite
+  what they store (`NOW(3)` is reported as `CURRENT_TIMESTAMP(3)`, `1` as `1.00`); compare in
+  the stored form, or send the change to pending when the stored form is not predictable.
+- Keyword checks on a column definition (`COLLATE`, `COMMENT`, `IDENTITY`, `TIMESTAMP`, …) run
+  on `SqlLexer.mask`ed text, and each has a cell with the keyword inside a default literal.
+- A new metadata query documents the privilege it needs (OPERATIONS least privilege) and
+  degrades to pending when access is denied; it must never fail a sync after DDL has run.
+  Prove it with a `NOT NULL` column on an empty table and against a least-privilege account
+  (no `SELECT` on application tables), not only against the test superuser.
+- A value converted for comparison (charset encoding, rounding, padding) must be converted the
+  way the server does under every session setting, or be left pending; test it over a
+  non-UTF-8 connection.
+- A keyword check on a definition matches tokens (`\bON\s+UPDATE\b`), never substrings, so an
+  identifier such as `comment_count` in an expression default is not a clause.
+- The snapshot-replay integration table covers every type family the snapshot writer has a
+  branch for, each with a default, so every written default form is proven to replay.
+- Change-set allowlist rules must inspect the whole statement, including trailing
+  top-level clauses and routine bodies, not only the leading keyword; add the bypass
+  and its legitimate neighbour to `GuardrailBypassTest`.
 - Do not edit already released change-set examples in ways that encourage checksum
   mutation.
 

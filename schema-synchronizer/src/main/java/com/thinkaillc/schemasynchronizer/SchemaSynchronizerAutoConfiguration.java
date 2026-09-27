@@ -19,7 +19,7 @@ import javax.sql.DataSource;
 @AutoConfiguration(after = DataSourceAutoConfiguration.class, before = HibernateJpaAutoConfiguration.class)
 @ConditionalOnClass({DataSource.class, ObjectMapper.class})
 @ConditionalOnSingleCandidate(DataSource.class)
-@ConditionalOnProperty(prefix = "schema-synchronizer", name = "enabled", havingValue = "true", matchIfMissing = true)
+@ConditionalOnProperty(prefix = "schema-synchronizer", name = "enabled", havingValue = "true", matchIfMissing = false)
 @EnableConfigurationProperties(SchemaSynchronizerProperties.class)
 public class SchemaSynchronizerAutoConfiguration {
     @Bean
