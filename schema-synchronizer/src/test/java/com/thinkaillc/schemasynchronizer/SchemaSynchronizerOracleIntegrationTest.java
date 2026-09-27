@@ -7,7 +7,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
@@ -19,26 +18,28 @@ import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-@EnabledIfSystemProperty(named = "schema.test.oracle.jdbc.url", matches = ".+")
+@LiveDatabase(engine = "Oracle", properties = {
+        "schema.test.oracle.jdbc.url",
+        "schema.test.oracle.jdbc.user",
+        "schema.test.oracle.jdbc.password"})
 class SchemaSynchronizerOracleIntegrationTest {
 
     @BeforeEach
     @AfterEach
     void cleanDatabase() throws Exception {
-        try (Connection connection = connection(); var statement = connection.createStatement()) {
-            dropIfExists(statement, "oracle_items");
-            dropIfExists(statement, "oracle_strict");
-            dropIfExists(statement, "oraclexitems");
-            dropIfExists(statement, "oracle_staged");
-            dropIfExists(statement, "oracle_tags");
-            dropQuietly(statement, "DROP SEQUENCE oracle_items_seq");
-            dropQuietly(statement, "DROP FUNCTION oracle_items_total");
-            dropQuietly(statement, "DROP FUNCTION oracle_items_collect");
-            dropQuietly(statement, "DROP FUNCTION oracle_items_nested");
-            dropQuietly(statement, "DROP FUNCTION oracle_items_anchors");
-            dropQuietly(statement, "DROP FUNCTION oracle_items_header");
-            dropQuietly(statement, "DROP TYPE oracle_addr_t FORCE");
-            dropIfExists(statement, "schema_synchronizer_history");
+        try (Connection connection = connection()) {
+            LiveTestSupport.cleanOracleSchema(connection);
+        }
+    }
+
+    @Test
+    void historyDescriptionBytesAreMeasuredInTheDatabaseCharacterSet() throws Exception {
+        try (Connection connection = connection()) {
+            String charset = LiveTestSupport.scalar(connection,
+                    "SELECT value FROM nls_database_parameters WHERE parameter = 'NLS_CHARACTERSET'");
+            int expected = "AL32UTF8".equals(charset) ? 501 : 251;
+            assertThat(ChangeSetExecutor.storedBytes(connection, DatabaseDialect.ORACLE).of("é".repeat(250) + "a"))
+                    .as(charset).isEqualTo(expected);
         }
     }
 
@@ -81,7 +82,7 @@ class SchemaSynchronizerOracleIntegrationTest {
         try (Connection connection = connection()) {
             SchemaSynchronizationResult result = synchronizer(false).synchronizeWithResult(connection, bare);
             assertThat(result.columnsAltered()).isZero();
-            assertThat(result.pendingSql()).singleElement().asString().contains("wide");
+            assertThat(result.pendingSql()).singleElement().asString().contains("\"WIDE\"");
         }
         try (Connection connection = connection(); var statement = connection.createStatement();
              var rows = statement.executeQuery("SELECT wide FROM oracle_items WHERE id = 1")) {
@@ -129,7 +130,7 @@ class SchemaSynchronizerOracleIntegrationTest {
 
         try (Connection connection = connection()) {
             assertThat(synchronizer.synchronizeWithResult(connection, initial).pendingSql())
-                    .anyMatch(sql -> sql.toLowerCase(Locale.ROOT).contains("drop column notes"));
+                    .anyMatch(sql -> sql.toLowerCase(Locale.ROOT).contains("drop column \"notes\""));
         }
     }
 
@@ -209,8 +210,8 @@ class SchemaSynchronizerOracleIntegrationTest {
                     .synchronizeWithResult(connection, strictDefinition(create, finer, indexes));
             assertThat(drift.columnsAltered()).isZero();
             assertThat(drift.pendingSql())
-                    .anyMatch(sql -> sql.contains("MODIFY (zoned TIMESTAMP(6) WITH TIME ZONE"))
-                    .anyMatch(sql -> sql.contains("MODIFY (local_ts TIMESTAMP WITH TIME ZONE"));
+                    .anyMatch(sql -> sql.contains("MODIFY (\"ZONED\" TIMESTAMP(6) WITH TIME ZONE"))
+                    .anyMatch(sql -> sql.contains("MODIFY (\"LOCAL_TS\" TIMESTAMP WITH TIME ZONE"));
         }
 
         Path snapshot = tempDir.resolve("schema-definition.json");
@@ -219,9 +220,9 @@ class SchemaSynchronizerOracleIntegrationTest {
         }
         SchemaDefinition serialized = new ObjectMapper().readValue(snapshot.toFile(), SchemaDefinition.class);
         assertThat(serialized.tables().get("oracle_strict").indexes())
-                .noneMatch(sql -> sql.contains("idx_oracle_strict_desc"));
+                .noneMatch(sql -> sql.toUpperCase(java.util.Locale.ROOT).contains("IDX_ORACLE_STRICT_DESC"));
         try (Connection connection = connection(); var statement = connection.createStatement()) {
-            dropIfExists(statement, "oracle_strict");
+            dropExisting(statement, "oracle_strict");
         }
         try (Connection connection = connection()) {
             assertThat(synchronizer(true).synchronizeWithResult(connection, serialized).tablesCreated()).isEqualTo(1);
@@ -271,9 +272,9 @@ class SchemaSynchronizerOracleIntegrationTest {
             // A higher binary precision keeps every stored value; a lower one or any temporal change does not.
             assertThat(result.columnsAltered()).isEqualTo(3);
             assertThat(result.pendingSql()).hasSize(3)
-                    .anyMatch(sql -> sql.contains("MODIFY (double_col REAL)"))
-                    .anyMatch(sql -> sql.contains("MODIFY (local_ts TIMESTAMP(3) WITH LOCAL TIME ZONE)"))
-                    .anyMatch(sql -> sql.contains("MODIFY (local_ms TIMESTAMP WITH LOCAL TIME ZONE)"));
+                    .anyMatch(sql -> sql.contains("MODIFY (\"DOUBLE_COL\" REAL)"))
+                    .anyMatch(sql -> sql.contains("MODIFY (\"LOCAL_TS\" TIMESTAMP(3) WITH LOCAL TIME ZONE)"))
+                    .anyMatch(sql -> sql.contains("MODIFY (\"LOCAL_MS\" TIMESTAMP WITH LOCAL TIME ZONE)"));
         }
         try (Connection connection = connection(); var statement = connection.createStatement();
              var rows = statement.executeQuery("SELECT column_name, data_precision FROM user_tab_columns "
@@ -287,7 +288,7 @@ class SchemaSynchronizerOracleIntegrationTest {
         }
 
         try (Connection connection = connection(); var statement = connection.createStatement()) {
-            dropIfExists(statement, "oracle_strict");
+            dropExisting(statement, "oracle_strict");
         }
         try (Connection connection = connection()) {
             synchronizer(true).synchronizeWithResult(connection, strictDefinition(create, matching, List.of()));
@@ -302,7 +303,7 @@ class SchemaSynchronizerOracleIntegrationTest {
                 .contains("FLOAT(63)", "FLOAT", "FLOAT(10)", "TIMESTAMP(6) WITH LOCAL TIME ZONE",
                         "TIMESTAMP(3) WITH LOCAL TIME ZONE");
         try (Connection connection = connection(); var statement = connection.createStatement()) {
-            dropIfExists(statement, "oracle_strict");
+            dropExisting(statement, "oracle_strict");
         }
         try (Connection connection = connection()) {
             assertThat(synchronizer(true).synchronizeWithResult(connection, serialized).tablesCreated()).isEqualTo(1);
@@ -572,16 +573,9 @@ class SchemaSynchronizerOracleIntegrationTest {
                 new SchemaDefinition.TableDef(create, columns, indexes)), List.of());
     }
 
-    private void dropIfExists(java.sql.Statement statement, String table) throws Exception {
-        dropQuietly(statement, "DROP TABLE " + table + " PURGE");
-    }
-
-    private void dropQuietly(java.sql.Statement statement, String sql) {
-        try {
-            statement.execute(sql);
-        } catch (Exception ignored) {
-            // object may not exist
-        }
+    /** Mid-test drop of a table the test created: a missing table is a failure, not something to swallow. */
+    private void dropExisting(java.sql.Statement statement, String table) throws Exception {
+        statement.execute("DROP TABLE " + table + " PURGE");
     }
 
     private SchemaDefinition definition(List<SchemaDefinition.ColumnDef> columns) {

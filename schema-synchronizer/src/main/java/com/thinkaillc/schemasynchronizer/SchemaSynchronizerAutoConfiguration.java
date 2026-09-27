@@ -16,12 +16,21 @@ import org.springframework.context.annotation.Bean;
 
 import javax.sql.DataSource;
 
+/**
+ * Registers a {@link SchemaSynchronizer} and a {@link SchemaSynchronizerInitializer} that runs it once at
+ * startup, before JPA. Active only with {@code schema-synchronizer.enabled=true} and a single {@link DataSource};
+ * either bean can be replaced by declaring one.
+ */
 @AutoConfiguration(after = DataSourceAutoConfiguration.class, before = HibernateJpaAutoConfiguration.class)
 @ConditionalOnClass({DataSource.class, ObjectMapper.class})
 @ConditionalOnSingleCandidate(DataSource.class)
 @ConditionalOnProperty(prefix = "schema-synchronizer", name = "enabled", havingValue = "true", matchIfMissing = false)
 @EnableConfigurationProperties(SchemaSynchronizerProperties.class)
 public class SchemaSynchronizerAutoConfiguration {
+    /** Instantiated by Spring. */
+    public SchemaSynchronizerAutoConfiguration() {
+    }
+
     @Bean
     @ConditionalOnMissingBean
     SchemaSynchronizer schemaSynchronizer(ObjectMapper objectMapper, DataSource dataSource,

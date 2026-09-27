@@ -72,7 +72,7 @@ class NonDestructiveAlterPlannerTest {
         var plan = NonDestructiveAlterPlanner.plan("t", "c", target, live);
         assertThat(plan.applySql()).isEmpty();
         assertThat(plan.pendingSql()).hasSize(1);
-        assertThat(plan.pendingSql().getFirst()).contains("TYPE VARCHAR(20)");
+        assertThat(plan.pendingSql().get(0)).contains("TYPE VARCHAR(20)");
     }
 
     @Test
@@ -91,7 +91,7 @@ class NonDestructiveAlterPlannerTest {
         var plan = NonDestructiveAlterPlanner.plan("t", "c", target, live);
         assertThat(plan.applySql()).isEmpty();
         assertThat(plan.pendingSql()).hasSize(1);
-        assertThat(plan.pendingSql().getFirst()).contains("SET NOT NULL");
+        assertThat(plan.pendingSql().get(0)).contains("SET NOT NULL");
     }
 
     @Test
@@ -103,7 +103,7 @@ class NonDestructiveAlterPlannerTest {
         assertThat(plan.applySql()).containsExactly(
                 "ALTER TABLE t ALTER COLUMN c SET DEFAULT 'x'");
         assertThat(plan.pendingSql()).hasSize(1);
-        assertThat(plan.pendingSql().getFirst()).contains("TYPE VARCHAR(10)");
+        assertThat(plan.pendingSql().get(0)).contains("TYPE VARCHAR(10)");
     }
 
     @Test

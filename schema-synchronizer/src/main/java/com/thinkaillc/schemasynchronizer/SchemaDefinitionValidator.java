@@ -22,25 +22,48 @@ public final class SchemaDefinitionValidator {
     /**
      * Validates a definition file against structural, dialect, SQL-safety, and
      * change-set rules using schema {@code public}.
+     *
+     * @throws SchemaDefinitionException when the file cannot be read or parsed, or is not ready to sync
      */
-    public static void validateFile(Path definitionFile) throws Exception {
+    public static void validateFile(Path definitionFile) {
         validateFile(definitionFile, "public");
     }
 
     /**
      * Validates a definition file using {@code schema} for createSql / index target checks.
+     *
+     * @throws SchemaDefinitionException when the file cannot be read or parsed, or is not ready to sync
      */
-    public static void validateFile(Path definitionFile, String schema) throws Exception {
-        ObjectMapper mapper = new ObjectMapper();
-        SchemaDefinition definition = mapper.readValue(Files.readString(definitionFile), SchemaDefinition.class);
+    public static void validateFile(Path definitionFile, String schema) {
+        if (definitionFile == null) {
+            throw new SchemaDefinitionException("definition file is required");
+        }
+        SchemaDefinition definition;
+        try {
+            definition = new ObjectMapper().readValue(Files.readString(definitionFile), SchemaDefinition.class);
+        } catch (java.io.IOException failure) {
+            throw SchemaExceptions.definitionUnreadable(definitionFile.toString(), failure);
+        }
         validate(definition, schema);
     }
 
     /**
-     * Validates an in-memory definition. Throws {@link IllegalArgumentException} or
-     * {@link IllegalStateException} when the definition is not ready to sync.
+     * Validates an in-memory definition.
+     *
+     * @throws SchemaDefinitionException when the definition is not ready to sync
      */
     public static void validate(SchemaDefinition definition, String schema) {
+        try {
+            validateUnchecked(definition, schema);
+        } catch (IllegalArgumentException | IllegalStateException failure) {
+            throw SchemaExceptions.translate(failure);
+        }
+    }
+
+    private static void validateUnchecked(SchemaDefinition definition, String schema) {
+        if (schema == null) {
+            throw new IllegalArgumentException("schema is required");
+        }
         if (definition == null) {
             throw new IllegalArgumentException("schema definition is null");
         }

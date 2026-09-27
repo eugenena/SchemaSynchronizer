@@ -20,7 +20,7 @@ class SchemaSnapshotWriterTest {
     void postgresIndexIsPortableAcrossSchemas() {
         assertThat(SchemaSnapshotWriter.portablePostgresIndex(
                 "CREATE UNIQUE INDEX idx_accounts_email ON source_schema.accounts USING btree (email)"))
-                .isEqualTo("CREATE UNIQUE INDEX IF NOT EXISTS idx_accounts_email ON accounts (email)");
+                .isEqualTo("CREATE UNIQUE INDEX IF NOT EXISTS \"idx_accounts_email\" ON \"accounts\" (\"email\")");
     }
 
     @Test
@@ -28,7 +28,7 @@ class SchemaSnapshotWriterTest {
         assertThat(SchemaSnapshotWriter.portablePostgresIndex(
                 "CREATE INDEX idx_active_accounts ON source_schema.accounts USING btree (email) "
                         + "WHERE (status = 'ACTIVE'::text)"))
-                .isEqualTo("CREATE INDEX IF NOT EXISTS idx_active_accounts ON accounts (email) "
+                .isEqualTo("CREATE INDEX IF NOT EXISTS \"idx_active_accounts\" ON \"accounts\" (\"email\") "
                         + "WHERE (status = 'ACTIVE'::text)");
     }
 
@@ -40,7 +40,7 @@ class SchemaSnapshotWriterTest {
 
         assertThat(SchemaSnapshotWriter.readMySqlFamilyIndexes(
                 connection(row), "app", "items", DatabaseDialect.MYSQL))
-                .containsExactly("CREATE INDEX idx_items_label ON items (label)");
+                .containsExactly("CREATE INDEX `idx_items_label` ON `items` (`label`)");
     }
 
     @Test
@@ -52,7 +52,7 @@ class SchemaSnapshotWriterTest {
 
         assertThat(SchemaSnapshotWriter.readMySqlFamilyIndexes(
                 connection(row), "app", "items", DatabaseDialect.MARIADB))
-                .containsExactly("CREATE INDEX IF NOT EXISTS idx_items_name ON items (name(12) DESC)");
+                .containsExactly("CREATE INDEX IF NOT EXISTS `idx_items_name` ON `items` (`name`(12) DESC)");
     }
 
     @Test

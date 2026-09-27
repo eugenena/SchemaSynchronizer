@@ -30,7 +30,8 @@ class SpringDiscoveryMetadataTest {
                     .toList();
         }
 
-        assertThat(classNames).containsExactly(SchemaSynchronizerAutoConfiguration.class.getName());
+        assertThat(classNames).containsExactly(SchemaSynchronizerAutoConfiguration.class.getName(),
+                SchemaSynchronizerStartupCheck.class.getName());
         for (String className : classNames) {
             Class<?> registered = Class.forName(className, false, getClass().getClassLoader());
             assertThat(registered).hasAnnotation(AutoConfiguration.class);

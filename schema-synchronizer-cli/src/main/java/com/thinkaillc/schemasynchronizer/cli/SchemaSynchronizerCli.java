@@ -8,9 +8,28 @@ import com.thinkaillc.schemasynchronizer.SchemaSynchronizer;
 
 import java.io.PrintStream;
 import java.util.Arrays;
+import java.util.regex.Pattern;
 
 /** Self-contained command-line dispatcher for schema serialization and synchronization. */
 public final class SchemaSynchronizerCli {
+
+    private static final String MASK = "****";
+    /** Longer messages are cut before redaction, bounding the backtracking of the patterns below. */
+    private static final int MAX_MESSAGE_LENGTH = 16_384;
+    private static final String SECRET_KEY = "(?:^|[?&;:|\\s(,\"'\\[{])[a-z0-9_.-]*"
+            + "(?:password|passwd|passphrase|pass|pwd|secret|token|credential)s?\\d*";
+    private static final String QUOTED_VALUE =
+            "\\{[^}]*+(?:}}[^}]*+)*+}|\"[^\"]*+\"|'[^']*+(?:''[^']*+)*+'";
+    /** {@code key=value}: an unquoted value runs to the next parameter separator or line end. */
+    private static final Pattern SECRET_PARAMETER = Pattern.compile(
+            "(?i)(" + SECRET_KEY + "=)(" + QUOTED_VALUE + "|[^&;\\r\\n]*+)");
+    /** {@code key = value} in prose and JSON {@code "key": value}: an unquoted value ends at punctuation. */
+    private static final Pattern SPACED_SECRET_PARAMETER = Pattern.compile(
+            "(?i)(" + SECRET_KEY + "(?:\\s+=\\s*|=\\s+|\"\\s*:\\s*))(" + QUOTED_VALUE + "|[^&;\\s)\"',}]*+)");
+    private static final Pattern ORACLE_INLINE_CREDENTIALS = Pattern.compile(
+            "(?i)(jdbc:oracle:[a-z0-9]+:(?:\"[^\"]*+\"|[^/@\\s\"]++)/)(?:\"[^\"]*+\"|\\S*)@");
+    private static final Pattern URL_USERINFO_PASSWORD = Pattern.compile(
+            "(//[^/:@\\s]*+:)[^\\s?#;]*@");
 
     private SchemaSynchronizerCli() {
     }
@@ -24,13 +43,6 @@ public final class SchemaSynchronizerCli {
         if (status != 0) {
             System.exit(status);
         }
-    }
-
-    static int run(String[] args, PrintStream out, PrintStream err,
-                   CliCommand serializer, CliCommand synchronizer) {
-        return run(args, out, err, serializer, synchronizer, synchronizer, argsIgnored -> {
-            throw new IllegalStateException("validate command is unavailable in this test harness");
-        });
     }
 
     static int run(String[] args, PrintStream out, PrintStream err,
@@ -76,9 +88,30 @@ public final class SchemaSynchronizerCli {
         } catch (Exception exception) {
             String message = exception.getMessage();
             err.println("SchemaSynchronizer failed: "
-                    + (message == null || message.isBlank() ? exception.getClass().getSimpleName() : message));
+                    + (message == null || message.isBlank()
+                    ? exception.getClass().getSimpleName()
+                    : redactSecrets(message)));
             return 1;
         }
+    }
+
+    /**
+     * Masks credentials that drivers and callers echo back in error messages: {@code key=value}
+     * parameters whose key ends in password/pass/pwd/secret/token/credential, optionally with a
+     * numeric suffix (URL query, SQL Server {@code ;k=v} and brace-quoted values, JSON), Oracle
+     * {@code user/password@} and URL {@code //user:password@} userinfo up to the last {@code @}
+     * before any {@code ?}, {@code #}, or {@code ;}.
+     * Errs toward masking too much: an unquoted value is masked to the next {@code &}, {@code ;},
+     * or line end.
+     */
+    static String redactSecrets(String message) {
+        String bounded = message.length() > MAX_MESSAGE_LENGTH
+                ? message.substring(0, MAX_MESSAGE_LENGTH) + "… (truncated)"
+                : message;
+        String redacted = SECRET_PARAMETER.matcher(bounded).replaceAll("$1" + MASK);
+        redacted = SPACED_SECRET_PARAMETER.matcher(redacted).replaceAll("$1" + MASK);
+        redacted = ORACLE_INLINE_CREDENTIALS.matcher(redacted).replaceAll("$1" + MASK + "@");
+        return URL_USERINFO_PASSWORD.matcher(redacted).replaceAll("$1" + MASK + "@");
     }
 
     private static int execute(CliCommand command, String[] args) throws Exception {

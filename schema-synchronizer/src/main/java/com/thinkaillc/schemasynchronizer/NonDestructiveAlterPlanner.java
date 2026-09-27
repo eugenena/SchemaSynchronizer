@@ -6,7 +6,6 @@ package com.thinkaillc.schemasynchronizer;
 import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.List;
-import java.util.Locale;
 import java.util.Objects;
 import java.util.Set;
 
@@ -14,31 +13,33 @@ import java.util.Set;
  * Plans non-destructive ALTER COLUMN statements. Destructive / unsafe changes
  * go to {@link Plan#pendingSql()} and are never auto-executed by SchemaSynchronizer.
  */
-public final class NonDestructiveAlterPlanner {
+final class NonDestructiveAlterPlanner {
 
     private NonDestructiveAlterPlanner() {}
 
     /** Auto-safe operations in {@link Plan#applySql()}, for dialect rewrites that must not parse SQL text. */
-    public enum Op { WIDEN_TYPE, SET_DEFAULT, DROP_DEFAULT, DROP_NOT_NULL }
+    enum Op { WIDEN_TYPE, SET_DEFAULT, DROP_DEFAULT, DROP_NOT_NULL }
 
-    public record Plan(List<String> applySql, List<String> pendingSql, Set<Op> applyOps) {
-        public Plan {
+    record Plan(List<String> applySql, List<String> pendingSql, Set<Op> applyOps) {
+        Plan {
             applySql = List.copyOf(applySql);
             pendingSql = List.copyOf(pendingSql);
             applyOps = applyOps.isEmpty() ? Set.of() : Set.copyOf(EnumSet.copyOf(applyOps));
         }
 
-        public Plan(List<String> applySql, List<String> pendingSql) {
+        Plan(List<String> applySql, List<String> pendingSql) {
             this(applySql, pendingSql, Set.of());
         }
     }
 
-    public static Plan plan(String table, String column, ColumnSpec target, LiveColumn live) {
+    /**
+     * @param t the table as emitted SQL (already quoted, see {@link SqlIdentifiers})
+     * @param c the column as emitted SQL (already quoted)
+     */
+    static Plan plan(String t, String c, ColumnSpec target, LiveColumn live) {
         List<String> apply = new ArrayList<>();
         List<String> pending = new ArrayList<>();
         Set<Op> ops = EnumSet.noneOf(Op.class);
-        String t = quoteIdent(table);
-        String c = quoteIdent(column);
 
         String liveType = ColumnDefinitionParser.normalizeType(live.baseType());
         String targetType = target.baseType();
@@ -179,12 +180,5 @@ public final class NonDestructiveAlterPlanner {
             }
         }
         return baseType;
-    }
-
-    static String quoteIdent(String name) {
-        if (name == null || !name.matches("[a-zA-Z_][a-zA-Z0-9_]*")) {
-            throw new IllegalArgumentException("invalid identifier: " + name);
-        }
-        return name.toLowerCase(Locale.ROOT);
     }
 }

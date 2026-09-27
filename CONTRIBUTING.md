@@ -15,7 +15,8 @@ Report security vulnerabilities privately as described in [SECURITY.md](SECURITY
 
 ## Development
 
-Requirements: Java 21+, Maven 3.9+, Docker for database integration tests.
+Requirements: Java 17+ (the build compiles with `--release 17`; CI also tests Java 21), Maven
+3.6.3+ (enforced; 3.9+ recommended), Docker for database integration tests.
 
 ```bash
 git clone https://github.com/eugenena/SchemaSynchronizer.git

@@ -1,6 +1,57 @@
 # Changelog
 
-## 1.3.0 — Unreleased
+## 2.0.0 — 2026-09-27
+
+2.0.0 is a breaking release. Read [Upgrading from 1.2.0](#upgrading-from-120) before
+deploying it.
+
+### Upgrading from 1.2.0
+
+Work through these steps in order; each one is a behavior change that can stop a working
+1.2.0 deployment.
+
+1. **Enable Spring Boot auto-configuration.** It is opt-in: add
+   `schema-synchronizer.enabled=true`. Without it nothing runs, even with a definition on the
+   classpath; startup logs one WARN (`… is on the classpath but schema-synchronizer.enabled is
+   not set, so schema synchronization is OFF …`). Set `schema-synchronizer.enabled=false` to
+   opt out explicitly and silence it.
+2. **Pass CLI passwords through the environment.** `serialize`, `sync`, and `dry-run` reject
+   a literal password argument: pass `-` and set `SCHEMA_DB_PASSWORD`.
+3. **Set the real schema on SQL Server, Oracle, MySQL, and MariaDB.** `schema=public` (also the
+   CLI default) is rejected there: use the login's default schema, the connected user, or the
+   database name.
+4. **Switch MariaDB definitions to `"dialect": "mariadb"`.** MySQL Connector/J connected to
+   MariaDB is now detected as `mariadb`; a definition declaring `mysql` for a MariaDB server
+   fails the dialect check.
+5. **Move `CREATE EXTENSION` out of change sets.** New change sets that install an extension
+   are rejected; install it during database provisioning. Change sets already recorded in
+   history are unaffected.
+6. **Re-snapshot, or adjust declarations, where comparison became stricter.** These cases now
+   report pending changes against a definition that 1.2.0 accepted
+   (details in [Comparison and validation](#comparison-and-validation)):
+   - fractional-second precision (`TIMESTAMP(3)` vs `(6)`) that an old snapshot wrote bare;
+   - `BIT`/`BOOLEAN`: old snapshots wrote bare `BIT` for `BIT(n)` and for MySQL `BOOLEAN`;
+   - MySQL binary defaults that old snapshots wrote as `'0x…'` strings;
+   - a MariaDB server serialized through MySQL Connector/J (now the `mariadb` dialect);
+   - `ZEROFILL` columns in an older Connector/J snapshot;
+   - on Oracle, a bare `DECIMAL`/`NUMERIC` declared for a live unbounded `NUMBER`: declare
+     `NUMBER`;
+   - on PostgreSQL, `NUMBER(p,s)`: declare `NUMERIC(p,s)`.
+7. **Test the empty-database path.** When the history table does not exist yet, every
+   change set is checked against the 2.0.0 SQL rules, including change sets your existing
+   databases recorded under 1.2.0 (those are not re-checked there). A historical change set
+   that uses a now-rejected statement keeps working on existing databases and fails on a new
+   one. Run `validate` (it applies the empty-database checks) and a sync against an empty
+   database in CI. Do not edit a recorded change set; create the object outside
+   SchemaSynchronizer and let a new change set's `verificationSql` confirm it. See
+   [Troubleshooting](docs/TROUBLESHOOTING.md#a-change-set-that-worked-in-120-is-rejected).
+8. **Use a schema-scoped least-privilege account.** The change-set checks catch mistakes; they
+   are not a security boundary. See
+   [docs/OPERATIONS.md](docs/OPERATIONS.md#least-privilege-database-account-required) and
+   [SECURITY.md](SECURITY.md#scope-the-sql-checks-are-not-a-security-boundary).
+9. **Java callers:** catch the new unchecked exceptions instead of `Exception`, and pass
+   implicit-DDL dialects (MySQL, MariaDB, Oracle) a connection with `autoCommit=true`; see
+   [Breaking changes](#breaking-changes).
 
 ### New engines
 
@@ -9,14 +60,17 @@
   uses transactional DDL and `sp_getapplock`; Oracle follows the implicit-DDL path
   (verification + single-statement change sets when unverified) and `DBMS_LOCK` with
   `release_on_commit=false`, so implicit DDL commits do not drop the lock mid-sync.
+  CI tests Oracle XE 21c; Oracle 19c is supported by design but not CI-tested.
 - JDBC drivers are Maven `<optional>` in the library; applications declare the engines they
   use. The standalone CLI shades all five drivers.
 
 ### Breaking changes
 
 - Spring Boot auto-configuration is **off by default**: set `schema-synchronizer.enabled=true`.
-- CLI `serialize`/`sync` reject literal passwords on the command line: pass `-` and set
-  `SCHEMA_DB_PASSWORD`.
+  When the definition resource is on the classpath but the property is unset, startup logs
+  one WARN saying synchronization is off; `schema-synchronizer.enabled=false` silences it.
+- CLI `serialize`/`sync`/`dry-run` reject literal passwords on the command line: pass `-` and
+  set `SCHEMA_DB_PASSWORD`.
 - `schema=public` is rejected on SQL Server, Oracle, and MySQL/MariaDB (use `dbo`, the
   connected user, or the catalog name).
 - MySQL Connector/J connected to MariaDB is detected as `mariadb`; definitions declaring
@@ -25,13 +79,96 @@
   install code that the guardrails cannot check. Install extensions outside change sets, for
   example during database provisioning or with a migration role. Change sets already recorded
   in history are unaffected.
+- **Empty databases check every change set.** Without a history table, all change sets pass
+  through the 2.0.0 SQL rules, so a historical change set that 1.2.0 accepted can fail on a new
+  database while existing databases keep working (upgrade step 7).
+- Stricter comparison can report pending changes against 1.2.0 definitions (upgrade step 6).
+- **Typed, unchecked exceptions.** `SchemaSynchronizer.synchronize`,
+  `synchronizeWithResult`, `synchronizeFromClasspath`, the `main`/`dryRunMain`/`validateMain`
+  entry points, `SchemaSerializer.main`, `SchemaSnapshotWriter.main`, and
+  `SchemaDefinitionValidator.validate*` no longer
+  declare `throws Exception`. Failures
+  are `SchemaSynchronizationException` subclasses: `SchemaLockUnavailableException` (another
+  synchronizer holds the lock; retry), `SchemaDefinitionException` (invalid definition, SQL
+  policy violation, or pending manual work; retrying does not help), and
+  `SchemaDatabaseException` (the database or connection failed; the cause is the driver's
+  `SQLException`). Code that caught `Exception` still compiles; code that relied on checked
+  `SQLException`/`IOException` must catch these instead.
+- **`autoCommit=false` is rejected on MySQL, MariaDB, and Oracle** before any work, because
+  their first DDL statement would commit the caller's open transaction.
+- **`SchemaSynchronizationResult`** gains `dryRun`, `lockReleased`, and `cleanupWarnings`
+  components; the six-argument constructor remains, but record patterns that deconstruct the
+  six 1.2.0 components no longer compile.
+- **Definition collections are unmodifiable.** `SchemaDefinition`, `TableDef`, and `ChangeSet`
+  copy their maps and lists, so code that mutates `tables()`, `columns()`, `indexes()`,
+  `changes()`, or `statements()` still compiles but throws `UnsupportedOperationException`.
+  Build a new definition instead.
+- **Emitted identifiers are quoted.** Generated DDL, pending SQL, and snapshots quote every
+  table, column, and index name in the dialect's style, so reserved words work; see
+  [Reserved words and identifier case](docs/SCHEMA_DEFINITION.md#reserved-words-and-identifier-case).
+  Tooling that parses pending SQL must accept quoted names. Declared names are unchanged:
+  still unquoted `[A-Za-z_][A-Za-z0-9_]*`, folded like unquoted SQL (upper case on Oracle,
+  lower case elsewhere). A live object whose name differs from the declaration only by case
+  on a case-sensitive engine now fails with `live table "Customer" differs from declared
+  table …` instead of being matched loosely.
+- **Schema-qualified column types are PostgreSQL-only.** A declared type such as
+  `public.vector(3)` is rejected on MySQL, MariaDB, SQL Server, and Oracle. On PostgreSQL,
+  snapshots of a schema other than `public` now qualify types that live in another schema
+  (outside `pg_catalog` and the snapshot schema), for example `"public".vector(3)` for pgvector
+  installed in `public`; see
+  [Extension types in another schema](docs/SCHEMA_DEFINITION.md#extension-types-in-another-schema).
+- **`CREATE VIEW`, `SEQUENCE`, `PROCEDURE`, `PACKAGE`, and `TYPE` are rejected in change sets
+  on every dialect** with `CREATE VIEW is not yet supported in change sets; create this object
+  outside SchemaSynchronizer (see docs/ROADMAP.md)` (naming the object type). Support is
+  planned in [docs/ROADMAP.md](docs/ROADMAP.md#change-set-support-for-more-object-types).
+- **Lock identity.** The synchronization lock is derived from `(schema, historyTable)` on every
+  dialect, so two ledgers in one schema no longer share a lock and two products in one cluster
+  no longer serialize on the default id. The 1.x locks are still acquired after it, so a
+  rolling upgrade excludes older peers; `advisoryLockId` now only selects those legacy locks
+  (PostgreSQL advisory key, Oracle `DBMS_LOCK` id). Keep it equal to the value 1.x used.
+- **Dry-run on a first deploy succeeds.** Against an empty database (no history table), a dry
+  run reports every change set and table it would create instead of failing.
+- **Smaller public API.** Internal types are now package-private: `ColumnDefinitionParser`,
+  `ColumnSpec`, `LiveColumn`, `NonDestructiveAlterPlanner`, `NonDestructiveSqlPolicy`, and
+  `PkIdentity`. Also removed from the public API: `DatabaseDialect.isMySqlFamily()` and the static
+  helpers `SchemaSynchronizer.shouldSkipAlter`, `isIgnorableSchemaTable`, and
+  `isIgnorableSchemaIndex`. Code that called them no longer compiles; there is no replacement,
+  because they exposed planner internals.
+- New: `SchemaSnapshotWriter.writeSnapshot(Connection, String, Path)` serializes a schema over
+  a caller-owned connection without closing it.
+
+### Build and packaging
+
+- **TiDB is no longer claimed as verified.** The MySQL suite now covers triggers, stored
+  functions, and DDL that TiDB 8.5 does not support; `scripts/verify-mysql-compatible.sh` runs
+  Percona Server by default and TiDB only with `VERIFY_TIDB=1`.
+
+- The minimum Java version is **17** (was 21): compiled with `--release 17`; CI tests Java 17
+  and 21.
+- The standalone CLI JAR carries SchemaSynchronizer's `LICENSE` and `NOTICE` at its root,
+  `META-INF/licenses/THIRD-PARTY.txt`, and each bundled dependency's license text under
+  `META-INF/licenses/<artifact>/` (MySQL Connector/J GPLv2 with the Universal FOSS Exception,
+  MariaDB Connector/J LGPL-2.1-or-later, Oracle ojdbc11 FUTC, PostgreSQL BSD-2-Clause (plus
+  the OnGres SCRAM and stringprep/saslprep BSD-2-Clause licenses the driver bundles, under
+  `META-INF/licenses/com.ongres.*`),
+  mssql-jdbc MIT, protobuf BSD-3-Clause, Jackson Apache-2.0, SLF4J MIT, checker-qual MIT).
+  Earlier standalone JARs (for example 1.1.0 on Maven Central) carried MySQL Connector/J's
+  license text as the root `LICENSE` instead of the project's.
+- Both JARs declare `Automatic-Module-Name` (`com.thinkaillc.schemasynchronizer` and
+  `com.thinkaillc.schemasynchronizer.cli`), and the build sets
+  `project.build.outputTimestamp` for reproducible archives.
+- Bundled drivers: PostgreSQL 42.7.13, MariaDB Connector/J 3.5.10, MySQL Connector/J 9.7.0,
+  mssql-jdbc 12.10.2, ojdbc11 23.26.3; Jackson 2.18.11, SLF4J 2.0.20; Spring Boot 3.5.16.
+- CLI failures print one `SchemaSynchronizer failed: …` line without a stack trace, with
+  `password=`/`pwd=`-style values and URL credentials in the message masked as `****`.
 
 ### Locking and change sets
 
-- Locks are scoped to the schema, so products sharing one cluster do not serialize on the
-  default id; the 1.2.0 lock is acquired as well, so a rolling upgrade still excludes 1.2.0
+- Locks are scoped to the schema and history table, so products sharing one cluster do not
+  serialize on the default id; the 1.2.0 lock is acquired as well, so a rolling upgrade still excludes 1.2.0
   peers. PostgreSQL waits at most 30 seconds (`pg_try_advisory_xact_lock`), like MySQL and SQL
-  Server. MySQL lock names longer than 64 characters are hashed instead of truncated.
+  Server. MySQL and MariaDB lock names are 64-character SHA-256 names, so long schema names
+  are no longer truncated into colliding locks.
 - The history table records `applied_by` (`SCHEMA_SYNCHRONIZER_ACTOR` or `user.name`);
   existing history tables gain the column on the next sync.
 - Change-set and verification SQL must target the configured schema (or system catalogs);

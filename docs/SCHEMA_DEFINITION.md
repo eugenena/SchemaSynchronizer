@@ -4,12 +4,22 @@
 combines desired schema state with explicit ordered changes that cannot be inferred
 safely from JDBC metadata.
 
+## Threat model
+
+A definition is trusted code. The change-set SQL checks described below catch mistakes
+(a stray `DROP`, a cross-schema reference, a session `SET`); they are **not a security
+boundary** against a hostile or compromised change-set author. A change set can reach
+anything the database account can reach, for example by calling a schema-local helper that
+runs dynamic SQL or a `SECURITY DEFINER` function. Run SchemaSynchronizer as a schema-scoped
+[least-privilege account](OPERATIONS.md#least-privilege-database-account-required), and
+review definitions like production code. See [SECURITY.md](../SECURITY.md).
+
 ## Top-level fields
 
 | Field | Required | Description |
 |---|---:|---|
 | `formatVersion` | Yes for new files | Current format is `2` |
-| `dialect` | Yes for new files | `postgresql`, `mariadb`, or `mysql` |
+| `dialect` | Yes for new files | `postgresql`, `mariadb`, `mysql`, `sqlserver`, or `oracle` |
 | `tables` | Yes | Desired tables keyed by unquoted table name |
 | `changes` | No | Ordered explicit change-set ledger |
 
@@ -25,9 +35,48 @@ Each table contains:
 - `indexes`: idempotent native `CREATE INDEX` statements.
 
 The table key, the target in `createSql`, and the targets in index SQL must agree.
-Use ordinary unquoted identifiers. Table and column names are normalized to
-lowercase; quoted identifiers are rejected. Avoid mixed-case spelling even when it
-would normalize successfully, because the definition targets the lowercase object.
+
+### Reserved words and identifier case
+
+- Declared table, column, and index names are identifiers matching `[A-Za-z_][A-Za-z0-9_]*`,
+  folded like unquoted SQL names in 1.x: upper case on Oracle, lower case on every other
+  engine. `Customer` and `customer` name the same object.
+- In `createSql` and index SQL, write names unquoted. A quoted name is accepted only when it
+  is spelled exactly as the folded name (`"order"` on PostgreSQL, `"ORDER"` on Oracle);
+  any other quoted spelling (`"Order"`) is rejected, because it would name a different
+  object on a case-sensitive engine.
+- SchemaSynchronizer always **emits** identifiers quoted in the DDL it generates, so a
+  column or table named after a reserved word (`order`, `user`, `group`) works on every
+  engine.
+- A live object whose name differs from the folded name only by case (for example
+  `"Customer"` created with quotes on PostgreSQL or Oracle, or `Customer` on MySQL with
+  `lower_case_table_names=0`) matches only where the engine compares that kind of name
+  case-insensitively. On a case-sensitive engine the sync fails with an error naming the
+  live object (`live table "Customer" differs from declared table …`) instead of emitting
+  DDL against the wrong name. Rename the live object, or manage it outside the synchronized
+  schema.
+
+### Extension types in another schema
+
+PostgreSQL only. An extension type such as pgvector's `vector` usually lives in `public`,
+while the synchronized schema may be another one (`app`). Synchronization runs with
+`search_path` set to the configured schema alone, so:
+
+- Declare the type qualified, `public.vector(3)` (or `"public".vector(3)`), wherever
+  SchemaSynchronizer creates it: in `createSql` and in any column it may add. This is the
+  recommended form for a non-public schema.
+- An unqualified `vector(3)` compares correctly against an existing column whatever schema
+  the type is in, but `CREATE TABLE` or `ADD COLUMN` with it fails in a non-public schema
+  because `public` is not on the `search_path`.
+- A qualifier must name the schema the live type is in; `app.vector(3)` or
+  `pg_catalog.vector(3)` against a type in `public` is reported as pending. The qualifier is
+  folded like any unquoted name (`PUBLIC.vector` is `public`); a quoted `"Public"` is a
+  different schema.
+- Snapshots of a schema other than `public` write types from another schema qualified, for
+  example `"public".vector(3)`, so the snapshot replays into any schema. Snapshots of
+  `public` itself write `vector(3)`.
+
+Schema-qualified column types are rejected on MySQL, MariaDB, SQL Server, and Oracle.
 
 The declarative layer owns ordinary tables in the configured schema. A live table,
 column, index, or primary key absent from the definition is reported as pending
@@ -73,7 +122,10 @@ Rules:
   `SELECT 1 SHUTDOWN`) is rejected like a second `;`-separated statement.
 - `phase` is `BEFORE_SCHEMA` by default; use `AFTER_SCHEMA` for objects that depend
   on newly created tables or columns.
-- `verificationSql` must return exactly one row containing one non-null boolean.
+- `verificationSql` must be a read-only `SELECT`/`WITH` query that returns exactly one row
+  whose first column is non-null and readable as a boolean (`TRUE`/`FALSE`, or `1`/`0` on
+  engines without a boolean type). Additional columns are ignored. Zero rows, more than one
+  row, or `NULL` fails the sync.
 - Verification queries must be read-only and must not call side-effecting functions.
 - Change-set statements must target the configured schema namespace (or system
   catalogs such as `information_schema` / `pg_catalog` / `sys`). Any `other.object`
@@ -351,7 +403,7 @@ Rules:
   which are treated as data. A SQL Server body without `;` terminators resolves
   system-catalog aliases across the whole body, which only rejects more.
 - These checks are a guardrail against accidental unsafe change sets, not a security
-  boundary against a hostile author.
+  boundary against a hostile author; see [Threat model](#threat-model).
 - During sync, the SQL checks above apply only to change sets not yet recorded in the history
   table. A recorded change set whose checksum matches never runs again, so it is not
   re-checked; an edited one fails with a checksum error. If the history table does not exist

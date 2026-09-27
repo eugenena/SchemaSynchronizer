@@ -16,6 +16,7 @@ import java.sql.DatabaseMetaData;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Statement;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -23,8 +24,7 @@ import java.util.Set;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.Mockito.atLeastOnce;
-import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -46,43 +46,61 @@ class SchemaSynchronizerTest {
     private final ObjectMapper objectMapper = new ObjectMapper();
     private SchemaSynchronizer synchronizer;
 
+    /** Every SQL string the synchronizer sent, in order, tagged by JDBC call. */
+    private final List<String> sentSql = new ArrayList<>();
+
     @BeforeEach
-    void setUp() throws Exception {
+    void setUp() {
         synchronizer = new SchemaSynchronizer(objectMapper, dataSource);
-        lenient().when(dataSource.getConnection()).thenReturn(connection);
-        lenient().when(connection.getMetaData()).thenReturn(metaData);
-        lenient().when(metaData.getDatabaseProductName()).thenReturn("PostgreSQL");
-        lenient().when(connection.getAutoCommit()).thenReturn(true);
-        lenient().when(metaData.getTables(null, "public", "schema_synchronizer_history", new String[]{"TABLE"}))
+    }
+
+    /** Strict stubs for a PostgreSQL session with no history table; every statement is recorded. */
+    private void stubPostgresSession() throws Exception {
+        when(connection.getMetaData()).thenReturn(metaData);
+        when(metaData.getDatabaseProductName()).thenReturn("PostgreSQL");
+        when(connection.getAutoCommit()).thenReturn(true);
+        when(metaData.getTables(null, "public", "schema_synchronizer_history", new String[]{"TABLE"}))
                 .thenReturn(historyTablesRs);
-        lenient().when(historyTablesRs.next()).thenReturn(false);
-        lenient().when(metaData.getPrimaryKeys(null, "public", "existing_table"))
-                .thenReturn(primaryKeysRs);
-        lenient().when(metaData.getPrimaryKeys(null, "public", "t"))
-                .thenReturn(primaryKeysRs);
-        lenient().when(primaryKeysRs.next()).thenReturn(false);
-        lenient().when(connection.createStatement()).thenReturn(statement);
-        lenient().when(statement.execute(anyString())).thenReturn(true);
-        lenient().when(statement.executeQuery(anyString())).thenReturn(lockRs);
-        lenient().when(lockRs.next()).thenReturn(true);
-        lenient().when(lockRs.getBoolean(1)).thenReturn(true);
-        lenient().when(connection.prepareStatement(anyString())).thenReturn(preparedStatement);
-        lenient().when(preparedStatement.executeQuery()).thenReturn(preparedRows);
-        lenient().when(preparedRows.next()).thenReturn(false);
+        when(historyTablesRs.next()).thenReturn(false);
+        when(connection.createStatement()).thenReturn(statement);
+        when(statement.execute(anyString())).thenAnswer(invocation -> {
+            sentSql.add("execute: " + invocation.getArgument(0));
+            return false;
+        });
+        when(statement.executeQuery(anyString())).thenAnswer(invocation -> {
+            sentSql.add("query: " + invocation.getArgument(0));
+            return lockRs;
+        });
+        when(lockRs.next()).thenReturn(true);
+        when(lockRs.getBoolean(1)).thenReturn(true);
+    }
+
+    /** Prepared metadata queries (all returning no rows), recorded in {@link #sentSql}. */
+    private void stubPreparedQueries() throws Exception {
+        when(connection.prepareStatement(anyString())).thenAnswer(invocation -> {
+            sentSql.add("prepare: " + invocation.getArgument(0));
+            return preparedStatement;
+        });
+        when(preparedStatement.executeQuery()).thenReturn(preparedRows);
+        when(preparedRows.next()).thenReturn(false);
     }
 
     @Test
     void emptyDefinitionStillChecksTheImmutableLedgerUnderLock() throws Exception {
+        stubPostgresSession();
         synchronizer.synchronize(connection, new SchemaDefinition(Map.of()));
         int key1 = DialectSupport.namespaceLockKey("public");
         int key2 = Math.floorMod(Long.hashCode(7_249_031_147L), Integer.MAX_VALUE);
-        verify(statement, atLeastOnce()).executeQuery(
+        verify(statement, times(1)).executeQuery(
                 "SELECT pg_try_advisory_xact_lock(" + key1 + ", " + key2 + ")");
-        verify(statement, atLeastOnce()).executeQuery("SELECT pg_try_advisory_xact_lock(7249031147)");
+        verify(statement, times(1)).executeQuery("SELECT pg_try_advisory_xact_lock(7249031147)");
+        assertThat(sentSql).containsExactly(EMPTY_DEFINITION_SQL.toArray(String[]::new));
     }
 
     @Test
-    void rejectsDuplicateChangeIdsAcrossPhases() {
+    void rejectsDuplicateChangeIdsAcrossPhases() throws Exception {
+        when(connection.getMetaData()).thenReturn(metaData);
+        when(metaData.getDatabaseProductName()).thenReturn("PostgreSQL");
         SchemaDefinition definition = new SchemaDefinition(Map.of(), List.of(
                 new SchemaDefinition.ChangeSet("duplicate", "before", List.of("SELECT 1"), null,
                         SchemaDefinition.ChangeSet.Phase.BEFORE_SCHEMA),
@@ -90,7 +108,7 @@ class SchemaSynchronizerTest {
                         SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA)));
 
         assertThatThrownBy(() -> synchronizer.synchronize(connection, definition))
-                .isInstanceOf(IllegalArgumentException.class)
+                .isInstanceOf(SchemaDefinitionException.class)
                 .hasMessageContaining("duplicate schema change id");
     }
 
@@ -98,12 +116,16 @@ class SchemaSynchronizerTest {
     void missingRequiredDefinitionFailsClosed() {
         SchemaSynchronizer missing = new SchemaSynchronizer(objectMapper, dataSource, "/does-not-exist.json");
         assertThatThrownBy(missing::synchronizeFromClasspath)
-                .isInstanceOf(IllegalStateException.class)
+                .isInstanceOf(SchemaDefinitionException.class)
                 .hasMessageContaining("Required schema definition is missing");
     }
 
     @Test
     void addsMissingColumn() throws Exception {
+        stubPostgresSession();
+        stubPreparedQueries();
+        when(metaData.getPrimaryKeys(null, "public", "existing_table")).thenReturn(primaryKeysRs);
+        when(primaryKeysRs.next()).thenReturn(false);
         when(metaData.getTables(null, "public", "%", new String[]{"TABLE"})).thenReturn(tablesRs);
         when(tablesRs.next()).thenReturn(true, false);
         when(tablesRs.getString("TABLE_SCHEM")).thenReturn("public");
@@ -128,11 +150,17 @@ class SchemaSynchronizerTest {
         );
         synchronizer.synchronize(connection, new SchemaDefinition(Map.of("existing_table", tableDef)));
 
-        verify(statement).execute("ALTER TABLE existing_table ADD COLUMN IF NOT EXISTS id BIGINT");
+        verify(statement).execute("ALTER TABLE \"existing_table\" ADD COLUMN IF NOT EXISTS \"id\" BIGINT");
+        assertThat(sentSql).containsExactly(withLedgerFrame(
+                "execute: ALTER TABLE \"existing_table\" ADD COLUMN IF NOT EXISTS \"id\" BIGINT"));
     }
 
     @Test
     void appliesDefaultChangeOnExistingColumn() throws Exception {
+        stubPostgresSession();
+        stubPreparedQueries();
+        when(metaData.getPrimaryKeys(null, "public", "t")).thenReturn(primaryKeysRs);
+        when(primaryKeysRs.next()).thenReturn(false);
         when(metaData.getTables(null, "public", "%", new String[]{"TABLE"})).thenReturn(tablesRs);
         when(tablesRs.next()).thenReturn(true, false);
         when(tablesRs.getString("TABLE_SCHEM")).thenReturn("public");
@@ -154,7 +182,33 @@ class SchemaSynchronizerTest {
         );
         synchronizer.synchronize(connection, new SchemaDefinition(Map.of("t", tableDef)));
 
-        verify(statement).execute("ALTER TABLE t ALTER COLUMN status SET DEFAULT 'NEW'");
+        verify(statement).execute("ALTER TABLE \"t\" ALTER COLUMN \"status\" SET DEFAULT 'NEW'");
+        assertThat(sentSql).containsExactly(withLedgerFrame(
+                "execute: ALTER TABLE \"t\" ALTER COLUMN \"status\" SET DEFAULT 'NEW'"));
+    }
+
+    /** What the synchronizer sends around the declarative work for an empty ledger in {@code public}. */
+    private static final List<String> EMPTY_DEFINITION_SQL = List.of(
+            "execute: SET LOCAL search_path TO \"public\"",
+            "query: SELECT pg_try_advisory_xact_lock(-904734018, 1625532851)",
+            "query: SELECT pg_try_advisory_xact_lock(1084631176, 806580201)",
+            "query: SELECT pg_try_advisory_xact_lock(7249031147)");
+
+    /** Post-change read of the altered table's standalone indexes. */
+    private static final String STANDALONE_INDEX_QUERY = "prepare: SELECT indexes.indexname, indexes.indexdef"
+            + " FROM pg_indexes indexes JOIN pg_namespace namespace ON namespace.nspname = indexes.schemaname"
+            + " JOIN pg_class index_class ON index_class.relnamespace = namespace.oid"
+            + " AND index_class.relname = indexes.indexname"
+            + " WHERE indexes.schemaname = ? AND indexes.tablename = ?"
+            + " AND NOT EXISTS (SELECT 1 FROM pg_constraint constraint_row"
+            + " WHERE constraint_row.conindid = index_class.oid)";
+
+    /** Exact session for one altered table: frame, the work, then the standalone-index read. */
+    private static String[] withLedgerFrame(String... work) {
+        List<String> expected = new ArrayList<>(EMPTY_DEFINITION_SQL);
+        expected.addAll(List.of(work));
+        expected.add(STANDALONE_INDEX_QUERY);
+        return expected.toArray(String[]::new);
     }
 
     @Test

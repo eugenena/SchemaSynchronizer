@@ -38,9 +38,11 @@ class SchemaSynchronizerLockReleaseTest {
         SchemaSynchronizationResult result = synchronizer("dbo").synchronizeWithResult(connection, empty("sqlserver"));
 
         assertThat(result.changed()).isFalse();
+        assertThat(result.lockReleased()).isFalse();
+        assertThat(result.cleanupWarnings()).containsExactly("SQLException: release failed");
         var order = inOrder(connection);
         order.verify(connection).commit();
-        order.verify(connection).prepareStatement(contains("sp_releaseapplock"));
+        order.verify(connection, org.mockito.Mockito.times(2)).prepareStatement(contains("sp_releaseapplock"));
         order.verify(connection).setAutoCommit(true);
     }
 
@@ -52,6 +54,8 @@ class SchemaSynchronizerLockReleaseTest {
         SchemaSynchronizationResult result = synchronizer("dbo").synchronizeWithResult(connection, empty("sqlserver"));
 
         assertThat(result.changed()).isFalse();
+        assertThat(result.lockReleased()).isTrue();
+        assertThat(result.cleanupWarnings()).containsExactly("SQLException: restore failed");
         verify(connection).commit();
     }
 
@@ -70,6 +74,21 @@ class SchemaSynchronizerLockReleaseTest {
     }
 
     @Test
+    void aRuntimeExceptionFromRollbackStillReleasesTheLockAndRestoresAutoCommit() throws Exception {
+        Connection connection = sqlServerConnection();
+        doThrow(new SQLException("commit failed")).when(connection).commit();
+        doThrow(new IllegalStateException("pool closed the connection")).when(connection).rollback();
+
+        assertThatThrownBy(() -> synchronizer("dbo").synchronizeWithResult(connection, empty("sqlserver")))
+                .isInstanceOf(SchemaDatabaseException.class)
+                .hasMessage("commit failed")
+                .satisfies(failure -> assertThat(failure.getSuppressed())
+                        .extracting(Throwable::getMessage).containsExactly("pool closed the connection"));
+        verify(connection, org.mockito.Mockito.times(2)).prepareStatement(contains("sp_releaseapplock"));
+        verify(connection).setAutoCommit(true);
+    }
+
+    @Test
     void mySqlReleaseFailureAfterSuccessfulSyncReturnsTheResult() throws Exception {
         Connection connection = mySqlConnection();
         when(connection.prepareStatement(contains("RELEASE_LOCK")))
@@ -78,7 +97,55 @@ class SchemaSynchronizerLockReleaseTest {
         SchemaSynchronizationResult result = synchronizer("app").synchronizeWithResult(connection, empty("mysql"));
 
         assertThat(result.changed()).isFalse();
-        verify(connection).prepareStatement(contains("RELEASE_LOCK"));
+        assertThat(result.lockReleased()).isFalse();
+        assertThat(result.cleanupWarnings()).containsExactly("SQLException: release failed");
+        verify(connection, org.mockito.Mockito.times(2)).prepareStatement(contains("RELEASE_LOCK"));
+    }
+
+    @Test
+    void successfulReleaseReportsNoCleanupWarnings() throws Exception {
+        SchemaSynchronizationResult mysql = synchronizer("app").synchronizeWithResult(mySqlConnection(), empty("mysql"));
+        SchemaSynchronizationResult sqlServer = synchronizer("dbo")
+                .synchronizeWithResult(sqlServerConnection(), empty("sqlserver"));
+
+        for (SchemaSynchronizationResult result : List.of(mysql, sqlServer)) {
+            assertThat(result.lockReleased()).isTrue();
+            assertThat(result.cleanupWarnings()).isEmpty();
+        }
+    }
+
+    @Test
+    void mySqlReleaseReportingLockNotHeldIsACleanupWarning() throws Exception {
+        Connection connection = mySqlConnection();
+        PreparedStatement release = mock(PreparedStatement.class);
+        ResultSet notHeld = mock(ResultSet.class);
+        when(connection.prepareStatement(contains("RELEASE_LOCK"))).thenReturn(release);
+        when(release.executeQuery()).thenReturn(notHeld);
+        when(notHeld.next()).thenReturn(true);
+        when(notHeld.getInt(1)).thenReturn(0);
+
+        SchemaSynchronizationResult result = synchronizer("app").synchronizeWithResult(connection, empty("mysql"));
+
+        assertThat(result.lockReleased()).isFalse();
+        assertThat(result.cleanupWarnings()).singleElement().asString()
+                .contains("RELEASE_LOCK").contains("not held by this session");
+    }
+
+    @Test
+    void mySqlConnectionWithAutoCommitOffIsRejectedBeforeAnyLockOrStatement() throws Exception {
+        for (String dialect : List.of("MySQL", "MariaDB", "Oracle")) {
+            Connection connection = connection(dialect, "Oracle".equals(dialect) ? "21.0" : "10.11.0");
+            when(connection.getAutoCommit()).thenReturn(false);
+
+            assertThatThrownBy(() -> synchronizer("app").synchronizeWithResult(connection,
+                    empty(dialect.toLowerCase(java.util.Locale.ROOT))))
+                    .as(dialect)
+                    .isInstanceOf(SchemaDefinitionException.class)
+                    .hasMessageContaining("autoCommit=false is not supported");
+            verify(connection, org.mockito.Mockito.never()).prepareStatement(anyString());
+            verify(connection, org.mockito.Mockito.never()).createStatement();
+            verify(connection, org.mockito.Mockito.never()).commit();
+        }
     }
 
     @Test
@@ -113,6 +180,7 @@ class SchemaSynchronizerLockReleaseTest {
 
     private static Connection mySqlConnection() throws Exception {
         Connection connection = connection("MySQL", "8.0.36");
+        when(connection.getAutoCommit()).thenReturn(true);
         Statement statement = mock(Statement.class);
         ResultSet database = mock(ResultSet.class);
         when(connection.createStatement()).thenReturn(statement);

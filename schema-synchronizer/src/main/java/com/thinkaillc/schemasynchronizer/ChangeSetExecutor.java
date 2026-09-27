@@ -8,7 +8,9 @@ import org.slf4j.LoggerFactory;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.sql.Connection;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Savepoint;
@@ -29,14 +31,14 @@ final class ChangeSetExecutor {
 
     Result apply(Connection conn, List<SchemaDefinition.ChangeSet> changes, SchemaSynchronizerOptions options,
                  DatabaseDialect dialect)
-            throws Exception {
+            throws SQLException {
         List<SchemaDefinition.ChangeSet> safeChanges = validateStructure(changes);
         if (safeChanges.isEmpty()) {
             return new Result(0, List.of());
         }
 
         String history = dialect.qualifyHistoryTable(options.schema(), options.historyTable());
-        Map<String, String> applied = historyExists(conn, options, dialect) ? readHistory(conn, history) : Map.of();
+        Map<String, String> applied = historyExists(conn, options, dialect) ? readHistory(conn, history, dialect) : Map.of();
         List<String> planned = new ArrayList<>();
         int appliedCount = 0;
         int unrecordedCount = 0;
@@ -65,7 +67,7 @@ final class ChangeSetExecutor {
         }
 
         createHistory(conn, history, dialect);
-        applied = readHistory(conn, history);
+        applied = readHistory(conn, history, dialect);
         for (SchemaDefinition.ChangeSet change : safeChanges) {
             String checksum = checksum(change);
             String previous = applied.get(change.id());
@@ -77,7 +79,7 @@ final class ChangeSetExecutor {
                 continue;
             }
             if (isVerified(conn, change)) {
-                insertHistory(conn, history, change, checksum, 0);
+                insertHistory(conn, history, dialect, change, checksum, 0);
                 appliedCount++;
                 continue;
             }
@@ -103,7 +105,7 @@ final class ChangeSetExecutor {
                                 + "applied the remainder",
                         change.id(), skippedDuplicates);
             }
-            insertHistory(conn, history, change, checksum, elapsed);
+            insertHistory(conn, history, dialect, change, checksum, elapsed);
             appliedCount++;
         }
         return new Result(appliedCount, List.copyOf(planned));
@@ -143,8 +145,54 @@ final class ChangeSetExecutor {
             if (change.statements() == null || change.statements().isEmpty()) {
                 throw new IllegalArgumentException("schema change has no statements: " + change.id());
             }
+            if (change.statements().stream().anyMatch(sql -> sql == null || sql.isBlank())) {
+                throw new IllegalArgumentException("schema change has a null or blank statement: " + change.id());
+            }
         }
         return List.copyOf(changes);
+    }
+
+    /** History description column size: characters on PostgreSQL/MySQL/MariaDB, bytes on Oracle and SQL Server. */
+    static final int HISTORY_DESCRIPTION_MAX = 500;
+
+    /**
+     * Oracle {@code VARCHAR2(500)} and SQL Server {@code VARCHAR(500)} are sized in bytes, so a description
+     * within 500 characters can still overflow the history row after its DDL has committed. A SQL Server
+     * code page never takes more bytes than UTF-8; Oracle's legacy {@code UTF8} (CESU-8) takes up to 6 bytes
+     * where UTF-8 takes 4. Within that bound it always fits; beyond it, {@code storedBytes} gives the
+     * length in the database's own character set.
+     */
+    static void requireHistoryRowFits(SchemaDefinition.ChangeSet change, DatabaseDialect dialect,
+                                      StoredBytes storedBytes) throws SQLException {
+        int alwaysFits = dialect == DatabaseDialect.ORACLE ? HISTORY_DESCRIPTION_MAX * 4 / 6 : HISTORY_DESCRIPTION_MAX;
+        if ((dialect == DatabaseDialect.ORACLE || dialect == DatabaseDialect.SQLSERVER)
+                && change.description() != null
+                && change.description().getBytes(StandardCharsets.UTF_8).length > alwaysFits
+                && storedBytes.of(change.description()) > HISTORY_DESCRIPTION_MAX) {
+            throw new IllegalArgumentException("schema change description exceeds " + HISTORY_DESCRIPTION_MAX
+                    + " bytes in the database character set, the " + dialect.id() + " history column size: "
+                    + change.id());
+        }
+    }
+
+    /** The byte length a string takes in the history description column. */
+    @FunctionalInterface
+    interface StoredBytes {
+        int of(String value) throws SQLException;
+    }
+
+    static StoredBytes storedBytes(Connection conn, DatabaseDialect dialect) {
+        String sql = dialect == DatabaseDialect.ORACLE ? "SELECT LENGTHB(?) FROM DUAL"
+                : "SELECT DATALENGTH(CAST(? AS VARCHAR(8000)))";
+        return value -> {
+            try (PreparedStatement statement = conn.prepareStatement(sql)) {
+                statement.setString(1, value);
+                try (ResultSet rs = statement.executeQuery()) {
+                    rs.next();
+                    return rs.getInt(1);
+                }
+            }
+        };
     }
 
     /** The non-destructive, schema-scope, and read-only verification checks for one change set. */
@@ -167,9 +215,9 @@ final class ChangeSetExecutor {
      */
     void validateHistory(Connection conn, List<SchemaDefinition.ChangeSet> changes, SchemaSynchronizerOptions options,
                          DatabaseDialect dialect)
-            throws Exception {
+            throws SQLException {
         String history = dialect.qualifyHistoryTable(options.schema(), options.historyTable());
-        Map<String, String> applied = historyExists(conn, options, dialect) ? readHistory(conn, history) : Map.of();
+        Map<String, String> applied = historyExists(conn, options, dialect) ? readHistory(conn, history, dialect) : Map.of();
         Map<String, String> expected = new HashMap<>();
         for (SchemaDefinition.ChangeSet change : changes) {
             expected.put(change.id(), checksum(change));
@@ -188,6 +236,7 @@ final class ChangeSetExecutor {
         for (SchemaDefinition.ChangeSet change : changes) {
             if (!applied.containsKey(change.id())) {
                 requirePolicy(change, options, dialect);
+                requireHistoryRowFits(change, dialect, storedBytes(conn, dialect));
             }
         }
         if (dialect.ddlMayCommitImplicitly()) {
@@ -218,7 +267,7 @@ final class ChangeSetExecutor {
             return List.of();
         }
         String history = dialect.qualifyHistoryTable(options.schema(), options.historyTable());
-        Map<String, String> applied = historyExists(conn, options, dialect) ? readHistory(conn, history) : Map.of();
+        Map<String, String> applied = historyExists(conn, options, dialect) ? readHistory(conn, history, dialect) : Map.of();
         List<SchemaDefinition.ChangeSet> pending = new ArrayList<>();
         for (SchemaDefinition.ChangeSet change : changes) {
             // Dry-run must not execute verificationSql.
@@ -244,10 +293,12 @@ final class ChangeSetExecutor {
         }
     }
 
-    private Map<String, String> readHistory(Connection conn, String history) throws SQLException {
+    private Map<String, String> readHistory(Connection conn, String history, DatabaseDialect dialect)
+            throws SQLException {
         Map<String, String> result = new HashMap<>();
         try (var statement = conn.createStatement();
-             var rows = statement.executeQuery("SELECT change_id, checksum FROM " + history)) {
+             var rows = statement.executeQuery("SELECT " + SqlIdentifiers.quote(dialect, "change_id") + ", "
+                     + SqlIdentifiers.quote(dialect, "checksum") + " FROM " + history)) {
             while (rows.next()) {
                 String id = rows.getString(1);
                 if (result.put(id, rows.getString(2)) != null) {
@@ -269,11 +320,22 @@ final class ChangeSetExecutor {
         }
     }
 
+    /** Seconds a verification query may run before the driver cancels it. */
+    static final int VERIFICATION_QUERY_TIMEOUT_SECONDS = 60;
+
     private boolean isVerified(Connection conn, SchemaDefinition.ChangeSet change) throws SQLException {
         if (change.verificationSql() == null || change.verificationSql().isBlank()) {
             return false;
         }
-        try (var statement = conn.createStatement(); var rows = statement.executeQuery(change.verificationSql())) {
+        try (var statement = conn.createStatement()) {
+            statement.setQueryTimeout(VERIFICATION_QUERY_TIMEOUT_SECONDS);
+            return readVerification(statement, change);
+        }
+    }
+
+    private static boolean readVerification(java.sql.Statement statement, SchemaDefinition.ChangeSet change)
+            throws SQLException {
+        try (var rows = statement.executeQuery(change.verificationSql())) {
             if (!rows.next()) {
                 throw new IllegalArgumentException("verification query returned no row for schema change: "
                         + change.id());
@@ -291,11 +353,16 @@ final class ChangeSetExecutor {
         }
     }
 
-    private void insertHistory(Connection conn, String history, SchemaDefinition.ChangeSet change,
-                               String checksum, long elapsed) throws SQLException {
-        try (var statement = conn.prepareStatement(
-                "INSERT INTO " + history
-                        + " (change_id, checksum, description, applied_by, execution_ms) VALUES (?, ?, ?, ?, ?)")) {
+    static String insertHistorySql(DatabaseDialect dialect, String history) {
+        return "INSERT INTO " + history + " (" + String.join(", ",
+                SqlIdentifiers.quote(dialect, "change_id"), SqlIdentifiers.quote(dialect, "checksum"),
+                SqlIdentifiers.quote(dialect, "description"), SqlIdentifiers.quote(dialect, "applied_by"),
+                SqlIdentifiers.quote(dialect, "execution_ms")) + ") VALUES (?, ?, ?, ?, ?)";
+    }
+
+    private void insertHistory(Connection conn, String history, DatabaseDialect dialect,
+                               SchemaDefinition.ChangeSet change, String checksum, long elapsed) throws SQLException {
+        try (var statement = conn.prepareStatement(insertHistorySql(dialect, history))) {
             statement.setString(1, change.id());
             statement.setString(2, checksum);
             statement.setString(3, change.description());
@@ -305,8 +372,13 @@ final class ChangeSetExecutor {
         }
     }
 
-    static String checksum(SchemaDefinition.ChangeSet change) throws Exception {
-        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+    static String checksum(SchemaDefinition.ChangeSet change) {
+        MessageDigest digest;
+        try {
+            digest = MessageDigest.getInstance("SHA-256");
+        } catch (NoSuchAlgorithmException impossible) {
+            throw new IllegalStateException("SHA-256 is required of every Java platform", impossible);
+        }
         digest.update(change.id().getBytes(StandardCharsets.UTF_8));
         digest.update((byte) 0);
         for (String sql : change.statements()) {
@@ -350,8 +422,8 @@ final class ChangeSetExecutor {
             if (usedSavepoint && savepoint != null) {
                 try {
                     conn.rollback(savepoint);
-                } catch (SQLException rollbackFailure) {
-                    exception.setNextException(rollbackFailure);
+                } catch (SQLException | RuntimeException rollbackFailure) {
+                    SchemaExceptions.suppress(exception, rollbackFailure);
                 }
             }
             if (DuplicateObjectSql.isAlreadyExists(exception)) {

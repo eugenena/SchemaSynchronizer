@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Run the MySQL integration contract against supported compatible engines.
+# Run the MySQL integration contract against MySQL-compatible engines.
+# Percona Server runs by default. TiDB runs only with VERIFY_TIDB=1: TiDB lacks triggers, stored
+# functions, INVISIBLE columns, and other DDL the suite exercises, so the full suite fails there.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -7,6 +9,7 @@ RUN_ID="$$"
 PERCONA_CONTAINER="schemasync-percona-$RUN_ID"
 TIDB_CONTAINER="schemasync-tidb-$RUN_ID"
 NETWORK="schemasync-mysql-compatible-$RUN_ID"
+VERIFY_TIDB="${VERIFY_TIDB:-0}"
 
 cleanup() {
   docker rm -f "$PERCONA_CONTAINER" "$TIDB_CONTAINER" >/dev/null 2>&1 || true
@@ -24,12 +27,13 @@ docker run -d --name "$PERCONA_CONTAINER" --network "$NETWORK" \
   -p 127.0.0.1::3306 \
   percona/percona-server:8.4 >/dev/null
 
-docker run -d --name "$TIDB_CONTAINER" --network "$NETWORK" \
-  -p 127.0.0.1::4000 \
-  pingcap/tidb:v8.5.4 >/dev/null
+if [[ "$VERIFY_TIDB" == 1 ]]; then
+  docker run -d --name "$TIDB_CONTAINER" --network "$NETWORK" \
+    -p 127.0.0.1::4000 \
+    pingcap/tidb:v8.5.4 >/dev/null
+fi
 
 PERCONA_PORT="$(docker port "$PERCONA_CONTAINER" 3306/tcp | sed 's/.*://')"
-TIDB_PORT="$(docker port "$TIDB_CONTAINER" 4000/tcp | sed 's/.*://')"
 
 for attempt in {1..90}; do
   if docker exec "$PERCONA_CONTAINER" mysqladmin ping -h 127.0.0.1 \
@@ -44,37 +48,49 @@ for attempt in {1..90}; do
   sleep 1
 done
 
-for attempt in {1..90}; do
-  if docker exec "$PERCONA_CONTAINER" mysql \
-      -h "$TIDB_CONTAINER" -P 4000 -uroot -e "SELECT 1" \
-      >/dev/null 2>&1; then
-    break
-  fi
-  if [[ "$attempt" == 90 ]]; then
-    echo "ERROR: TiDB did not become ready" >&2
-    exit 1
-  fi
-  sleep 1
-done
-
 run_contract() {
   local label="$1"
   local url="$2"
   local user="$3"
   local password="$4"
+  local admin_user="$5"
+  local admin_password="$6"
   echo "Verifying MySQL dialect against $label"
   mvn --batch-mode --no-transfer-progress -f "$REPO_ROOT/pom.xml" \
     -pl schema-synchronizer \
     -Dtest=SchemaSynchronizerMySqlIntegrationTest \
+    -Dschema.test.require.live=true \
     -Dschema.test.mysql.jdbc.url="$url" \
     -Dschema.test.mysql.jdbc.user="$user" \
     -Dschema.test.mysql.jdbc.password="$password" \
+    -Dschema.test.mysql.jdbc.admin.user="$admin_user" \
+    -Dschema.test.mysql.jdbc.admin.password="$admin_password" \
     test
 }
 
+# Admin credentials let the least-privilege tests create and drop a restricted account.
 run_contract "Percona Server 8.4" \
-  "jdbc:mysql://127.0.0.1:$PERCONA_PORT/schema_synchronizer_test" schema_sync schema_sync
-run_contract "TiDB 8.5.4" \
-  "jdbc:mysql://127.0.0.1:$TIDB_PORT/test" root ""
+  "jdbc:mysql://127.0.0.1:$PERCONA_PORT/schema_synchronizer_test" schema_sync schema_sync root root
+echo "Percona Server compatibility verification passed."
 
-echo "Percona Server and TiDB compatibility verification passed."
+if [[ "$VERIFY_TIDB" == 1 ]]; then
+  TIDB_PORT="$(docker port "$TIDB_CONTAINER" 4000/tcp | sed 's/.*://')"
+  for attempt in {1..90}; do
+    if docker exec "$PERCONA_CONTAINER" mysql \
+        -h "$TIDB_CONTAINER" -P 4000 -uroot -e "SELECT 1" \
+        >/dev/null 2>&1; then
+      break
+    fi
+    if [[ "$attempt" == 90 ]]; then
+      echo "ERROR: TiDB did not become ready" >&2
+      exit 1
+    fi
+    sleep 1
+  done
+  # TiDB starts with a passwordless root; the live-test harness treats a blank password as unset.
+  docker exec "$PERCONA_CONTAINER" mysql -h "$TIDB_CONTAINER" -P 4000 -uroot \
+    -e "ALTER USER 'root'@'%' IDENTIFIED BY 'root'"
+  run_contract "TiDB 8.5.4" \
+    "jdbc:mysql://127.0.0.1:$TIDB_PORT/test" root root root root
+  echo "TiDB compatibility verification passed."
+fi

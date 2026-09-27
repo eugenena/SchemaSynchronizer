@@ -1,8 +1,12 @@
 # Five-minute Spring Boot quick start
 
-This guide adds SchemaSynchronizer 1.3.0 to an existing Spring Boot application.
-It requires Java 21, a configured JDBC `DataSource`, and PostgreSQL 16+, MariaDB
-10.3+, or MySQL 8.0+.
+This guide adds SchemaSynchronizer 2.0.0 to an existing Spring Boot application.
+It requires Java 17 or later, a configured JDBC `DataSource`, and PostgreSQL 16+, MariaDB
+10.3+, MySQL 8.0+, SQL Server 2019+, or Oracle 19c+ (CI tests Oracle XE 21c).
+
+The `DataSource` must connect as a schema-scoped, least-privilege account, never a
+superuser, `sa`, `root`, or `SYSTEM`; see
+[Least-privilege database account](OPERATIONS.md#least-privilege-database-account-required).
 
 ## 1. Add the dependency
 
@@ -10,7 +14,7 @@ It requires Java 21, a configured JDBC `DataSource`, and PostgreSQL 16+, MariaDB
 <dependency>
   <groupId>com.thinkaillc</groupId>
   <artifactId>schema-synchronizer</artifactId>
-  <version>1.3.0</version>
+  <version>2.0.0</version>
 </dependency>
 ```
 
@@ -41,8 +45,8 @@ one table and one index:
 }
 ```
 
-For MariaDB use `"dialect": "mariadb"`; for MySQL use
-`"dialect": "mysql"`. SQL inside a definition must use the selected database's
+For MariaDB use `"dialect": "mariadb"`; for MySQL `"dialect": "mysql"`; for SQL Server
+`"dialect": "sqlserver"`; for Oracle `"dialect": "oracle"`. SQL inside a definition must use the selected database's
 native syntax. Definitions are not cross-database SQL translations.
 
 ## 3. Configure startup
@@ -57,11 +61,12 @@ spring.jpa.hibernate.ddl-auto=validate
 ```
 
 For MariaDB and MySQL, `schema-synchronizer.schema` is the database/catalog name,
-not `public`. For SQL Server use `dbo` (or your app schema). For Oracle use the
-connected user/schema name.
+not `public`. For SQL Server use the login's `DEFAULT_SCHEMA` (for example `app`). For
+Oracle use the connected user/schema name. `public` is rejected on those four engines.
 
 Auto-configuration is **opt-in**: `schema-synchronizer.enabled` defaults to
-`false` and must be set to `true`.
+`false` and must be set to `true`. Without it nothing runs, even with a definition on the
+classpath; startup then logs a WARN saying synchronization is off.
 
 Do not configure Hibernate, Flyway, or Liquibase to mutate the schema at the same
 time. During a migration, follow the controlled cutover in

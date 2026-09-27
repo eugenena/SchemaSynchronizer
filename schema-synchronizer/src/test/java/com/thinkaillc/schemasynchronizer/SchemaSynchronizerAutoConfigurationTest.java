@@ -15,6 +15,7 @@ import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.ResultSet;
 import java.sql.Statement;
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -51,6 +52,63 @@ class SchemaSynchronizerAutoConfigurationTest {
             assertThat(context).doesNotHaveBean(SchemaSynchronizer.class);
             assertThat(context).doesNotHaveBean(SchemaSynchronizerInitializer.class);
         });
+    }
+
+    @Test
+    void bindsEverySchemaSynchronizerProperty() {
+        runner.withPropertyValues(
+                        "schema-synchronizer.enabled=true",
+                        "schema-synchronizer.resource=/bound-schema.json",
+                        "schema-synchronizer.schema=app_schema",
+                        "schema-synchronizer.history-table=app_history",
+                        "schema-synchronizer.advisory-lock-id=42",
+                        "schema-synchronizer.dry-run=true",
+                        "schema-synchronizer.fail-on-pending=false",
+                        "schema-synchronizer.require-definition=false")
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    SchemaSynchronizerProperties properties = context.getBean(SchemaSynchronizerProperties.class);
+                    assertThat(properties.isEnabled()).isTrue();
+                    assertThat(properties.getResource()).isEqualTo("/bound-schema.json");
+                    SchemaSynchronizerOptions expected = new SchemaSynchronizerOptions(
+                            "app_schema", "app_history", 42L, true, false, false);
+                    assertThat(properties.toOptions()).isEqualTo(expected);
+                    SchemaSynchronizer bean = context.getBean(SchemaSynchronizer.class);
+                    assertThat(bean.options()).isEqualTo(expected);
+                    assertThat(bean.classpathResource()).isEqualTo("/bound-schema.json");
+                });
+    }
+
+    @Test
+    void unsetPropertiesKeepTheDocumentedDefaults() {
+        runner.withPropertyValues("schema-synchronizer.enabled=true").run(context -> {
+            SchemaSynchronizerProperties properties = context.getBean(SchemaSynchronizerProperties.class);
+            assertThat(properties.getResource()).isEqualTo("/empty-schema.json");
+            assertThat(properties.toOptions()).isEqualTo(SchemaSynchronizerOptions.defaults());
+            assertThat(new SchemaSynchronizerProperties().getResource()).isEqualTo("/schema-definition.json");
+        });
+    }
+
+    @Test
+    void initializerDetectorIsRegisteredAndDetectsTheInitializer() throws Exception {
+        List<String> registered = org.springframework.core.io.support.SpringFactoriesLoader
+                .loadFactoryNames(org.springframework.boot.sql.init.dependency.DatabaseInitializerDetector.class,
+                        getClass().getClassLoader());
+        assertThat(registered).contains(SchemaSynchronizerInitializerDetector.class.getName());
+        Class<?> resolved = Class.forName(SchemaSynchronizerInitializerDetector.class.getName());
+        assertThat(org.springframework.boot.sql.init.dependency.DatabaseInitializerDetector.class)
+                .isAssignableFrom(resolved);
+
+        var detector = new SchemaSynchronizerInitializerDetector();
+        assertThat(detector.getDatabaseInitializerBeanTypes())
+                .isEqualTo(java.util.Set.of(SchemaSynchronizerInitializer.class));
+
+        var beanFactory = new org.springframework.beans.factory.support.DefaultListableBeanFactory();
+        beanFactory.registerBeanDefinition("initializer",
+                new org.springframework.beans.factory.support.RootBeanDefinition(SchemaSynchronizerInitializer.class));
+        beanFactory.registerBeanDefinition("unrelated",
+                new org.springframework.beans.factory.support.RootBeanDefinition(Object.class));
+        assertThat(detector.detect(beanFactory)).containsExactly("initializer");
     }
 
     @Test

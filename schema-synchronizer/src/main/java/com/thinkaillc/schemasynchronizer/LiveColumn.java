@@ -4,7 +4,7 @@
 package com.thinkaillc.schemasynchronizer;
 
 /** Live column snapshot from JDBC / information_schema. */
-public record LiveColumn(
+record LiveColumn(
         String baseType,
         Integer length,
         Integer scale,

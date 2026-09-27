@@ -7,7 +7,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
@@ -19,20 +18,37 @@ import java.util.Map;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-@EnabledIfSystemProperty(named = "schema.test.mariadb.jdbc.url", matches = ".+")
+@LiveDatabase(engine = "MariaDB", properties = {
+        "schema.test.mariadb.jdbc.url",
+        "schema.test.mariadb.jdbc.user",
+        "schema.test.mariadb.jdbc.password"})
 class SchemaSynchronizerMariaDbIntegrationTest {
 
     @BeforeEach
     @AfterEach
     void cleanDatabase() throws Exception {
-        try (Connection connection = connection(); var statement = connection.createStatement()) {
-            statement.execute("DROP TABLE IF EXISTS maria_items");
-            statement.execute("DROP TABLE IF EXISTS mariaxitems");
-            statement.execute("DROP TABLE IF EXISTS maria_case_items");
-            statement.execute("DROP FUNCTION IF EXISTS maria_case_tier");
-            statement.execute("DROP TABLE IF EXISTS maria_staged");
-            statement.execute("DROP TABLE IF EXISTS maria_tags");
-            statement.execute("DROP TABLE IF EXISTS schema_synchronizer_history");
+        try (Connection connection = connection()) {
+            LiveTestSupport.cleanMySqlFamilyDatabase(connection);
+        }
+    }
+
+    /** Drops a base table that must exist, and proves the base table (not a TEMPORARY shadow) is gone. */
+    private static void dropExistingBaseTable(Connection connection, String table) throws Exception {
+        assertThat(baseTableCount(connection, table)).as("base table %s before DROP", table).isEqualTo(1);
+        try (var statement = connection.createStatement()) {
+            statement.execute("DROP TABLE " + table);
+        }
+        assertThat(baseTableCount(connection, table)).as("base table %s after DROP", table).isZero();
+    }
+
+    private static int baseTableCount(Connection connection, String table) throws Exception {
+        try (var statement = connection.prepareStatement("SELECT COUNT(*) FROM information_schema.tables "
+                + "WHERE table_schema = DATABASE() AND table_name = ? AND table_type = 'BASE TABLE'")) {
+            statement.setString(1, table);
+            try (var rows = statement.executeQuery()) {
+                rows.next();
+                return rows.getInt(1);
+            }
         }
     }
 
@@ -171,7 +187,7 @@ class SchemaSynchronizerMariaDbIntegrationTest {
         try (Connection connection = connection()) {
             assertThat(synchronizer.synchronizeWithResult(connection, additive).changed()).isFalse();
             assertThat(synchronizer.synchronizeWithResult(connection, initial).pendingSql())
-                    .anyMatch(sql -> sql.contains("DROP COLUMN notes"));
+                    .anyMatch(sql -> sql.contains("DROP COLUMN `notes`"));
         }
     }
 
@@ -212,9 +228,9 @@ class SchemaSynchronizerMariaDbIntegrationTest {
         try (Connection connection = connection()) {
             SchemaSynchronizationResult result = synchronizer().synchronizeWithResult(connection, drifted);
             assertThat(result.columnsAltered()).isZero();
-            assertThat(result.pendingSql()).anyMatch(sql -> sql.contains("MODIFY COLUMN nick")
+            assertThat(result.pendingSql()).anyMatch(sql -> sql.contains("MODIFY COLUMN `nick`")
                     && sql.contains("utf8mb4"));
-            assertThat(result.pendingSql()).anyMatch(sql -> sql.contains("MODIFY COLUMN stamp"));
+            assertThat(result.pendingSql()).anyMatch(sql -> sql.contains("MODIFY COLUMN `stamp`"));
         }
     }
 
@@ -315,8 +331,8 @@ class SchemaSynchronizerMariaDbIntegrationTest {
                 SchemaSynchronizationResult result = synchronizer().synchronizeWithResult(connection, declared);
                 assertThat(result.columnsAltered()).isZero();
                 assertThat(result.pendingSql()).hasSize(2);
-                assertThat(result.pendingSql()).anyMatch(sql -> sql.contains("MODIFY COLUMN note"));
-                assertThat(result.pendingSql()).anyMatch(sql -> sql.contains("MODIFY COLUMN stamped")
+                assertThat(result.pendingSql()).anyMatch(sql -> sql.contains("MODIFY COLUMN `note`"));
+                assertThat(result.pendingSql()).anyMatch(sql -> sql.contains("MODIFY COLUMN `stamped`")
                         && sql.contains("ON UPDATE differs"));
             }
         }
@@ -328,10 +344,10 @@ class SchemaSynchronizerMariaDbIntegrationTest {
                 "DEFAULT 0x00410000", "DEFAULT 0x00FF", "DEFAULT 0x6162", "ON UPDATE CURRENT_TIMESTAMP(3)",
                 "CHARACTER SET latin1 COLLATE latin1_bin", "COMMENT 'it''s'", "INVISIBLE",
                 "VARBINARY(10) COMPRESSED", "TINYINT(1) UNSIGNED DEFAULT 1", "NUMERIC(5,2) UNSIGNED DEFAULT 1.50",
-                "zfill NUMERIC(8,2) UNSIGNED ZEROFILL", "zint INT UNSIGNED ZEROFILL");
+                "`zfill` NUMERIC(8,2) UNSIGNED ZEROFILL", "`zint` INT UNSIGNED ZEROFILL");
         SchemaDefinition serialized = new ObjectMapper().readValue(snapshot.toFile(), SchemaDefinition.class);
-        try (Connection connection = connection(); var statement = connection.createStatement()) {
-            statement.execute("DROP TABLE maria_items");
+        try (Connection connection = connection()) {
+            dropExistingBaseTable(connection, "maria_items");
         }
         try (Connection connection = connection()) {
             assertThat(synchronizer(true).synchronizeWithResult(connection, serialized).tablesCreated()).isEqualTo(1);
@@ -391,7 +407,7 @@ class SchemaSynchronizerMariaDbIntegrationTest {
             statement.execute("DROP TEMPORARY TABLE maria_items");
 
             // Without binary defaults the check runs before the first DDL on the table.
-            statement.execute("DROP TABLE maria_items");
+            dropExistingBaseTable(connection, "maria_items");
             statement.execute("CREATE TABLE maria_items (id BIGINT NOT NULL PRIMARY KEY)");
             statement.execute("CREATE TEMPORARY TABLE maria_items (id BIGINT NOT NULL PRIMARY KEY)");
             SchemaDefinition added = new SchemaDefinition(2, "mariadb", Map.of("maria_items",
@@ -414,7 +430,7 @@ class SchemaSynchronizerMariaDbIntegrationTest {
 
         // A missing declared table: CREATE TABLE IF NOT EXISTS would create it behind the TEMPORARY one.
         try (Connection connection = connection(); var statement = connection.createStatement()) {
-            statement.execute("DROP TABLE maria_items");
+            dropExistingBaseTable(connection, "maria_items");
             statement.execute("CREATE TEMPORARY TABLE maria_items (id BIGINT NOT NULL PRIMARY KEY)");
             SchemaDefinition missing = new SchemaDefinition(2, "mariadb", Map.of("maria_items",
                     new SchemaDefinition.TableDef("CREATE TABLE IF NOT EXISTS maria_items (id BIGINT NOT NULL PRIMARY KEY)",
@@ -460,7 +476,7 @@ class SchemaSynchronizerMariaDbIntegrationTest {
             SchemaSynchronizationResult result = synchronizer().synchronizeWithResult(switched, narrower);
             assertThat(result.tablesCreated()).isZero();
             assertThat(result.columnsAltered()).isZero();
-            assertThat(result.pendingSql()).singleElement().asString().contains("MODIFY COLUMN label");
+            assertThat(result.pendingSql()).singleElement().asString().contains("MODIFY COLUMN `label`");
         }
         String schemaTerm = url + (url.contains("?") ? "&" : "?")
                 + (url.startsWith("jdbc:mariadb:") ? "useCatalogTerm=Schema" : "databaseTerm=SCHEMA");
@@ -505,7 +521,7 @@ class SchemaSynchronizerMariaDbIntegrationTest {
             assertThat(result.changeSetsApplied()).isEqualTo(1);
             assertThat(result.columnsAdded()).isEqualTo(1);
             assertThat(result.pendingSql()).singleElement().asString()
-                    .contains("ADD COLUMN IF NOT EXISTS note").contains("latin1 character set cannot store");
+                    .contains("ADD COLUMN IF NOT EXISTS `note`").contains("latin1 character set cannot store");
         }
         try (Connection connection = connection(); var statement = connection.createStatement();
              var rows = statement.executeQuery("SELECT COLUMN_DEFAULT FROM information_schema.COLUMNS "
@@ -534,8 +550,8 @@ class SchemaSynchronizerMariaDbIntegrationTest {
             SchemaSynchronizationResult result = synchronizer().synchronizeWithResult(connection, declared);
             assertThat(result.columnsAltered()).isZero();
             assertThat(result.pendingSql()).hasSize(2)
-                    .anyMatch(sql -> sql.contains("MODIFY COLUMN binned") && sql.contains("utf8_bin"))
-                    .anyMatch(sql -> sql.contains("MODIFY COLUMN wide") && sql.contains("utf8mb4"))
+                    .anyMatch(sql -> sql.contains("MODIFY COLUMN `binned`") && sql.contains("utf8_bin"))
+                    .anyMatch(sql -> sql.contains("MODIFY COLUMN `wide`") && sql.contains("utf8mb4"))
                     .noneMatch(sql -> sql.contains("nick"));
         }
     }

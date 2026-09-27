@@ -38,7 +38,7 @@ class DialectSupportTest {
     @Test
     void mysqlAppliedByMigrationDoesNotUseIfNotExists() {
         String ddl = DialectSupport.addAppliedByColumnDdl(DatabaseDialect.MYSQL, "schema_synchronizer_history");
-        assertThat(ddl).contains("ADD COLUMN applied_by");
+        assertThat(ddl).contains("ADD COLUMN `applied_by`");
         assertThat(ddl).doesNotContain("IF NOT EXISTS");
     }
 

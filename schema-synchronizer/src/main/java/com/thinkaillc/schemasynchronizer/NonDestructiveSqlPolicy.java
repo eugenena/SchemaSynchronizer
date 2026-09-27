@@ -19,7 +19,7 @@ import java.util.regex.Pattern;
  * boundary against hostile SQL authors. Methods without a {@link DatabaseDialect} lex SQL
  * with PostgreSQL rules.
  */
-public final class NonDestructiveSqlPolicy {
+final class NonDestructiveSqlPolicy {
     /** Unquoted keywords; a quoted identifier with the same spelling is only a name. */
     private static final Set<String> FORBIDDEN_KEYWORDS = Set.of("DROP", "TRUNCATE", "EXEC", "PREPARE",
             "OPENQUERY", "OPENROWSET", "OPENDATASOURCE", "OUTFILE", "DUMPFILE");
@@ -99,7 +99,6 @@ public final class NonDestructiveSqlPolicy {
     private static final Pattern ORACLE_MODIFY_ITEM =
             Pattern.compile("(?s)^\\S+\\s+(?:DEFAULT\\b.*|NULL|NOT\\s+NULL)$");
 
-    private static final Pattern GRANT_OBJECT = Pattern.compile("(?s)^GRANT\\b.*?\\bON\\b.*\\bTO\\b.*");
     private static final Pattern GRANT_NON_OBJECT_TARGET = Pattern.compile(
             "(?s)\\bON\\s*(?:LOGIN|SERVER|ENDPOINT|CERTIFICATE|ASYMMETRIC\\s+KEY|SYMMETRIC\\s+KEY"
                     + "|AVAILABILITY\\s+GROUP|DATABASE|TABLESPACE|FOREIGN|LANGUAGE|PARAMETER"
@@ -155,9 +154,10 @@ public final class NonDestructiveSqlPolicy {
         SqlLexer.Mode mode = SqlLexer.mode(dialect);
         String normalized = executableSql(sql, mode).toUpperCase(Locale.ROOT);
         List<Token> tokens = SqlTokenizer.tokenize(sql, mode);
+        rejectObjectTypeNotYetSupported(tokens, sql);
         requireSingleStatement(tokens, mode, sql, "schema change SQL");
         requireNoForbiddenTokens(sql, tokens, mode);
-        if (!matchesAllowedStatement(normalized) && !allowedCteStatement(tokens, dialect)) {
+        if (!matchesAllowedStatement(normalized, tokens) && !allowedCteStatement(tokens, dialect)) {
             throw new IllegalArgumentException("unsupported schema change SQL: " + summarize(sql));
         }
     }
@@ -169,7 +169,7 @@ public final class NonDestructiveSqlPolicy {
      * bodies went through the same token checks as the rest of the statement.
      */
     private static boolean allowedCteStatement(List<Token> tokens, DatabaseDialect dialect) {
-        if (tokens.isEmpty() || !tokens.getFirst().keyword("WITH")) {
+        if (tokens.isEmpty() || !tokens.get(0).keyword("WITH")) {
             return false;
         }
         for (int index = 1; index < tokens.size(); index++) {
@@ -200,7 +200,7 @@ public final class NonDestructiveSqlPolicy {
     public static void requireReadOnlyVerification(String sql, DatabaseDialect dialect) {
         SqlLexer.Mode mode = SqlLexer.mode(dialect);
         List<Token> tokens = sql == null ? List.of() : SqlTokenizer.tokenize(sql, mode);
-        if (tokens.isEmpty() || !(tokens.getFirst().keyword("SELECT") || tokens.getFirst().keyword("WITH"))) {
+        if (tokens.isEmpty() || !(tokens.get(0).keyword("SELECT") || tokens.get(0).keyword("WITH"))) {
             throw new IllegalArgumentException("verification SQL must be a SELECT or WITH query");
         }
         requireSingleStatement(tokens, mode, sql, "verification SQL");
@@ -312,7 +312,37 @@ public final class NonDestructiveSqlPolicy {
         if (requireIfNotExists && !executable.matches("(?s)^CREATE\\s+(UNIQUE\\s+)?INDEX\\s+IF\\s+NOT\\s+EXISTS\\b.*")) {
             throw new IllegalArgumentException("index definition must use IF NOT EXISTS");
         }
-        IndexDefinition.parse(sql);
+        IndexDefinition.parse(sql, dialect);
+    }
+
+    /** Object types change sets cannot create yet (docs/ROADMAP.md). */
+    private static final Set<String> NOT_YET_SUPPORTED_OBJECTS = Set.of("VIEW", "SEQUENCE", "PROCEDURE", "PACKAGE",
+            "TYPE");
+    /** Where the object type of a CREATE head has been passed without naming one of those. */
+    private static final Set<String> CREATE_HEAD_END = Set.of("TABLE", "INDEX", "FUNCTION", "TRIGGER", "AS", "ON",
+            "IS", "BEGIN", "SCHEMA", "DATABASE", "EXTENSION", "USER", "ROLE", "LOGIN", "SYNONYM", "EVENT", "DOMAIN",
+            "SERVER");
+
+    /**
+     * Rejects {@code CREATE [modifiers] VIEW|SEQUENCE|PROCEDURE|PACKAGE|TYPE} by its object type
+     * before statement splitting, which would otherwise split a T-SQL {@code CREATE VIEW … AS SELECT}
+     * at the SELECT and report it as two statements.
+     */
+    private static void rejectObjectTypeNotYetSupported(List<Token> tokens, String sql) {
+        if (tokens.isEmpty() || !tokens.get(0).keyword("CREATE")) {
+            return;
+        }
+        for (int i = 1; i < tokens.size() && i <= 16; i++) {
+            Token token = tokens.get(i);
+            if (token.keyword(NOT_YET_SUPPORTED_OBJECTS)) {
+                throw new IllegalArgumentException("unsupported schema change SQL: CREATE "
+                        + token.text().toUpperCase(Locale.ROOT) + " is not yet supported in change sets; "
+                        + "create this object outside SchemaSynchronizer (see docs/ROADMAP.md): " + summarize(sql));
+            }
+            if (token.keyword(CREATE_HEAD_END) || token.punct("(") || token.punct(";")) {
+                return;
+            }
+        }
     }
 
     private static void requireSingleStatement(List<Token> tokens, SqlLexer.Mode mode, String sql, String label) {
@@ -673,12 +703,12 @@ public final class NonDestructiveSqlPolicy {
                 + "triggers, or run administrative statements: " + summarize(sql));
     }
 
-    private static boolean matchesAllowedStatement(String sql) {
+    private static boolean matchesAllowedStatement(String sql, List<Token> tokens) {
         if (sql.matches("(?s)^ALTER\\s+TABLE\\b.*")) {
             return alterTableActionsAllowed(sql);
         }
         if (sql.matches("(?s)^GRANT\\b.*")) {
-            return GRANT_OBJECT.matcher(sql).matches() && !GRANT_NON_OBJECT_TARGET.matcher(sql).find();
+            return grantsOnObjectTo(tokens) && !GRANT_NON_OBJECT_TARGET.matcher(sql).find();
         }
         if (sql.matches("(?s)^CREATE\\s+(OR\\s+REPLACE\\s+)?TRIGGER\\b.*")) {
             return !SERVER_OR_DATABASE_TRIGGER.matcher(sql).find();
@@ -758,6 +788,26 @@ public final class NonDestructiveSqlPolicy {
         parts.add(text.substring(start));
         parts.removeIf(String::isBlank);
         return parts;
+    }
+
+    /**
+     * {@code GRANT … ON object TO grantee}: an unquoted {@code ON} outside parentheses followed by an
+     * unquoted {@code TO} outside parentheses. One linear pass, so input size cannot cause backtracking.
+     */
+    static boolean grantsOnObjectTo(List<Token> tokens) {
+        boolean on = false;
+        for (int index = 1; index < tokens.size(); index++) {
+            Token token = tokens.get(index);
+            if (token.depth() != 0) {
+                continue;
+            }
+            if (!on) {
+                on = token.keyword("ON");
+            } else if (token.keyword("TO")) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** Returns only executable SQL text: comments, literals, and bodies blanked; identifiers as X. */

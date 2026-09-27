@@ -66,10 +66,10 @@ class DatabaseDialectTest {
         when(metadata.getDatabaseProductName()).thenReturn("H2");
 
         assertThatThrownBy(() -> DatabaseDialect.detect(metadata))
-                .isInstanceOf(IllegalStateException.class)
+                .isInstanceOf(SchemaSynchronizationException.class)
                 .hasMessageContaining("Unsupported database");
         assertThatThrownBy(() -> DatabaseDialect.parse("db2"))
-                .isInstanceOf(IllegalArgumentException.class)
+                .isInstanceOf(SchemaDefinitionException.class)
                 .hasMessageContaining("Unsupported schema dialect");
     }
 
@@ -83,12 +83,16 @@ class DatabaseDialectTest {
         assertThat(DatabaseDialect.SQLSERVER.metadataCatalog(connection, "dbo")).isEqualTo("appdb");
         assertThat(DatabaseDialect.SQLSERVER.metadataSchemaPattern("dbo")).isEqualTo("dbo");
         assertThat(DatabaseDialect.SQLSERVER.qualifyHistoryTable("dbo", "schema_synchronizer_history"))
-                .isEqualTo("dbo.schema_synchronizer_history");
+                .isEqualTo("[dbo].[schema_synchronizer_history]");
+        assertThat(DatabaseDialect.POSTGRESQL.qualifyHistoryTable("Public", "Schema_Sync_History"))
+                .isEqualTo("\"public\".\"schema_sync_history\"");
+        assertThat(DatabaseDialect.MYSQL.qualifyHistoryTable("App_db", "schema_synchronizer_history"))
+                .isEqualTo("`schema_synchronizer_history`");
 
         assertThat(DatabaseDialect.ORACLE.metadataCatalog(connection, "app")).isNull();
         assertThat(DatabaseDialect.ORACLE.metadataSchemaPattern("app")).isEqualTo("APP");
         assertThat(DatabaseDialect.ORACLE.metadataObjectName("items")).isEqualTo("ITEMS");
         assertThat(DatabaseDialect.ORACLE.qualifyHistoryTable("app", "schema_synchronizer_history"))
-                .isEqualTo("app.schema_synchronizer_history");
+                .isEqualTo("\"APP\".\"SCHEMA_SYNCHRONIZER_HISTORY\"");
     }
 }

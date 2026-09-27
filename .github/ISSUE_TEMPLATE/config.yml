@@ -1,5 +1,5 @@
 blank_issues_enabled: false
 contact_links:
   - name: Security report
-    url: https://thinkaillc.com/#contact
-    about: Contact ThinkAI privately about vulnerabilities; do not open a public issue.
+    url: https://github.com/eugenena/SchemaSynchronizer/blob/main/SECURITY.md#reporting-a-vulnerability
+    about: Report vulnerabilities privately by email to info@thinkaillc.com as described in SECURITY.md; do not open a public issue.

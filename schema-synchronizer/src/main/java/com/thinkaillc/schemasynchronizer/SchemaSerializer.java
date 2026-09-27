@@ -17,7 +17,12 @@ public final class SchemaSerializer {
     private SchemaSerializer() {
     }
 
-    public static void main(String[] args) throws Exception {
+    /**
+     * Serializes the source database; see {@link SchemaSnapshotWriter#main(String[])}.
+     *
+     * @throws SchemaSynchronizationException (or a subclass) when serialization fails
+     */
+    public static void main(String[] args) {
         SchemaSnapshotWriter.main(args);
     }
 }

@@ -883,7 +883,7 @@ class DialectDeclarationContractTest {
     void binaryDefaultsWithoutTableSelectStayPending() throws Exception {
         var denied = new java.sql.SQLException("SELECT command denied", "42000", 1142);
         assertThat(SchemaSnapshotWriter.unreadableBinaryDefaults(List.of("Raw", "b"), denied))
-                .containsEntry("raw", SchemaSnapshotWriter.UNREADABLE_BINARY_DEFAULT)
+                .containsEntry("Raw", SchemaSnapshotWriter.UNREADABLE_BINARY_DEFAULT)
                 .containsEntry("b", SchemaSnapshotWriter.UNREADABLE_BINARY_DEFAULT);
         assertThat(SchemaSnapshotWriter.unreadableBinaryDefaults(List.of("c"),
                 new java.sql.SQLException("column denied", "42000", 1143))).containsKey("c");

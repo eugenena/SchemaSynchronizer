@@ -11,6 +11,7 @@ import java.sql.ResultSet;
 import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -43,18 +44,36 @@ class ChangeSetHistoryPolicyTest {
 
     @Test
     void appliedChangeSetWithMatchingChecksumIsNotRecheckedOrExecuted() throws Exception {
-        Map<String, String> history = Map.of(LEGACY_DROP.id(), checksum(LEGACY_DROP),
+        Map<String, String> inOrder = history(LEGACY_DROP.id(), checksum(LEGACY_DROP),
                 LEGACY_UNPARSEABLE.id(), checksum(LEGACY_UNPARSEABLE));
+        Map<String, String> reversed = history(LEGACY_UNPARSEABLE.id(), checksum(LEGACY_UNPARSEABLE),
+                LEGACY_DROP.id(), checksum(LEGACY_DROP));
         List<SchemaDefinition.ChangeSet> changes = List.of(LEGACY_DROP, LEGACY_UNPARSEABLE);
 
-        for (SchemaSynchronizerOptions options : List.of(options(false), options(true))) {
-            assertThatCode(() -> new ChangeSetExecutor().validateHistory(connection(history), changes, options,
-                    DatabaseDialect.POSTGRESQL)).as("dryRun=%s", options.dryRun()).doesNotThrowAnyException();
-            ChangeSetExecutor.Result result = new ChangeSetExecutor().apply(connection(history), changes, options,
-                    DatabaseDialect.POSTGRESQL);
-            assertThat(result.applied()).isZero();
-            assertThat(result.plannedSql()).isEmpty();
+        for (Map<String, String> history : List.of(inOrder, reversed)) {
+            for (SchemaSynchronizerOptions options : List.of(options(false), options(true))) {
+                assertThatCode(() -> new ChangeSetExecutor().validateHistory(connection(history), changes, options,
+                        DatabaseDialect.POSTGRESQL)).as("dryRun=%s rows=%s", options.dryRun(), history.keySet())
+                        .doesNotThrowAnyException();
+                ChangeSetExecutor.Result result = new ChangeSetExecutor().apply(connection(history), changes, options,
+                        DatabaseDialect.POSTGRESQL);
+                assertThat(result.applied()).isZero();
+                assertThat(result.plannedSql()).isEmpty();
+            }
         }
+        assertThat(executed).isEmpty();
+    }
+
+    @Test
+    void historyRowWrittenByTheV120AlgorithmIsAccepted() throws Exception {
+        SchemaDefinition.ChangeSet create = new SchemaDefinition.ChangeSet("001-create", "d",
+                List.of(ChangeSetChecksumGoldenTest.CREATE_ITEMS));
+        Map<String, String> history = history(create.id(), ChangeSetChecksumGoldenTest.CREATE_ITEMS_BEFORE);
+
+        assertThatCode(() -> new ChangeSetExecutor().validateHistory(connection(history), List.of(create),
+                options(false), DatabaseDialect.POSTGRESQL)).doesNotThrowAnyException();
+        assertThat(new ChangeSetExecutor().apply(connection(history), List.of(create), options(false),
+                DatabaseDialect.POSTGRESQL).applied()).isZero();
         assertThat(executed).isEmpty();
     }
 
@@ -80,7 +99,7 @@ class ChangeSetHistoryPolicyTest {
 
     @Test
     void checksumMismatchFailsBeforeThePolicy() throws Exception {
-        Map<String, String> history = Map.of(LEGACY_DROP.id(), "0".repeat(64));
+        Map<String, String> history = history(LEGACY_DROP.id(), "0".repeat(64));
 
         assertThatThrownBy(() -> new ChangeSetExecutor().validateHistory(connection(history), List.of(LEGACY_DROP),
                 options(false), DatabaseDialect.POSTGRESQL))
@@ -91,7 +110,7 @@ class ChangeSetHistoryPolicyTest {
 
     @Test
     void eachChangeSetIsJudgedByItsOwnHistoryEntry() throws Exception {
-        Map<String, String> appliedForbidden = Map.of(LEGACY_DROP.id(), checksum(LEGACY_DROP));
+        Map<String, String> appliedForbidden = history(LEGACY_DROP.id(), checksum(LEGACY_DROP));
         assertThatCode(() -> new ChangeSetExecutor().validateHistory(connection(appliedForbidden),
                 List.of(LEGACY_DROP, SAFE), options(false), DatabaseDialect.POSTGRESQL))
                 .doesNotThrowAnyException();
@@ -99,7 +118,7 @@ class ChangeSetHistoryPolicyTest {
                 List.of(LEGACY_DROP, SAFE), options(true), DatabaseDialect.POSTGRESQL);
         assertThat(dryRun.plannedSql()).containsExactly("ALTER TABLE items ADD COLUMN note TEXT");
 
-        Map<String, String> appliedSafe = Map.of(SAFE.id(), checksum(SAFE));
+        Map<String, String> appliedSafe = history(SAFE.id(), checksum(SAFE));
         assertThatThrownBy(() -> new ChangeSetExecutor().validateHistory(connection(appliedSafe),
                 List.of(SAFE, FORBIDDEN), options(false), DatabaseDialect.POSTGRESQL))
                 .isInstanceOf(IllegalArgumentException.class)
@@ -132,13 +151,22 @@ class ChangeSetHistoryPolicyTest {
     void offlineValidationChecksEveryChangeSet() {
         assertThatThrownBy(() -> SchemaDefinitionValidator.validate(new SchemaDefinition(Map.of(),
                 List.of(LEGACY_DROP)), "public"))
-                .isInstanceOf(IllegalArgumentException.class)
+                .isInstanceOf(SchemaDefinitionException.class)
                 .hasMessageContaining("not allowed");
         assertThat(new ChangeSetExecutor().validateStructure(List.of(LEGACY_DROP, LEGACY_UNPARSEABLE))).hasSize(2);
     }
 
     private static String checksum(SchemaDefinition.ChangeSet change) throws Exception {
         return ChangeSetExecutor.checksum(change);
+    }
+
+    /** History rows in the given order (Map.of iteration order is salted per JVM). */
+    private static Map<String, String> history(String... idChecksumPairs) {
+        Map<String, String> rows = new LinkedHashMap<>();
+        for (int i = 0; i < idChecksumPairs.length; i += 2) {
+            rows.put(idChecksumPairs[i], idChecksumPairs[i + 1]);
+        }
+        return rows;
     }
 
     private static SchemaSynchronizerOptions options(boolean dryRun) {
@@ -164,7 +192,7 @@ class ChangeSetHistoryPolicyTest {
         Statement statement = recordingStatement();
         when(statement.executeQuery(anyString())).thenAnswer(invocation -> {
             String sql = invocation.getArgument(0);
-            if (!sql.startsWith("SELECT change_id, checksum FROM")) {
+            if (!sql.startsWith("SELECT \"change_id\", \"checksum\" FROM")) {
                 executed.add(sql);
                 throw new AssertionError("unexpected query: " + sql);
             }

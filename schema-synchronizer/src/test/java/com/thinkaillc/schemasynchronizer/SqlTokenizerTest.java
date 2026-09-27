@@ -411,7 +411,7 @@ class SqlTokenizerTest {
         List<SqlTokenizer.Body> bodies = SqlTokenizer.postgresBodies(SqlTokenizer.tokenize(sql, Mode.POSTGRES),
                 Mode.POSTGRES, sql);
         assertThat(bodies).hasSize(1);
-        assertThat(bodies.getFirst().tokens()).extracting(Token::text).containsExactly("SELECT", "1");
+        assertThat(bodies.get(0).tokens()).extracting(Token::text).containsExactly("SELECT", "1");
 
         String nested = "CREATE FUNCTION f() RETURNS void AS $a$ BEGIN PERFORM $b$it's$b$; END $a$ LANGUAGE plpgsql";
         assertThat(SqlTokenizer.postgresBodies(SqlTokenizer.tokenize(nested, Mode.POSTGRES), Mode.POSTGRES, nested))
