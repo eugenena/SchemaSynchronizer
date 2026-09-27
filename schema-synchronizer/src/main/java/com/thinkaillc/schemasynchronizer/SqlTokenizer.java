@@ -590,7 +590,7 @@ final class SqlTokenizer {
      * the next one. Words inside a CASE expression never split: a batch that would split
      * there does not compile.
      */
-    private static int sqlServerStatementEnd(List<Token> tokens, int start) {
+    static int sqlServerStatementEnd(List<Token> tokens, int start) {
         Token lead = tokens.get(start);
         String main = lead.keyword("WITH") ? null : lead.text().toUpperCase(Locale.ROOT);
         boolean rowSource = false;
@@ -719,6 +719,27 @@ final class SqlTokenizer {
             throw unterminatedBody(sql);
         }
         return tokens.size();
+    }
+
+    /**
+     * The index of the {@code END} (or its {@code LOOP}/{@code IF}/… suffix) closing the block
+     * opened at {@code open} in a routine statement; {@code open} itself when no block opens
+     * there or the statement is not a routine, so a caller's scope stays empty.
+     */
+    static int blockEnd(List<Token> tokens, int open, SqlLexer.Mode mode) {
+        Routine routine = routine(tokens, mode);
+        if (routine == null) {
+            return open;
+        }
+        Deque<Boolean> blocks = new ArrayDeque<>();
+        for (int index = open; index < tokens.size(); index++) {
+            int consumed = trackBlock(tokens, index, 0, routine, mode, blocks, "");
+            if (blocks.isEmpty()) {
+                return consumed;
+            }
+            index = consumed;
+        }
+        return open;
     }
 
     private static void requireBalanced(List<Token> tokens, int start, Routine routine, SqlLexer.Mode mode,
@@ -935,6 +956,17 @@ final class SqlTokenizer {
             }
         }
         return canonicalUpper.matcher(value.toUpperCase(Locale.ROOT)).matches();
+    }
+
+    /** The {@code )} closing the {@code (} at {@code open}, or the last index when unbalanced. */
+    static int matchingClose(List<Token> tokens, int open) {
+        int depth = tokens.get(open).depth();
+        for (int at = open + 1; at < tokens.size(); at++) {
+            if (tokens.get(at).punct(")") && tokens.get(at).depth() == depth) {
+                return at;
+            }
+        }
+        return tokens.size() - 1;
     }
 
     static Token next(List<Token> tokens, int index) {

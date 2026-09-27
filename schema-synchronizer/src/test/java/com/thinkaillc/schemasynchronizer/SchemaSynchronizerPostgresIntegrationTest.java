@@ -599,6 +599,210 @@ class SchemaSynchronizerPostgresIntegrationTest {
     }
 
     @Test
+    void aliasQualifiedColumnsApply() throws Exception {
+        DataSource dataSource = dataSource();
+        String schema = uniqueSchema("alias_columns_case");
+        createSchema(dataSource, schema);
+        try (Connection connection = dataSource.getConnection()) {
+            statement(connection, "CREATE TABLE " + schema + ".items (id INTEGER PRIMARY KEY, note TEXT, "
+                    + "tag_id INTEGER)");
+            statement(connection, "CREATE TABLE " + schema + ".tags (id INTEGER PRIMARY KEY, name TEXT)");
+        }
+        SchemaDefinition definition = new SchemaDefinition(Map.of(), List.of(new SchemaDefinition.ChangeSet(
+                "001-alias-columns", "alias- and table-qualified columns", List.of(
+                "INSERT INTO tags (id, name) VALUES (1, 't1')",
+                "INSERT INTO items (id, tag_id) VALUES (1, 1)",
+                "UPDATE items AS i SET note = t.name FROM tags t WHERE t.id = i.tag_id",
+                "UPDATE items AS i SET note = i.note || '!' WHERE i.id = 1",
+                "INSERT INTO items AS i (id, note) VALUES (1, 'x') "
+                        + "ON CONFLICT (id) DO UPDATE SET note = i.note || EXCLUDED.note"
+        ), "SELECT EXISTS (SELECT 1 FROM items WHERE id = 1 AND note = 't1!x')")));
+        try (Connection connection = dataSource.getConnection()) {
+            assertThat(synchronizer(dataSource, schema, false).synchronizeWithResult(connection, definition)
+                    .changeSetsApplied()).isEqualTo(1);
+            assertThat(queryString(connection, "SELECT note FROM " + schema + ".items WHERE id = 1"))
+                    .isEqualTo("t1!x");
+        }
+    }
+
+    @Test
+    void expressionKeywordsRelationLiteralsRecordsAndCteWritesApply() throws Exception {
+        DataSource dataSource = dataSource();
+        String schema = uniqueSchema("expression_forms_case");
+        createSchema(dataSource, schema);
+        try (Connection connection = dataSource.getConnection()) {
+            statement(connection, "CREATE TABLE " + schema + ".items (id INTEGER PRIMARY KEY, note TEXT, "
+                    + "qty INTEGER, created_at TIMESTAMP)");
+            statement(connection, "CREATE TABLE " + schema + ".staged (id INTEGER, note TEXT)");
+            statement(connection, "CREATE TABLE " + schema + ".tags (id INTEGER, name TEXT)");
+            statement(connection, "INSERT INTO " + schema + ".staged VALUES (1, ' a ')");
+            statement(connection, "INSERT INTO " + schema + ".tags VALUES (2, 'b')");
+            statement(connection, "CREATE SEQUENCE " + schema + ".items_seq");
+        }
+        SchemaDefinition definition = new SchemaDefinition(Map.of(), List.of(new SchemaDefinition.ChangeSet(
+                "001-expression-forms", "set branches, operand FROM/FOR, relation literals, records, CTE writes",
+                List.of(
+                "INSERT INTO items (id, note) SELECT s.id, s.note FROM staged s UNION ALL SELECT t.id, t.name FROM tags t",
+                "UPDATE items i SET note = TRIM(BOTH ' ' FROM i.note), created_at = TIMESTAMP '2020-01-02' "
+                        + "WHERE i.note IS DISTINCT FROM TRIM(i.note)",
+                "UPDATE items i SET qty = EXTRACT(YEAR FROM i.created_at) WHERE i.created_at IS NOT NULL",
+                "UPDATE items i SET note = i.note || SUBSTRING('xyz' FROM 2 FOR 1) WHERE i.id = 1",
+                "INSERT INTO items AS x (id, note) VALUES (2, 'c') ON CONFLICT (id) "
+                        + "DO UPDATE SET note = EXCLUDED.note WHERE x.note IS DISTINCT FROM EXCLUDED.note",
+                "UPDATE items SET qty = nextval('items_seq') WHERE id = 2",
+                "ALTER TABLE items ALTER COLUMN qty SET DEFAULT nextval('" + schema + ".items_seq'::regclass)",
+                "WITH c AS (SELECT id FROM staged) UPDATE items SET note = note || '!' WHERE id IN (SELECT c.id FROM c)",
+                "WITH s AS (SELECT 3 AS id) INSERT INTO items (id, note) SELECT s.id, 'w' FROM s",
+                "CREATE FUNCTION bump(p integer) RETURNS integer AS $$ DECLARE v items%ROWTYPE; "
+                        + "n items.note%TYPE; r record; total integer := 0; BEGIN "
+                        + "SELECT * INTO v FROM items WHERE id = 1; n := v.note; "
+                        + "FOR r IN SELECT id FROM items LOOP total := total + r.id; END LOOP; "
+                        + "RETURN bump.p + total + length(n) - length(v.note); END $$ LANGUAGE plpgsql",
+                "CREATE FUNCTION fill() RETURNS trigger AS $$ BEGIN NEW.qty := 99; RETURN NEW; END $$ "
+                        + "LANGUAGE plpgsql",
+                "CREATE TRIGGER items_fill BEFORE UPDATE ON items FOR EACH ROW "
+                        + "WHEN (OLD.note IS DISTINCT FROM NEW.note) EXECUTE FUNCTION fill()",
+                "UPDATE items SET qty = bump(qty) WHERE id = 2",
+                "UPDATE items SET note = 'z' WHERE id = 3"
+        ), "SELECT EXISTS (SELECT 1 FROM items WHERE id = 1 AND note = 'ay!' AND qty = 2020) "
+                + "AND EXISTS (SELECT 1 FROM items WHERE id = 2 AND note = 'c' AND qty = 7) "
+                + "AND EXISTS (SELECT 1 FROM items WHERE id = 3 AND note = 'z' AND qty = 99)")));
+        try (Connection connection = dataSource.getConnection()) {
+            assertThat(synchronizer(dataSource, schema, false).synchronizeWithResult(connection, definition)
+                    .changeSetsApplied()).isEqualTo(1);
+        }
+    }
+
+    @Test
+    void serialSequencesRegCastsLabelsAndRecordFieldsApply() throws Exception {
+        DataSource dataSource = dataSource();
+        String schema = uniqueSchema("serial_labels_case");
+        createSchema(dataSource, schema);
+        try (Connection connection = dataSource.getConnection()) {
+            statement(connection, "CREATE TABLE " + schema + ".items (id SERIAL PRIMARY KEY, note TEXT, qty INTEGER)");
+            statement(connection, "INSERT INTO " + schema + ".items (id, note, qty) VALUES (5, 'a', 0), (6, 'b', 0)");
+            statement(connection, "CREATE TYPE " + schema + ".address AS (city TEXT)");
+            statement(connection, "CREATE TYPE " + schema + ".holder AS (addr " + schema + ".address)");
+        }
+        SchemaDefinition definition = new SchemaDefinition(Map.of(), List.of(new SchemaDefinition.ChangeSet(
+                "001-serial-labels", "serial sequence reset, qualified reg casts, labels, nested record fields",
+                List.of(
+                "SELECT setval(pg_get_serial_sequence('items', 'id'), coalesce(max(id), 1)) FROM items",
+                "INSERT INTO items (id, note) VALUES (nextval(pg_get_serial_sequence('" + schema + ".items', 'id')), 'c')",
+                "UPDATE items SET qty = currval(pg_catalog.pg_get_serial_sequence('items', 'id')) WHERE note = 'c'",
+                "UPDATE items SET note = note || '!' WHERE pg_relation_size('items'::pg_catalog.regclass) >= 0 "
+                        + "AND to_regclass('" + schema + ".items') = CAST('items' AS pg_catalog.regclass) "
+                        + "AND 'character varying'::regtype IS NOT NULL AND id = 5",
+                "CREATE FUNCTION city_of(r holder) RETURNS text AS $$ <<blk>> DECLARE n int := 1; s items; BEGIN "
+                        + "SELECT * INTO s FROM items WHERE id = 5; DECLARE n int := 2; BEGIN "
+                        + "RETURN (r.addr).city || blk.n || blk.s.note; END; END $$ LANGUAGE plpgsql",
+                "UPDATE items SET note = city_of(ROW(ROW('x')::address)::holder) WHERE id = 6"
+        ), "SELECT EXISTS (SELECT 1 FROM items WHERE id = 7 AND note = 'c' AND qty = 7) "
+                + "AND EXISTS (SELECT 1 FROM items WHERE id = 5 AND note = 'a!') "
+                + "AND EXISTS (SELECT 1 FROM items WHERE id = 6 AND note = 'x1a!')")));
+        try (Connection connection = dataSource.getConnection()) {
+            assertThat(synchronizer(dataSource, schema, false).synchronizeWithResult(connection, definition)
+                    .changeSetsApplied()).isEqualTo(1);
+        }
+    }
+
+    @Test
+    void oidMetadataCallsStringSpellingsAndSchemaQualifiedTypesApply() throws Exception {
+        DataSource dataSource = dataSource();
+        String schema = uniqueSchema("type_positions_case");
+        createSchema(dataSource, schema);
+        try (Connection connection = dataSource.getConnection()) {
+            statement(connection, "CREATE TABLE " + schema + ".items (id SERIAL PRIMARY KEY, note TEXT, qty INTEGER)");
+            statement(connection, "INSERT INTO " + schema + ".items (id, note, qty) VALUES (1, 'a', 3), (2, 'b', 0)");
+        }
+        SchemaDefinition definition = new SchemaDefinition(Map.of(), List.of(new SchemaDefinition.ChangeSet(
+                "001-type-positions", "oid metadata calls, reg* string spellings, qualified parameter and variable types",
+                List.of(
+                "CREATE INDEX items_brin ON items USING brin (qty)",
+                "SELECT brin_summarize_new_values('items_brin')",
+                "UPDATE items SET qty = qty + (SELECT count(*) FROM pg_class c JOIN pg_index i ON i.indrelid = c.oid "
+                        + "WHERE c.oid = $$items$$::regclass AND pg_relation_size(c.oid) >= 0 "
+                        + "AND pg_total_relation_size(c.oid) >= pg_indexes_size(c.oid) "
+                        + "AND pg_index_has_property(i.indexrelid, 'clusterable') "
+                        + "AND i.indexrelid::regclass IS NOT NULL) WHERE id = 1",
+                "UPDATE items SET note = note || '!' WHERE ('items')::regclass = 'items'::text::regclass "
+                        + "AND 'items'::varchar(20)::regclass = E'" + schema + ".items'::regclass "
+                        + "AND 'items'::character varying::regclass = CAST(('items') AS regclass) AND id = 2",
+                "SELECT setval(E'" + schema + ".items_id_seq', 2)",
+                "INSERT INTO items (id, note, qty) VALUES (nextval($$items_id_seq$$), 'c', 0)",
+                "CREATE FUNCTION qty_of(" + schema + ".items) RETURNS int AS $$ BEGIN RETURN $1.qty; END $$ "
+                        + "LANGUAGE plpgsql",
+                "CREATE FUNCTION tagged(p " + schema + ".items, q int DEFAULT 1) RETURNS " + schema + ".items AS $$ "
+                        + "DECLARE x " + schema + ".items; y items.note%TYPE; BEGIN x := p; "
+                        + "y := CAST(p.note AS text) COLLATE \"C\"; x.note := y || q::text; RETURN x; END $$ "
+                        + "LANGUAGE plpgsql",
+                "UPDATE items i SET qty = qty_of(i) + 1, note = (tagged(i)).note WHERE i.id = 3"
+        ), "SELECT EXISTS (SELECT 1 FROM items WHERE id = 1 AND qty = 4) "
+                + "AND EXISTS (SELECT 1 FROM items WHERE id = 2 AND note = 'b!') "
+                + "AND EXISTS (SELECT 1 FROM items WHERE id = 3 AND note = 'c1' AND qty = 1)")));
+        try (Connection connection = dataSource.getConnection()) {
+            assertThat(synchronizer(dataSource, schema, false).synchronizeWithResult(connection, definition)
+                    .changeSetsApplied()).isEqualTo(1);
+        }
+    }
+
+    @Test
+    void schemaQualifiedAnchorsAndDeclarationDefaultsApply() throws Exception {
+        DataSource dataSource = dataSource();
+        String schema = uniqueSchema("anchors_case");
+        createSchema(dataSource, schema);
+        try (Connection connection = dataSource.getConnection()) {
+            statement(connection, "CREATE TABLE " + schema + ".items (id INTEGER PRIMARY KEY, note TEXT, qty INTEGER)");
+            statement(connection, "INSERT INTO " + schema + ".items (id, note, qty) VALUES (1, 'a', 4)");
+        }
+        SchemaDefinition definition = new SchemaDefinition(Map.of(), List.of(new SchemaDefinition.ChangeSet(
+                "001-anchors", "three-part %TYPE anchors and = defaults in declarations",
+                List.of(
+                "CREATE FUNCTION anchored(p " + schema + ".items.note%TYPE, r items) RETURNS " + schema
+                        + ".items.qty%TYPE AS $$ DECLARE n " + schema + ".items.note%TYPE = p; m items.note%TYPE; "
+                        + "q int = r.qty; k CONSTANT int = 2; z int NOT NULL = r.qty; "
+                        + "s text COLLATE \"C\" = r.note; BEGIN m := n || s; "
+                        + "RETURN q * k + z + length(m); END $$ LANGUAGE plpgsql",
+                "UPDATE items i SET qty = anchored('xy', i) WHERE i.id = 1"
+        ), "SELECT EXISTS (SELECT 1 FROM items WHERE id = 1 AND qty = 15)")));
+        try (Connection connection = dataSource.getConnection()) {
+            assertThat(synchronizer(dataSource, schema, false).synchronizeWithResult(connection, definition)
+                    .changeSetsApplied()).isEqualTo(1);
+        }
+    }
+
+    @Test
+    void functionSearchPathPinnedToConfiguredSchemaApplies() throws Exception {
+        DataSource dataSource = dataSource();
+        String schema = uniqueSchema("routine_path_case");
+        createSchema(dataSource, schema);
+        try (Connection connection = dataSource.getConnection()) {
+            statement(connection, "CREATE TABLE " + schema + ".items (id INTEGER PRIMARY KEY, qty INTEGER)");
+            statement(connection, "INSERT INTO " + schema + ".items (id, qty) VALUES (1, 7)");
+        }
+        SchemaDefinition definition = new SchemaDefinition(Map.of(), List.of(new SchemaDefinition.ChangeSet(
+                "001-pinned-path", "function-level search_path naming only the configured schema",
+                List.of(
+                "CREATE FUNCTION pinned_qty() RETURNS int SECURITY DEFINER SET search_path = " + schema
+                        + ", pg_temp AS $$ BEGIN RETURN (SELECT qty FROM items WHERE id = 1); END $$ LANGUAGE plpgsql",
+                "CREATE FUNCTION pinned_quoted() RETURNS int LANGUAGE sql SET search_path TO pg_catalog, \""
+                        + schema + "\" AS 'SELECT qty + 1 FROM items WHERE id = 1'"
+        ), "SELECT to_regprocedure('pinned_qty()') IS NOT NULL AND to_regprocedure('pinned_quoted()') IS NOT NULL")));
+        try (Connection connection = dataSource.getConnection()) {
+            assertThat(synchronizer(dataSource, schema, false).synchronizeWithResult(connection, definition)
+                    .changeSetsApplied()).isEqualTo(1);
+        }
+        try (Connection connection = dataSource.getConnection(); var statement = connection.createStatement()) {
+            statement.execute("SET search_path TO pg_catalog");
+            try (var rows = statement.executeQuery("SELECT " + schema + ".pinned_qty(), " + schema + ".pinned_quoted()")) {
+                assertThat(rows.next()).isTrue();
+                assertThat(rows.getInt(1)).isEqualTo(7);
+                assertThat(rows.getInt(2)).isEqualTo(8);
+            }
+        }
+    }
+
+    @Test
     void sqlPolicyGatesOnlyChangeSetsMissingFromHistory() throws Exception {
         DataSource dataSource = dataSource();
         String schema = uniqueSchema("history_policy_case");

@@ -30,6 +30,8 @@ class SchemaSynchronizerMariaDbIntegrationTest {
             statement.execute("DROP TABLE IF EXISTS mariaxitems");
             statement.execute("DROP TABLE IF EXISTS maria_case_items");
             statement.execute("DROP FUNCTION IF EXISTS maria_case_tier");
+            statement.execute("DROP TABLE IF EXISTS maria_staged");
+            statement.execute("DROP TABLE IF EXISTS maria_tags");
             statement.execute("DROP TABLE IF EXISTS schema_synchronizer_history");
         }
     }
@@ -544,6 +546,62 @@ class SchemaSynchronizerMariaDbIntegrationTest {
                         List.of(new SchemaDefinition.ColumnDef("id", "BIGINT NOT NULL"),
                                 new SchemaDefinition.ColumnDef("label", label)), List.of())),
                 List.of());
+    }
+
+    @Test
+    void aliasQualifiedColumnsApply() throws Exception {
+        try (Connection connection = connection(); var statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE maria_items (id BIGINT PRIMARY KEY, note VARCHAR(40), qty INT)");
+            statement.execute("INSERT INTO maria_items (id, note, qty) VALUES (1, 'a', 1), (2, 'b', 2)");
+        }
+        SchemaDefinition definition = new SchemaDefinition(2, "mariadb", Map.of(), List.of(
+                new SchemaDefinition.ChangeSet("001-maria-alias-join", "multi-table UPDATE with aliases",
+                        List.of("UPDATE maria_items i JOIN maria_items t ON t.id = i.id + 1 SET i.note = t.note"),
+                        "SELECT COUNT(*) = 1 FROM maria_items WHERE id = 1 AND note = 'b'"),
+                new SchemaDefinition.ChangeSet("002-maria-table-qualified", "table-qualified SET",
+                        List.of("UPDATE maria_items SET maria_items.qty = maria_items.qty + 10 "
+                                + "WHERE maria_items.id = 1"),
+                        "SELECT COUNT(*) = 1 FROM maria_items WHERE id = 1 AND qty = 11"),
+                new SchemaDefinition.ChangeSet("003-maria-duplicate-key", "table-qualified ON DUPLICATE KEY UPDATE",
+                        List.of("INSERT INTO maria_items (id, note, qty) VALUES (2, 'z', 0) "
+                                + "ON DUPLICATE KEY UPDATE maria_items.note = 'dup'"),
+                        "SELECT COUNT(*) = 1 FROM maria_items WHERE id = 2 AND note = 'dup'")));
+        try (Connection connection = connection()) {
+            assertThat(synchronizer().synchronizeWithResult(connection, definition).changeSetsApplied())
+                    .isEqualTo(3);
+        }
+    }
+
+    @Test
+    void setBranchesAndExpressionKeywordsApply() throws Exception {
+        try (Connection connection = connection(); var statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE maria_items (id BIGINT PRIMARY KEY, note VARCHAR(40), qty INT, "
+                    + "created_at DATETIME)");
+            statement.execute("CREATE TABLE maria_staged (id BIGINT, note VARCHAR(40))");
+            statement.execute("CREATE TABLE maria_tags (id BIGINT, name VARCHAR(40))");
+            statement.execute("INSERT INTO maria_staged VALUES (1, ' a ')");
+            statement.execute("INSERT INTO maria_tags VALUES (2, 'b')");
+        }
+        SchemaDefinition definition = new SchemaDefinition(2, "mariadb", Map.of(), List.of(
+                new SchemaDefinition.ChangeSet("001-maria-union", "correlations per set-operation branch",
+                        List.of("INSERT INTO maria_items (id, note) SELECT s.id, s.note FROM maria_staged s "
+                                + "UNION ALL SELECT t.id, t.name FROM maria_tags t"),
+                        "SELECT COUNT(*) = 1 FROM maria_items WHERE id = 2 AND note = 'b'"),
+                new SchemaDefinition.ChangeSet("002-maria-trim", "TRIM ... FROM takes an operand",
+                        List.of("UPDATE maria_items i SET i.note = TRIM(BOTH ' ' FROM i.note), "
+                                + "i.created_at = '2020-01-02' WHERE i.id = 1"),
+                        "SELECT COUNT(*) = 1 FROM maria_items WHERE id = 1 AND note = 'a'"),
+                new SchemaDefinition.ChangeSet("003-maria-extract", "EXTRACT ... FROM takes an operand",
+                        List.of("UPDATE maria_items i SET i.qty = EXTRACT(YEAR FROM i.created_at) WHERE i.id = 1"),
+                        "SELECT COUNT(*) = 1 FROM maria_items WHERE id = 1 AND qty = 2020"),
+                new SchemaDefinition.ChangeSet("004-maria-substring", "SUBSTRING ... FROM ... FOR takes operands",
+                        List.of("UPDATE maria_items i SET i.note = CONCAT(i.note, SUBSTRING('xyz' FROM 2 FOR 1)) "
+                                + "WHERE i.id = 1"),
+                        "SELECT COUNT(*) = 1 FROM maria_items WHERE id = 1 AND note = 'ay'")));
+        try (Connection connection = connection()) {
+            assertThat(synchronizer().synchronizeWithResult(connection, definition).changeSetsApplied())
+                    .isEqualTo(4);
+        }
     }
 
     @Test

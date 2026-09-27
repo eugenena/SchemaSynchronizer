@@ -30,22 +30,43 @@ public final class NonDestructiveSqlPolicy {
                     + "|DBMS_DDL|EXEC_DDL_STATEMENT");
 
     /**
-     * Oracle packages, types, and functions that reach the network or file system, or run a query string.
-     * {@code BFILENAME} and the {@code DBMS_LOB} file routines read server files.
+     * Oracle packages, types, and functions that reach the network or file system, read objects named
+     * in a string, or run SQL text: {@code BFILENAME} and the {@code DBMS_LOB} file routines read server
+     * files; the URI types and {@code URIFACTORY} read tables by path; {@code CUBE_TABLE} and the OLAP
+     * functions read cubes by name; a {@code SQL_MACRO} function's returned string is run as SQL; and
+     * each listed package has members that parse, explain, or run a SQL or OLAP statement given as text.
      */
     private static final Pattern ORACLE_EXTERNAL_NAMES = Pattern.compile(
             "UTL_HTTP|UTL_TCP|UTL_SMTP|UTL_MAIL|UTL_FILE|UTL_INADDR|DBMS_XMLGEN|DBMS_XMLQUERY|DBMS_PIPE"
-                    + "|HTTPURITYPE|BFILENAME|FILEOPEN|FILEEXISTS|FILEGETNAME|FILEISOPEN|FILECLOSE|FILECLOSEALL"
-                    + "|LOADFROMFILE|LOADBLOBFROMFILE|LOADCLOBFROMFILE");
+                    + "|HTTPURITYPE|DBURITYPE|XDBURITYPE|FTPURITYPE|URIFACTORY|CUBE_TABLE|OLAP_TABLE|OLAPRC_TABLE"
+                    + "|SQL_MACRO|BFILENAME|FILEOPEN|FILEEXISTS|FILEGETNAME|FILEISOPEN|FILECLOSE|FILECLOSEALL"
+                    + "|LOADFROMFILE|LOADBLOBFROMFILE|LOADCLOBFROMFILE|EXPAND_SQL_TEXT"
+                    + "|DBMS_SYS_SQL|DBMS_AW|DBMS_ODCI|DBMS_PARALLEL_EXECUTE|DBMS_SQLTUNE\\w*|DBMS_SQLDIAG|DBMS_SQLPA"
+                    + "|DBMS_SQLSET|DBMS_SQLQ|DBMS_SPM|DBMS_SQL_TRANSLATOR|DBMS_SQL_MONITOR|DBMS_XPLAN|DBMS_ADVISOR"
+                    + "|DBMS_ADDM|DBMS_SNAPSHOT|DBMS_MVIEW|DBMS_SYNC_REFRESH|DBMS_SPACE|DBMS_DATA_MINING"
+                    + "|DBMS_DIMENSION|DBMS_SUMMARY|DBMS_DEBUG|OWA_UTIL|DBMS_XMLSTORE|DBMS_XMLSAVE"
+                    + "|DBMS_REDEFINITION|DBMS_HS_PASSTHROUGH|DBMS_DATAPUMP|DBMS_XSLPROCESSOR");
 
-    /** Functions whose call (quoted or schema-qualified) reads files, signals backends, or runs a query string. */
+    /** XQuery functions that read database tables or repository resources, and Oracle's {@code ora:} extensions. */
+    private static final Pattern XQUERY_TABLE_ACCESS = Pattern.compile(
+            "(?i)\\b(?:collection|uri-collection|doc|doc-available)\\s*\\(|\\bora:");
+
+    private static final Set<String> ORACLE_XQUERY_CALLS = Set.of("XMLQUERY", "XMLTABLE", "XMLEXISTS");
+
+    /**
+     * Functions whose call (quoted or schema-qualified) reads files, signals backends, runs a query
+     * string, or exports the rows of relations named by argument: {@code query_to_xml*},
+     * {@code cursor_to_xml*}, {@code table_to_xml*}, {@code schema_to_xml*}, {@code database_to_xml*},
+     * and {@code ts_stat}/{@code ts_rewrite}, which run the SQL text they are given.
+     */
     private static final Pattern FORBIDDEN_CALLS = Pattern.compile(
             "DBLINK\\w*|PG_TERMINATE_BACKEND|PG_CANCEL_BACKEND|PG_DROP_REPLICATION_SLOT"
                     + "|PG_CREATE_\\w*REPLICATION_SLOT|PG_RELOAD_CONF|PG_ROTATE_LOGFILE|PG_PROMOTE"
                     + "|PG_READ_\\w+|PG_WRITE_\\w+|PG_FILE_\\w+|PG_LS_\\w+|PG_STAT_FILE|PG_SWITCH_WAL"
                     + "|PG_CREATE_RESTORE_POINT|PG_LOGICAL_EMIT_MESSAGE|PG_(?:BACKUP|START|STOP)_\\w+"
-                    + "|PG_STAT_RESET\\w*|PG_REPLICATION_ORIGIN_\\w+|PG_IMPORT_SYSTEM_COLLATIONS"
-                    + "|LO_\\w+|LOWRITE|LOAD_FILE|QUERY_TO_XML\\w*|SET_ROLE");
+                    + "|PG_STAT_RESET\\w*|PG_REPLICATION_ORIGIN_\\w+|PG_IMPORT_SYSTEM_COLLATIONS|PG_NEXTOID"
+                    + "|LO_\\w+|LOWRITE|LOAD_FILE|(?:QUERY|CURSOR|TABLE|SCHEMA|DATABASE)_TO_XML\\w*"
+                    + "|TS_STAT|TS_REWRITE|SET_ROLE");
 
     /**
      * PostgreSQL configuration parameters a routine's {@code SET} clause or a {@code SET} statement must not
@@ -136,10 +157,41 @@ public final class NonDestructiveSqlPolicy {
         List<Token> tokens = SqlTokenizer.tokenize(sql, mode);
         requireSingleStatement(tokens, mode, sql, "schema change SQL");
         requireNoForbiddenTokens(sql, tokens, mode);
-        if (!matchesAllowedStatement(normalized)) {
+        if (!matchesAllowedStatement(normalized) && !allowedCteStatement(tokens, dialect)) {
             throw new IllegalArgumentException("unsupported schema change SQL: " + summarize(sql));
         }
     }
+
+    /**
+     * {@code WITH … SELECT|UPDATE|INSERT INTO …} where the engine accepts that main statement
+     * after a {@code WITH} list: PostgreSQL and SQL Server take {@code UPDATE} and
+     * {@code INSERT}, MySQL takes {@code UPDATE}, and MariaDB and Oracle take neither. The CTE
+     * bodies went through the same token checks as the rest of the statement.
+     */
+    private static boolean allowedCteStatement(List<Token> tokens, DatabaseDialect dialect) {
+        if (tokens.isEmpty() || !tokens.getFirst().keyword("WITH")) {
+            return false;
+        }
+        for (int index = 1; index < tokens.size(); index++) {
+            Token token = tokens.get(index);
+            if (token.depth() != 0 || !token.keyword(DATA_MAIN_STATEMENTS)) {
+                continue;
+            }
+            if (token.keyword("SELECT")) {
+                return true;
+            }
+            boolean insertInto = token.keyword("INSERT") && index + 1 < tokens.size()
+                    && tokens.get(index + 1).keyword("INTO");
+            return switch (dialect) {
+                case POSTGRESQL, SQLSERVER -> token.keyword("UPDATE") || insertInto;
+                case MYSQL -> token.keyword("UPDATE");
+                case MARIADB, ORACLE -> false;
+            };
+        }
+        return false;
+    }
+
+    private static final Set<String> DATA_MAIN_STATEMENTS = Set.of("SELECT", "UPDATE", "INSERT", "DELETE", "MERGE");
 
     public static void requireReadOnlyVerification(String sql) {
         requireReadOnlyVerification(sql, DatabaseDialect.POSTGRESQL);
@@ -168,13 +220,15 @@ public final class NonDestructiveSqlPolicy {
             Set.of("UPDLOCK", "XLOCK", "TABLOCK", "TABLOCKX", "HOLDLOCK", "PAGLOCK");
 
     /**
-     * Lock functions, sequence and transaction-id advancement, notifications, and file or
-     * backend access, called quoted or unquoted.
+     * Lock functions, sequence and transaction-id advancement, notifications, index maintenance,
+     * and file or backend access, called quoted or unquoted.
      */
     private static final Pattern SIDE_EFFECT_CALLS = Pattern.compile(
             "SETVAL|NEXTVAL|GET_LOCK|RELEASE_LOCK|RELEASE_ALL_LOCKS|IS_FREE_LOCK|PG_(?:TRY_)?ADVISORY\\w*"
                     + "|SP_GETAPPLOCK|SP_RELEASEAPPLOCK|LO_\\w+|PG_READ_\\w+|PG_TERMINATE_BACKEND"
-                    + "|PG_CANCEL_BACKEND|LOAD_FILE|PG_NOTIFY|TXID_CURRENT|PG_CURRENT_XACT_ID");
+                    + "|PG_CANCEL_BACKEND|LOAD_FILE|PG_NOTIFY|TXID_CURRENT|PG_CURRENT_XACT_ID"
+                    + "|BRIN_SUMMARIZE_NEW_VALUES|BRIN_SUMMARIZE_RANGE|BRIN_DESUMMARIZE_RANGE"
+                    + "|GIN_CLEAN_PENDING_LIST");
 
     private static final Pattern DBMS_LOCK = Pattern.compile("DBMS_LOCK");
 
@@ -414,7 +468,11 @@ public final class NonDestructiveSqlPolicy {
                     && (next.keyword("FUNCTION") || next.keyword("PROCEDURE") || next.keyword("ON")))) {
                 throw destructive(sql);
             }
-            if (token.keyword("DELETE") && !DELETE_EVENT_PREDECESSORS.contains(previousWord(tokens, index))) {
+            if (token.keyword("DELETE") && !DELETE_EVENT_PREDECESSORS.contains(previousWord(tokens, index))
+                    && !collectionMethod(tokens, index)) {
+                throw destructive(sql);
+            }
+            if (mode == SqlLexer.Mode.ORACLE && oracleDynamicSql(tokens, index)) {
                 throw destructive(sql);
             }
             if (SqlTokenizer.nameMatches(token, FORBIDDEN_NAMES, mode)
@@ -437,6 +495,63 @@ public final class NonDestructiveSqlPolicy {
             }
         }
     }
+
+    /**
+     * PL/SQL {@code v.DELETE} / {@code v.DELETE(i)}: a collection method, never a statement. Whether
+     * {@code v} is a declared collection is the schema scope check's job.
+     */
+    private static boolean collectionMethod(List<Token> tokens, int index) {
+        Token previous = SqlTokenizer.previous(tokens, index);
+        return previous != null && previous.punct(".") && previous.end() == tokens.get(index).start()
+                && index >= 2 && tokens.get(index - 2).name() && tokens.get(index - 2).end() == previous.start();
+    }
+
+    /**
+     * Oracle forms that run SQL built at run time or reach tables outside the statement text:
+     * {@code OPEN c FOR} followed by anything but a query ({@code OPEN c FOR 'SELECT …'},
+     * {@code OPEN c FOR v}, {@code OPEN c FOR f('…')}); XQuery that reads tables or repository
+     * resources ({@code fn:collection("oradb:/…")}, {@code ora:view}); and Java/C call specs.
+     */
+    private static boolean oracleDynamicSql(List<Token> tokens, int index) {
+        Token token = tokens.get(index);
+        Token next = SqlTokenizer.next(tokens, index);
+        if (token.keyword("OPEN")) {
+            int at = index + 1;
+            if (at < tokens.size() && tokens.get(at).punct(":")) {
+                at++;
+            }
+            while (at + 1 < tokens.size() && tokens.get(at).name() && tokens.get(at + 1).punct(".")) {
+                at += 2;
+            }
+            if (at + 1 >= tokens.size() || !tokens.get(at).name() || !tokens.get(at + 1).keyword("FOR")) {
+                return false;
+            }
+            int query = at + 2;
+            while (query < tokens.size() && tokens.get(query).punct("(")) {
+                query++;
+            }
+            return query >= tokens.size() || !(tokens.get(query).keyword("SELECT") || tokens.get(query).keyword("WITH"));
+        }
+        if (token.keyword(ORACLE_XQUERY_CALLS) && next != null && next.punct("(")) {
+            int close = SqlTokenizer.matchingClose(tokens, index + 1);
+            for (int at = index + 2; at < close; at++) {
+                if (tokens.get(at).type() == SqlTokenizer.Type.STRING
+                        && XQUERY_TABLE_ACCESS.matcher(tokens.get(at).value()).find()) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        if (token.keyword("LANGUAGE") && next != null && (next.keyword("JAVA") || next.keyword("C"))) {
+            return true;
+        }
+        Token previous = SqlTokenizer.previous(tokens, index);
+        return token.keyword("EXTERNAL") && previous != null && (previous.keyword("IS") || previous.keyword("AS"))
+                && (next == null || next.type() != SqlTokenizer.Type.WORD || next.keyword(CALL_SPEC_CLAUSES));
+    }
+
+    private static final Set<String> CALL_SPEC_CLAUSES =
+            Set.of("NAME", "LIBRARY", "LANGUAGE", "PARAMETERS", "WITH", "AGENT", "CALLING", "TRUSTED");
 
     /**
      * {@code SET GLOBAL|PERSIST|PERSIST_ONLY …} or {@code SET @@global.name = …}, alone or

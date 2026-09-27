@@ -32,6 +32,8 @@ class SchemaSynchronizerMySqlIntegrationTest {
             statement.execute("DROP TABLE IF EXISTS mysql_strict");
             statement.execute("DROP TABLE IF EXISTS mysqlxstrict");
             statement.execute("DROP TABLE IF EXISTS mysql_case_items");
+            statement.execute("DROP TABLE IF EXISTS mysql_staged");
+            statement.execute("DROP TABLE IF EXISTS mysql_tags");
             statement.execute("DROP TABLE IF EXISTS schema_synchronizer_history");
         }
     }
@@ -902,6 +904,70 @@ class SchemaSynchronizerMySqlIntegrationTest {
         }
         assertThat(tableExists("mysql_strict")).isFalse();
         assertThat(tableExists("mysql_items")).isTrue();
+    }
+
+    @Test
+    void aliasQualifiedColumnsApply() throws Exception {
+        try (Connection connection = connection(); var statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE mysql_items (id BIGINT PRIMARY KEY, note VARCHAR(40), qty INT)");
+            statement.execute("INSERT INTO mysql_items (id, note, qty) VALUES (1, 'a', 1), (2, 'b', 2)");
+        }
+        SchemaDefinition definition = new SchemaDefinition(2, "mysql", Map.of(), List.of(
+                new SchemaDefinition.ChangeSet("001-mysql-alias-join", "multi-table UPDATE with aliases",
+                        List.of("UPDATE mysql_items i JOIN mysql_items t ON t.id = i.id + 1 SET i.note = t.note"),
+                        "SELECT COUNT(*) = 1 FROM mysql_items WHERE id = 1 AND note = 'b'"),
+                new SchemaDefinition.ChangeSet("002-mysql-table-qualified", "table-qualified SET",
+                        List.of("UPDATE mysql_items SET mysql_items.qty = mysql_items.qty + 10 "
+                                + "WHERE mysql_items.id = 1"),
+                        "SELECT COUNT(*) = 1 FROM mysql_items WHERE id = 1 AND qty = 11"),
+                new SchemaDefinition.ChangeSet("003-mysql-duplicate-key", "table-qualified ON DUPLICATE KEY UPDATE",
+                        List.of("INSERT INTO mysql_items (id, note, qty) VALUES (2, 'z', 0) "
+                                + "ON DUPLICATE KEY UPDATE mysql_items.note = 'dup'"),
+                        "SELECT COUNT(*) = 1 FROM mysql_items WHERE id = 2 AND note = 'dup'")));
+        try (Connection connection = connection()) {
+            assertThat(synchronizer().synchronizeWithResult(connection, definition).changeSetsApplied())
+                    .isEqualTo(3);
+        }
+    }
+
+    @Test
+    void setBranchesExpressionKeywordsRowAliasesAndCteUpdatesApply() throws Exception {
+        try (Connection connection = connection(); var statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE mysql_items (id BIGINT PRIMARY KEY, note VARCHAR(40), qty INT, "
+                    + "created_at DATETIME)");
+            statement.execute("CREATE TABLE mysql_staged (id BIGINT, note VARCHAR(40))");
+            statement.execute("CREATE TABLE mysql_tags (id BIGINT, name VARCHAR(40))");
+            statement.execute("INSERT INTO mysql_staged VALUES (1, ' a ')");
+            statement.execute("INSERT INTO mysql_tags VALUES (2, 'b')");
+        }
+        SchemaDefinition definition = new SchemaDefinition(2, "mysql", Map.of(), List.of(
+                new SchemaDefinition.ChangeSet("001-mysql-union", "correlations per set-operation branch",
+                        List.of("INSERT INTO mysql_items (id, note) SELECT s.id, s.note FROM mysql_staged s "
+                                + "UNION ALL SELECT t.id, t.name FROM mysql_tags t"),
+                        "SELECT COUNT(*) = 1 FROM mysql_items WHERE id = 2 AND note = 'b'"),
+                new SchemaDefinition.ChangeSet("002-mysql-trim", "TRIM ... FROM takes an operand",
+                        List.of("UPDATE mysql_items i SET i.note = TRIM(BOTH ' ' FROM i.note), "
+                                + "i.created_at = '2020-01-02' WHERE i.id = 1"),
+                        "SELECT COUNT(*) = 1 FROM mysql_items WHERE id = 1 AND note = 'a'"),
+                new SchemaDefinition.ChangeSet("003-mysql-extract", "EXTRACT ... FROM takes an operand",
+                        List.of("UPDATE mysql_items i SET i.qty = EXTRACT(YEAR FROM i.created_at) WHERE i.id = 1"),
+                        "SELECT COUNT(*) = 1 FROM mysql_items WHERE id = 1 AND qty = 2020"),
+                new SchemaDefinition.ChangeSet("004-mysql-substring", "SUBSTRING ... FROM ... FOR takes operands",
+                        List.of("UPDATE mysql_items i SET i.note = CONCAT(i.note, SUBSTRING('xyz' FROM 2 FOR 1)) "
+                                + "WHERE i.id = 1"),
+                        "SELECT COUNT(*) = 1 FROM mysql_items WHERE id = 1 AND note = 'ay'"),
+                new SchemaDefinition.ChangeSet("005-mysql-row-alias", "INSERT ... VALUES row alias",
+                        List.of("INSERT INTO mysql_items (id, note) VALUES (2, 'c') AS new "
+                                + "ON DUPLICATE KEY UPDATE note = new.note"),
+                        "SELECT COUNT(*) = 1 FROM mysql_items WHERE id = 2 AND note = 'c'"),
+                new SchemaDefinition.ChangeSet("006-mysql-cte-update", "WITH ... UPDATE",
+                        List.of("WITH c AS (SELECT id FROM mysql_staged) UPDATE mysql_items SET note = CONCAT(note, '!') "
+                                + "WHERE id IN (SELECT c.id FROM c)"),
+                        "SELECT COUNT(*) = 1 FROM mysql_items WHERE id = 1 AND note = 'ay!'")));
+        try (Connection connection = connection()) {
+            assertThat(synchronizer().synchronizeWithResult(connection, definition).changeSetsApplied())
+                    .isEqualTo(6);
+        }
     }
 
     @Test

@@ -36,8 +36,11 @@ class SchemaSynchronizerSqlServerIntegrationTest {
             statement.execute("IF OBJECT_ID(N'dbo.sqlserver_items', N'U') IS NOT NULL DROP TABLE dbo.sqlserver_items");
             statement.execute("IF OBJECT_ID(N'dbo.sqlserver_strict', N'U') IS NOT NULL DROP TABLE dbo.sqlserver_strict");
             statement.execute("IF OBJECT_ID(N'dbo.sqlserverxitems', N'U') IS NOT NULL DROP TABLE dbo.sqlserverxitems");
+            statement.execute("IF OBJECT_ID(N'dbo.sqlserver_staged', N'U') IS NOT NULL DROP TABLE dbo.sqlserver_staged");
+            statement.execute("IF OBJECT_ID(N'dbo.sqlserver_tags', N'U') IS NOT NULL DROP TABLE dbo.sqlserver_tags");
             statement.execute("IF OBJECT_ID(N'dbo.schema_synchronizer_history', N'U') IS NOT NULL "
                     + "DROP TABLE dbo.schema_synchronizer_history");
+            statement.execute("IF TYPE_ID(N'dbo.sqlserver_label') IS NOT NULL DROP TYPE dbo.sqlserver_label");
         }
     }
 
@@ -269,6 +272,97 @@ class SchemaSynchronizerSqlServerIntegrationTest {
              var rows = statement.executeQuery("SELECT COL_LENGTH('dbo.sqlserver_items', 'flag')")) {
             assertThat(rows.next()).isTrue();
             assertThat(rows.getObject(1)).isNotNull();
+        }
+    }
+
+    @Test
+    void aliasQualifiedColumnsApply() throws Exception {
+        try (Connection connection = connection(); var statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE dbo.sqlserver_items (id BIGINT NOT NULL PRIMARY KEY, label VARCHAR(40), "
+                    + "flag INT NULL)");
+        }
+        SchemaDefinition definition = new SchemaDefinition(2, "sqlserver", Map.of(), List.of(
+                new SchemaDefinition.ChangeSet("001-sqlserver-alias-columns", "alias-qualified columns and OUTPUT",
+                        List.of("INSERT INTO sqlserver_items (id, label, flag) VALUES (1, 'a', 1), (2, 'b', 2)",
+                                "UPDATE i SET i.label = t.label OUTPUT inserted.label, deleted.label "
+                                        + "FROM dbo.sqlserver_items i JOIN dbo.sqlserver_items t ON t.id = i.id + 1",
+                                "UPDATE sqlserver_items SET flag = sqlserver_items.flag + 10 "
+                                        + "WHERE sqlserver_items.id = 1"),
+                        "SELECT CAST(CASE WHEN EXISTS (SELECT 1 FROM dbo.sqlserver_items "
+                                + "WHERE id = 1 AND label = 'b' AND flag = 11) THEN 1 ELSE 0 END AS BIT)")));
+        try (Connection connection = connection()) {
+            assertThat(synchronizer(true).synchronizeWithResult(connection, definition).changeSetsApplied())
+                    .isEqualTo(1);
+        }
+    }
+
+    @Test
+    void setBranchesTableFunctionsTableVariablesAndCteWritesApply() throws Exception {
+        try (Connection connection = connection(); var statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE dbo.sqlserver_items (id BIGINT NOT NULL PRIMARY KEY, label VARCHAR(40), "
+                    + "flag INT NULL)");
+            statement.execute("CREATE TABLE dbo.sqlserver_staged (id BIGINT, label VARCHAR(40))");
+            statement.execute("CREATE TABLE dbo.sqlserver_tags (id BIGINT, name VARCHAR(40))");
+            statement.execute("INSERT INTO dbo.sqlserver_staged VALUES (1, ' a ')");
+            statement.execute("INSERT INTO dbo.sqlserver_tags VALUES (2, 'b')");
+        }
+        SchemaDefinition definition = new SchemaDefinition(2, "sqlserver", Map.of(), List.of(
+                new SchemaDefinition.ChangeSet("001-sqlserver-forms", "set branches, TRIM FROM, OPENJSON, CTE writes",
+                        List.of("INSERT INTO sqlserver_items (id, label) SELECT s.id, s.label FROM sqlserver_staged s "
+                                        + "UNION ALL SELECT t.id, t.name FROM sqlserver_tags t",
+                                "UPDATE i SET i.label = TRIM(' ' FROM i.label) FROM dbo.sqlserver_items i",
+                                "UPDATE i SET i.flag = j.flag FROM dbo.sqlserver_items i "
+                                        + "JOIN OPENJSON(N'[{\"id\":1,\"flag\":5}]') "
+                                        + "WITH (id BIGINT '$.id', flag INT '$.flag') AS j ON j.id = i.id",
+                                "WITH c AS (SELECT id FROM sqlserver_staged) UPDATE sqlserver_items "
+                                        + "SET label = label + '!' WHERE id IN (SELECT c.id FROM c)",
+                                "WITH s AS (SELECT 3 AS id) INSERT INTO sqlserver_items (id, label) SELECT s.id, 'w' FROM s"),
+                        "SELECT CAST(CASE WHEN EXISTS (SELECT 1 FROM dbo.sqlserver_items "
+                                + "WHERE id = 1 AND label = 'a!' AND flag = 5) THEN 1 ELSE 0 END AS BIT)",
+                        SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA),
+                new SchemaDefinition.ChangeSet("002-sqlserver-trigger", "trigger with a table variable alias",
+                        List.of("CREATE TRIGGER sqlserver_items_mark ON sqlserver_items AFTER UPDATE AS BEGIN "
+                                + "SET NOCOUNT ON; DECLARE @t TABLE (id BIGINT); "
+                                + "INSERT INTO @t SELECT id FROM inserted; "
+                                + "UPDATE i SET i.flag = 99 FROM dbo.sqlserver_items i JOIN @t AS x ON x.id = i.id "
+                                + "WHERE i.label = 'z'; END"),
+                        "SELECT CAST(CASE WHEN OBJECT_ID('dbo.sqlserver_items_mark', 'TR') IS NULL THEN 0 ELSE 1 END "
+                                + "AS BIT)",
+                        SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA),
+                new SchemaDefinition.ChangeSet("003-sqlserver-fire", "trigger marks the row",
+                        List.of("UPDATE sqlserver_items SET label = 'z' WHERE id = 3"),
+                        "SELECT CAST(CASE WHEN EXISTS (SELECT 1 FROM dbo.sqlserver_items "
+                                + "WHERE id = 3 AND label = 'z' AND flag = 99) THEN 1 ELSE 0 END AS BIT)",
+                        SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA)));
+        try (Connection connection = connection()) {
+            assertThat(synchronizer(true).synchronizeWithResult(connection, definition).changeSetsApplied())
+                    .isEqualTo(3);
+        }
+    }
+
+    @Test
+    void schemaQualifiedTypesInCastsAndVariablesApply() throws Exception {
+        try (Connection connection = connection(); var statement = connection.createStatement()) {
+            statement.execute("CREATE TYPE dbo.sqlserver_label FROM VARCHAR(40)");
+            statement.execute("CREATE TABLE dbo.sqlserver_items (id BIGINT NOT NULL PRIMARY KEY, label VARCHAR(40), "
+                    + "flag INT NULL)");
+            statement.execute("INSERT INTO dbo.sqlserver_items VALUES (1, 'a', 7)");
+        }
+        SchemaDefinition definition = new SchemaDefinition(2, "sqlserver", Map.of(), List.of(
+                new SchemaDefinition.ChangeSet("001-sqlserver-types", "schema-qualified types in casts and variables",
+                        List.of("UPDATE i SET i.label = CAST(i.label AS VARCHAR(40)) + CONVERT(VARCHAR(10), i.flag) "
+                                        + "+ TRY_CAST(i.id AS VARCHAR(5)) FROM dbo.sqlserver_items i",
+                                "CREATE TRIGGER sqlserver_items_mark ON sqlserver_items AFTER UPDATE AS BEGIN "
+                                        + "SET NOCOUNT ON; DECLARE @l AS dbo.sqlserver_label = 'z'; "
+                                        + "UPDATE i SET i.flag = 99 FROM dbo.sqlserver_items i "
+                                        + "JOIN inserted n ON n.id = i.id WHERE n.label = @l; END",
+                                "UPDATE sqlserver_items SET label = 'z' WHERE id = 1"),
+                        "SELECT CAST(CASE WHEN EXISTS (SELECT 1 FROM dbo.sqlserver_items "
+                                + "WHERE id = 1 AND label = 'z' AND flag = 99) THEN 1 ELSE 0 END AS BIT)",
+                        SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA)));
+        try (Connection connection = connection()) {
+            assertThat(synchronizer(true).synchronizeWithResult(connection, definition).changeSetsApplied())
+                    .isEqualTo(1);
         }
     }
 

@@ -34,6 +34,7 @@ optional bootstrap. See [Hand-authoring](docs/HAND_AUTHORING.md).
 | Diagnose an error or unexpected pending SQL | [Troubleshooting](docs/TROUBLESHOOTING.md) |
 | Understand database-specific behavior | [Database dialects](docs/DATABASE_DIALECTS.md) |
 | Understand the safety model (auto vs pending vs change sets) | [Design](docs/DESIGN.md) |
+| See what is planned next | [Roadmap](docs/ROADMAP.md) |
 | Add support for another relational database | [Dialect contribution guide](docs/CONTRIBUTING_A_DIALECT.md) |
 
 The [Javadocs](https://javadoc.io/doc/com.thinkaillc/schema-synchronizer) cover the
