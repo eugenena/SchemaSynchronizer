@@ -2,3 +2,55 @@ SchemaSynchronizer
 Copyright 2026 ThinkAI LLC
 
 This product is licensed under the Apache License, Version 2.0.
+
+-------------------------------------------------------------------------------
+Standalone CLI jar (schema-synchronizer-cli-<version>-standalone.jar)
+-------------------------------------------------------------------------------
+
+The -standalone jar bundles the following third-party components, each under
+its own license. The full license text of every component is included in the
+jar under META-INF/licenses/<artifactId>/, and a generated list of bundled
+components with versions is in META-INF/licenses/THIRD-PARTY.txt. These
+licenses apply to the bundled components only; SchemaSynchronizer's own code
+remains Apache-2.0.
+
+  MySQL Connector/J (com.mysql:mysql-connector-j)
+    Copyright (c) Oracle and/or its affiliates.
+    GNU General Public License v2 with the Universal FOSS Exception, v1.0.
+
+  MariaDB Connector/J (org.mariadb.jdbc:mariadb-java-client)
+    Copyright (c) MariaDB Corporation Ab and contributors.
+    GNU Lesser General Public License v2.1 or later. Source code:
+    https://github.com/mariadb-corporation/mariadb-connector-j
+
+  Oracle JDBC driver (com.oracle.database.jdbc:ojdbc11)
+    Copyright (c) Oracle and/or its affiliates.
+    Oracle Free Use Terms and Conditions (FUTC).
+
+  PostgreSQL JDBC Driver (org.postgresql:postgresql)
+    Copyright (c) 1997, PostgreSQL Global Development Group.
+    BSD 2-Clause License. Includes com.ongres.scram and com.ongres.stringprep
+    (BSD 2-Clause), whose texts are under META-INF/licenses/com.ongres.*/.
+
+  Microsoft JDBC Driver for SQL Server (com.microsoft.sqlserver:mssql-jdbc)
+    Copyright (c) Microsoft Corporation.
+    MIT License.
+
+  Protocol Buffers (com.google.protobuf:protobuf-java)
+    Copyright 2008 Google Inc.
+    BSD 3-Clause License.
+
+  Jackson (com.fasterxml.jackson.core:jackson-core, jackson-databind,
+  jackson-annotations)
+    Copyright 2007-, Tatu Saloranta. Apache License, Version 2.0.
+    jackson-core includes FastDoubleParser and Schubfach (MIT); see
+    META-INF/licenses/jackson-core/.
+
+  SLF4J (org.slf4j:slf4j-api, slf4j-simple)
+    Copyright (c) 2004-2023 QOS.ch. MIT License.
+
+  Checker Framework qualifiers (org.checkerframework:checker-qual)
+    Copyright 2004-present by the Checker Framework developers. MIT License.
+
+The library artifact (com.thinkaillc:schema-synchronizer) does not bundle any
+of these components; JDBC drivers are optional dependencies you add yourself.

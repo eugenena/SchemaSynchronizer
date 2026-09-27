@@ -38,7 +38,7 @@ class SchemaDefinitionValidatorTest {
         SchemaDefinition definition = new SchemaDefinition(2, null, Map.of(), List.of());
 
         assertThatThrownBy(() -> SchemaDefinitionValidator.validate(definition, "public"))
-                .isInstanceOf(IllegalArgumentException.class)
+                .isInstanceOf(SchemaDefinitionException.class)
                 .hasMessageContaining("require a dialect");
     }
 

@@ -534,10 +534,10 @@ final class SqlTokenizer {
         if (tokens.isEmpty()) {
             return null;
         }
-        if (mode == SqlLexer.Mode.ORACLE && (tokens.getFirst().keyword("BEGIN") || tokens.getFirst().keyword("DECLARE"))) {
+        if (mode == SqlLexer.Mode.ORACLE && (tokens.get(0).keyword("BEGIN") || tokens.get(0).keyword("DECLARE"))) {
             return new Routine(0, "BLOCK");
         }
-        if (!tokens.getFirst().keyword("CREATE")) {
+        if (!tokens.get(0).keyword("CREATE")) {
             return null;
         }
         int index = 1;

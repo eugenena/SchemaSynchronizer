@@ -10,15 +10,17 @@ import java.util.regex.Pattern;
 /**
  * Parses SchemaSnapshotWriter-style {@code definition} strings into {@link ColumnSpec}.
  */
-public final class ColumnDefinitionParser {
+final class ColumnDefinitionParser {
 
     /** Sentinel length for SQL Server {@code (MAX)} / unbounded portable forms. */
-    public static final int MAX_LENGTH = -1;
+    static final int MAX_LENGTH = -1;
 
     private static final Pattern DEFAULT = Pattern.compile(
             "\\s+DEFAULT\\s+(.+)$", Pattern.CASE_INSENSITIVE);
     private static final Pattern NOT_NULL = Pattern.compile(
             "\\s+NOT\\s+NULL\\b", Pattern.CASE_INSENSITIVE);
+    private static final Pattern TRAILING_NOT_NULL = Pattern.compile(
+            "\\s+NOT\\s+NULL\\s*$", Pattern.CASE_INSENSITIVE);
     private static final Pattern AUTO_INCREMENT = Pattern.compile(
             "\\s+AUTO_INCREMENT\\b", Pattern.CASE_INSENSITIVE);
     private static final Pattern IDENTITY = Pattern.compile(
@@ -61,7 +63,58 @@ public final class ColumnDefinitionParser {
     /** Oracle requires DEFAULT before inline constraints: {@code DEFAULT 'x' NULL}; not {@code x IS NULL}. */
     private static final Pattern TRAILING_NULL = Pattern.compile("(?<!\\bIS)\\s+NULL\\s*$", Pattern.CASE_INSENSITIVE);
 
+    /** A schema qualifier before the type ({@code public.vector(3)}, {@code "Ext".citext}); PostgreSQL only. */
+    private static final Pattern TYPE_QUALIFIER = Pattern.compile(
+            "^(\"(?:[^\"]|\"\")+\"|[A-Za-z_][A-Za-z0-9_]*)\\s*\\.\\s*(?=[A-Za-z_\"])");
+    /** A type as pgjdbc TYPE_NAME or format_type renders one outside the search_path: {@code "public"."vector"}. */
+    private static final Pattern RENDERED_QUALIFIED_TYPE = Pattern.compile(
+            "^(\"(?:[^\"]|\"\")+\"|[A-Za-z_][A-Za-z0-9_$]*)\\.(\"(?:[^\"]|\"\")+\"|[A-Za-z_].*)$");
+
     private ColumnDefinitionParser() {}
+
+    /**
+     * The schema a declared column type is qualified with, folded the PostgreSQL way (an unquoted
+     * name lowercased, a quoted one exact), or null when the type is unqualified.
+     */
+    static String typeSchema(String definition) {
+        if (definition == null) {
+            return null;
+        }
+        Matcher qualifier = TYPE_QUALIFIER.matcher(definition.trim());
+        if (!qualifier.find()) {
+            return null;
+        }
+        String schema = qualifier.group(1);
+        return schema.startsWith("\"") ? unquote(schema) : schema.toLowerCase(Locale.ROOT);
+    }
+
+    /** A catalog-rendered PostgreSQL type split into its schema (null when unqualified) and bare name. */
+    record RenderedType(String schema, String name) {}
+
+    static RenderedType splitRenderedType(String typeName) {
+        Matcher qualified = typeName == null ? null : RENDERED_QUALIFIED_TYPE.matcher(typeName.trim());
+        if (qualified == null || !qualified.matches()) {
+            return new RenderedType(null, typeName);
+        }
+        String name = qualified.group(2);
+        return new RenderedType(unquote(qualified.group(1)), name.startsWith("\"") && name.endsWith("\"")
+                ? unquote(name) : name);
+    }
+
+    private static final Pattern VECTOR_TYPE = Pattern.compile("(?i)^vector\\((\\d+)\\)$");
+
+    /** The dimension in a format_type rendering of a pgvector column, qualified or not, or null. */
+    static Integer vectorDimension(String formatted) {
+        if (formatted == null) {
+            return null;
+        }
+        Matcher vector = VECTOR_TYPE.matcher(splitRenderedType(formatted).name());
+        return vector.matches() ? Integer.valueOf(vector.group(1)) : null;
+    }
+
+    private static String unquote(String part) {
+        return part.startsWith("\"") ? part.substring(1, part.length() - 1).replace("\"\"", "\"") : part;
+    }
 
     private static String removeOutsideQuotes(Pattern pattern, String text) {
         Matcher matcher = pattern.matcher(text);
@@ -94,7 +147,7 @@ public final class ColumnDefinitionParser {
         if (definition.contains(";") || definition.contains("--") || definition.contains("/*")) {
             throw new IllegalArgumentException("column definition contains SQL statement or comment syntax");
         }
-        String rest = definition.trim();
+        String rest = TYPE_QUALIFIER.matcher(definition.trim()).replaceFirst("");
         rest = removeOutsideQuotes(AUTO_INCREMENT, rest);
         rest = removeOutsideQuotes(IDENTITY, rest);
         Matcher onUpdateClause = ON_UPDATE_CLAUSE.matcher(rest);
@@ -395,8 +448,7 @@ public final class ColumnDefinitionParser {
         if (defaultExpr == null || defaultExpr.isEmpty()) {
             return -1;
         }
-        Matcher trailing = Pattern.compile("\\s+NOT\\s+NULL\\s*$", Pattern.CASE_INSENSITIVE)
-                .matcher(defaultExpr);
+        Matcher trailing = TRAILING_NOT_NULL.matcher(defaultExpr);
         if (!trailing.find()) {
             return -1;
         }

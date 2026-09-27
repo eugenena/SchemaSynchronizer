@@ -1,6 +1,6 @@
 # Roadmap
 
-Planned work for releases after 1.3.0. Items are tracked as GitHub issues; this page
+Planned work for releases after 2.0.0. Items are tracked as GitHub issues; this page
 summarizes them and their intended order. Nothing here is a commitment to a date.
 
 ## Change-set support for more object types

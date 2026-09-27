@@ -15,7 +15,6 @@ import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
-import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.*;
@@ -67,7 +66,22 @@ public class SchemaSnapshotWriter {
             "spt_monitor",
             "spt_values");
 
-    public static void main(String[] args) throws Exception {
+    /**
+     * Command-line entry point; see the class documentation for the arguments.
+     *
+     * @throws SchemaDefinitionException for bad arguments or a schema that cannot be declared
+     * @throws SchemaDatabaseException when a catalog read fails
+     * @throws SchemaSynchronizationException when the output cannot be written
+     */
+    public static void main(String[] args) {
+        try {
+            run(args);
+        } catch (Exception failure) {
+            throw SchemaExceptions.translate(failure);
+        }
+    }
+
+    private static void run(String[] args) throws Exception {
         if (args.length > 0 && "--restore-json".equals(args[0])) {
             Path outputPath = Paths.get(args.length > 1
                     ? args[1]
@@ -90,7 +104,7 @@ public class SchemaSnapshotWriter {
         Path outputPath = Paths.get(args[4]);
 
         log.info("[SchemaSnapshotWriter] Connecting to source database");
-        try (Connection conn = DriverManager.getConnection(url, user, password)) {
+        try (Connection conn = CliCredentials.connect(url, user, password)) {
             DatabaseDialect dialect = DatabaseDialect.detect(conn.getMetaData());
             log.info("[SchemaSnapshotWriter] Detected {} {}", dialect.id(),
                     conn.getMetaData().getDatabaseProductVersion());
@@ -103,22 +117,38 @@ public class SchemaSnapshotWriter {
     }
 
     /**
-     * Programmatic serialize path for tests and library callers (no argv password).
+     * Programmatic serialize path for tests and library callers (no argv password). Reads every
+     * table of {@code schema} over {@code conn} and writes the definition to {@code outputPath},
+     * keeping an existing file's {@code changes}. Only reads the catalog; the connection's state is
+     * not changed and it is not closed.
+     *
+     * @throws SchemaDefinitionException when an argument is invalid or a live name cannot be declared
+     *         (not a plain identifier, a case-sensitive PostgreSQL/Oracle spelling, or two names
+     *         that differ only in letter case)
+     * @throws SchemaDatabaseException when a catalog read fails
+     * @throws SchemaSynchronizationException when the output cannot be written
      */
-    public static void writeSnapshot(Connection conn, String schema, Path outputPath) throws Exception {
+    public static void writeSnapshot(Connection conn, String schema, Path outputPath) {
         if (conn == null) {
-            throw new IllegalArgumentException("connection is required");
+            throw new SchemaDefinitionException("connection is required");
         }
-        String scoped = SqlIdentifiers.requireIdentifierPreservingCase(
-                schema, "schema", SqlIdentifiers.EXTENDED_MAX_LENGTH);
-        DatabaseDialect dialect = DatabaseDialect.detect(conn.getMetaData());
-        Map<String, Object> tables = buildSnapshot(conn.getMetaData(), conn, namespace(scoped, dialect), dialect);
-        writeJson(tables, outputPath, dialect);
+        if (outputPath == null) {
+            throw new SchemaDefinitionException("output path is required");
+        }
+        try {
+            String scoped = SqlIdentifiers.requireIdentifierPreservingCase(
+                    schema, "schema", SqlIdentifiers.EXTENDED_MAX_LENGTH);
+            DatabaseDialect dialect = DatabaseDialect.detect(conn.getMetaData());
+            Map<String, Object> tables = buildSnapshot(conn.getMetaData(), conn, namespace(scoped, dialect), dialect);
+            writeJson(tables, outputPath, dialect);
+        } catch (Exception failure) {
+            throw SchemaExceptions.translate(failure);
+        }
     }
 
-    /** MySQL/MariaDB database names are case-sensitive on most platforms; other namespaces fold to lower case. */
+    /** The catalog spelling of the namespace (see {@link SqlIdentifiers#storedNamespace}). */
     private static String namespace(String schema, DatabaseDialect dialect) {
-        return dialect.usesCatalogNamespace() ? schema : schema.toLowerCase(Locale.ROOT);
+        return SqlIdentifiers.storedNamespace(dialect, schema);
     }
 
     private static Map<String, Object> buildSnapshot(DatabaseMetaData meta, Connection conn, String schema,
@@ -136,34 +166,46 @@ public class SchemaSnapshotWriter {
             }
         }
         String schemaPattern = dialect.metadataSchemaPattern(schema);
-
+        SchemaSynchronizer.NameRules rules = SchemaSynchronizer.NameRules.read(conn, dialect);
+        Map<String, String> liveTableByDeclared = new HashMap<>();
 
         try (ResultSet rs = meta.getTables(catalog, schemaPattern, "%", new String[]{"TABLE"})) {
             while (rs.next()) {
                 if (!DatabaseDialect.isRequestedObject(rs, schemaPattern, null)) {
                     continue;
                 }
-                String tableName = rs.getString("TABLE_NAME").toLowerCase(Locale.ROOT);
-                if (EXCLUDE.contains(tableName) || SchemaSynchronizer.isIgnorableSchemaTable(tableName)) {
+                String metadataTable = rs.getString("TABLE_NAME");
+                String lowerTable = metadataTable.toLowerCase(Locale.ROOT);
+                if (EXCLUDE.contains(lowerTable) || SchemaSynchronizer.isIgnorableSchemaTable(lowerTable)) {
                     continue;
                 }
-                String metadataTable = dialect.metadataObjectName(tableName);
+                String tableName = declaredNameOf(dialect, metadataTable, "table", rules.tablesCaseSensitive());
+                if (!liveTableByDeclared.containsKey(tableName)) {
+                    liveTableByDeclared.put(tableName, metadataTable);
+                } else {
+                    throw caseCollision(dialect, "tables", liveTableByDeclared.get(tableName), metadataTable, tableName);
+                }
 
                 List<Map<String, String>> columns = new ArrayList<>();
-                List<String> pkCols = new ArrayList<>();
+                SortedMap<Short, String> pkBySequence = new TreeMap<>();
                 List<Map<String, Object>> pendingCols = new ArrayList<>();
+                Map<String, String> liveColumnByDeclared = new HashMap<>();
                 Set<String> generatedDefaults = dialect == DatabaseDialect.MYSQL
-                        ? mysqlGeneratedDefaultColumns(conn, catalog, tableName) : Set.of();
+                        ? mysqlGeneratedDefaultColumns(conn, catalog, metadataTable) : Set.of();
                 Map<String, Integer> datetimePrecisions = dialect.isMySqlFamily()
-                        ? mysqlDatetimePrecisions(conn, catalog, tableName) : Map.of();
-                Map<String, String> dataTypes = dialect.isMySqlFamily() ? mysqlDataTypes(conn, catalog, tableName) : Map.of();
-                Map<String, String> onUpdates = dialect.isMySqlFamily() ? mysqlOnUpdate(conn, catalog, tableName) : Map.of();
+                        ? mysqlDatetimePrecisions(conn, catalog, metadataTable) : Map.of();
+                Map<String, String> dataTypes = dialect.isMySqlFamily()
+                        ? mysqlDataTypes(conn, catalog, metadataTable) : Map.of();
+                Map<String, String> onUpdates = dialect.isMySqlFamily()
+                        ? mysqlOnUpdate(conn, catalog, metadataTable) : Map.of();
                 Map<String, String> mariaDbDefaults = dialect == DatabaseDialect.MARIADB
-                        ? mariaDbColumnDefaults(conn, catalog, tableName) : Map.of();
+                        ? mariaDbColumnDefaults(conn, catalog, metadataTable) : Map.of();
                 Map<String, String> binaryDefaults = dialect.isMySqlFamily()
-                        ? mysqlBinaryDefaults(conn, catalog, tableName, dialect == DatabaseDialect.MARIADB) : Map.of();
+                        ? mysqlBinaryDefaults(conn, catalog, metadataTable, dialect == DatabaseDialect.MARIADB)
+                        : Map.of();
                 Map<String, String[]> columnClauses = dialect.isMySqlFamily()
-                        ? mysqlColumnClauses(conn, catalog, tableName, dialect == DatabaseDialect.MARIADB) : Map.of();
+                        ? mysqlColumnClauses(conn, catalog, metadataTable, dialect == DatabaseDialect.MARIADB)
+                        : Map.of();
 
                 try (ResultSet cols = meta.getColumns(catalog, schemaPattern, metadataTable, "%")) {
                     while (cols.next()) {
@@ -172,11 +214,22 @@ public class SchemaSnapshotWriter {
                         if (!DatabaseDialect.isRequestedObject(cols, schemaPattern, metadataTable)) {
                             continue;
                         }
-                        String colName  = cols.getString("COLUMN_NAME").toLowerCase(Locale.ROOT);
+                        String liveColumn = cols.getString("COLUMN_NAME");
+                        String colName = declaredNameOf(dialect, liveColumn, "column of table " + tableName,
+                                rules.columnsCaseSensitive());
+                        String previousColumn = liveColumnByDeclared.putIfAbsent(colName, liveColumn);
+                        if (previousColumn != null) {
+                            throw caseCollision(dialect, "columns of table " + tableName, previousColumn,
+                                    liveColumn, colName);
+                        }
                         if (mariaDbDefaults.containsKey(colName)) {
                             colDefault = mariaDbDefaults.get(colName);
                         }
-                        String typeName = cols.getString("TYPE_NAME").toUpperCase(Locale.ROOT);
+                        String typeName = cols.getString("TYPE_NAME");
+                        if (dialect == DatabaseDialect.POSTGRESQL) {
+                            typeName = ColumnDefinitionParser.splitRenderedType(typeName).name();
+                        }
+                        typeName = typeName.toUpperCase(Locale.ROOT);
                         if (dialect.isMySqlFamily() && !typeName.startsWith("TINYINT")) {
                             String stored = mysqlTypeName(typeName, dataTypes.get(colName));
                             typeName = "TINYINT".equals(stored) ? "BOOLEAN" : stored;
@@ -228,7 +281,7 @@ public class SchemaSnapshotWriter {
                         }
 
                         if (dialect == DatabaseDialect.POSTGRESQL && "VECTOR".equals(typeName)) {
-                            size = readVectorDimension(conn, schema, tableName, colName);
+                            size = readVectorDimension(conn, schema, metadataTable, liveColumn);
                         }
 
                         Map<String, Object> pending = new LinkedHashMap<>();
@@ -248,10 +301,16 @@ public class SchemaSnapshotWriter {
                         if (!DatabaseDialect.isRequestedObject(pk, schemaPattern, metadataTable)) {
                             continue;
                         }
-                        pkCols.add(pk.getString("COLUMN_NAME").toLowerCase(Locale.ROOT));
+                        // getPrimaryKeys orders rows by COLUMN_NAME; KEY_SEQ is the key order.
+                        pkBySequence.put(pk.getShort("KEY_SEQ"), declaredNameOf(dialect,
+                                pk.getString("COLUMN_NAME"), "primary key column of table " + tableName,
+                                rules.columnsCaseSensitive()));
                     }
                 }
+                List<String> pkCols = new ArrayList<>(pkBySequence.values());
 
+                Map<String, String> typeSchemas = dialect == DatabaseDialect.POSTGRESQL
+                        ? postgresForeignTypeSchemas(conn, schema, metadataTable) : Map.of();
                 List<Map<String, String>> rawColumns = new ArrayList<>();
                 for (Map<String, Object> pending : pendingCols) {
                     String colName = (String) pending.get("name");
@@ -279,13 +338,28 @@ public class SchemaSnapshotWriter {
                         String type = columnType(typeName, size, scale, dialect);
                         rawType = type + clauses[0] + rawType.substring(type.length()) + clauses[1];
                     }
+                    String liveColumn = liveColumnByDeclared.get(colName);
+                    if (typeSchemas.containsKey(liveColumn)) {
+                        String qualifier = SqlIdentifiers.quoteExact(dialect, typeSchemas.get(liveColumn)) + ".";
+                        colDef = qualifier + colDef;
+                        col.put("definition", colDef);
+                        rawType = qualifier + rawType;
+                    }
                     Map<String, String> rawCol = new LinkedHashMap<>();
                     rawCol.put("name", colName);
                     rawCol.put("type", rawType);
                     rawColumns.add(rawCol);
                 }
 
-                List<String> indexes = readIndexes(meta, conn, schema, tableName, dialect);
+                List<String> indexes = readIndexes(meta, conn, schema, metadataTable, dialect, rules);
+                Set<String> indexNames = new HashSet<>();
+                for (String index : indexes) {
+                    String indexName = IndexDefinition.parse(index, dialect).name();
+                    if (!indexNames.add(indexName)) {
+                        throw new IllegalStateException("Cannot snapshot table " + tableName + ": two indexes "
+                                + "differ only in letter case and would both be declared as " + indexName);
+                    }
+                }
                 String createSql = buildCreateSql(tableName, rawColumns, pkCols, dialect);
                 if (dialect == DatabaseDialect.POSTGRESQL) {
                     createSql = PkIdentity.restoreCreateSql(createSql);
@@ -307,19 +381,53 @@ public class SchemaSnapshotWriter {
         return tables;
     }
 
+    private static IllegalStateException caseCollision(DatabaseDialect dialect, String kind, String first,
+                                                       String second, String declared) {
+        return new IllegalStateException("Cannot snapshot " + kind + " " + SqlIdentifiers.quoteExact(dialect, first)
+                + " and " + SqlIdentifiers.quoteExact(dialect, second)
+                + ": they differ only in letter case and would both be declared as " + declared);
+    }
+
+    /**
+     * Columns whose type lives outside pg_catalog and the snapshot schema (extension types such as
+     * pgvector installed in {@code public}), with the type's schema. Synchronization resolves types
+     * with search_path set to the target schema only, so a snapshot names these schema-qualified.
+     */
+    private static Map<String, String> postgresForeignTypeSchemas(Connection conn, String schema, String tableName)
+            throws SQLException {
+        String sql = "SELECT a.attname, n.nspname FROM pg_attribute a JOIN pg_type t ON t.oid = a.atttypid "
+                + "JOIN pg_namespace n ON n.oid = t.typnamespace "
+                + "WHERE a.attrelid = ?::regclass AND a.attnum > 0 AND NOT a.attisdropped "
+                + "AND n.nspname <> 'pg_catalog' AND n.nspname <> ?";
+        Map<String, String> schemas = new HashMap<>();
+        try (var statement = conn.prepareStatement(sql)) {
+            statement.setString(1, SqlIdentifiers.quoteExact(DatabaseDialect.POSTGRESQL, schema) + "."
+                    + SqlIdentifiers.quoteExact(DatabaseDialect.POSTGRESQL, tableName));
+            statement.setString(2, schema);
+            try (var rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    schemas.put(rows.getString(1), rows.getString(2));
+                }
+            }
+        }
+        return schemas;
+    }
+
+    /** {@code tableName} and {@code colName} are exact catalog spellings. */
     private static int readVectorDimension(Connection conn, String schema, String tableName, String colName)
             throws Exception {
         String sql = "SELECT format_type(a.atttypid, a.atttypmod) AS fmt " +
                 "FROM pg_attribute a JOIN pg_type t ON a.atttypid = t.oid " +
                 "WHERE t.typname = 'vector' AND a.attrelid = ?::regclass AND a.attname = ? AND a.attnum > 0";
         try (var stmt = conn.prepareStatement(sql)) {
-            stmt.setString(1, schema + "." + tableName);
+            stmt.setString(1, SqlIdentifiers.quoteExact(DatabaseDialect.POSTGRESQL, schema) + "."
+                    + SqlIdentifiers.quoteExact(DatabaseDialect.POSTGRESQL, tableName));
             stmt.setString(2, colName);
             try (var rs = stmt.executeQuery()) {
                 if (rs.next()) {
-                    String fmt = rs.getString("fmt");
-                    if (fmt != null && fmt.startsWith("vector(")) {
-                        return Integer.parseInt(fmt.substring(7, fmt.length() - 1));
+                    Integer dimension = ColumnDefinitionParser.vectorDimension(rs.getString("fmt"));
+                    if (dimension != null) {
+                        return dimension;
                     }
                 }
             }
@@ -328,16 +436,80 @@ public class SchemaSnapshotWriter {
                 + schema + "." + tableName + "." + colName);
     }
 
-    private static List<String> readIndexes(DatabaseMetaData meta, Connection conn, String schema, String tableName,
-                                            DatabaseDialect dialect) throws Exception {
+    /**
+     * How a catalog reader names objects in the CREATE INDEX it renders. A snapshot writes declared
+     * names (see {@link #declaredNameOf}), quoted, rejecting spellings the server's {@code rules} make
+     * impossible to declare. A live reading keeps the exact catalog spelling of the index and table; a
+     * column is written in its folded form when the backend compares column names case-insensitively
+     * or the stored spelling is already the folded one, so it compares equal to the same column in a
+     * declared index key.
+     */
+    record IndexNaming(boolean snapshot, SchemaSynchronizer.NameRules rules) {
+        static IndexNaming snapshot(SchemaSynchronizer.NameRules rules) {
+            return new IndexNaming(true, rules);
+        }
+
+        static IndexNaming live(SchemaSynchronizer.NameRules rules) {
+            return new IndexNaming(false, rules);
+        }
+
+        String table(DatabaseDialect dialect, String liveName) {
+            return snapshot
+                    ? SqlIdentifiers.quote(dialect, declaredNameOf(dialect, liveName, "table", rules.tablesCaseSensitive()))
+                    : SqlIdentifiers.quoteExact(dialect, liveName);
+        }
+
+        String index(DatabaseDialect dialect, String liveName) {
+            return snapshot
+                    ? SqlIdentifiers.quote(dialect, declaredNameOf(dialect, liveName, "index", rules.indexesCaseSensitive()))
+                    : SqlIdentifiers.quoteExact(dialect, liveName);
+        }
+
+        String column(DatabaseDialect dialect, String liveName) {
+            if (snapshot) {
+                return SqlIdentifiers.quote(dialect,
+                        declaredNameOf(dialect, liveName, "index column", rules.columnsCaseSensitive()));
+            }
+            boolean foldable = SqlIdentifiers.isIdentifier(liveName) && (!rules.columnsCaseSensitive()
+                    || liveName.equals(SqlIdentifiers.storedForm(dialect, liveName)));
+            return foldable ? SqlIdentifiers.quote(dialect, liveName) : SqlIdentifiers.quoteExact(dialect, liveName);
+        }
+    }
+
+    /**
+     * The declared (lower-case) name a snapshot writes for a live object. The name must be a plain
+     * identifier, and where the server compares this kind of name case-sensitively
+     * ({@code caseSensitive}: always on PostgreSQL and Oracle; MySQL/MariaDB tables with
+     * {@code lower_case_table_names=0}; SQL Server case-sensitive collations) its stored spelling must be
+     * the one a declared name produces, since only that spelling round-trips through a declaration.
+     */
+    static String declaredNameOf(DatabaseDialect dialect, String liveName, String kind, boolean caseSensitive) {
+        if (liveName == null || !SqlIdentifiers.isIdentifier(liveName)) {
+            throw new IllegalStateException("Cannot snapshot " + kind + " "
+                    + (liveName == null ? "null" : SqlIdentifiers.quoteExact(dialect, liveName))
+                    + ": only names matching [A-Za-z_][A-Za-z0-9_]* can be declared");
+        }
+        if (caseSensitive && !liveName.equals(SqlIdentifiers.storedForm(dialect, liveName))) {
+            throw new IllegalStateException("Cannot snapshot " + kind + " "
+                    + SqlIdentifiers.quoteExact(dialect, liveName) + ": this " + dialect.id()
+                    + " database compares " + kind.replaceFirst(" of table .*$", "")
+                    + " names case-sensitively and a declared name is always "
+                    + SqlIdentifiers.quote(dialect, liveName) + ", so this spelling cannot be declared; rename it");
+        }
+        return liveName.toLowerCase(Locale.ROOT);
+    }
+
+    private static List<String> readIndexes(DatabaseMetaData meta, Connection conn, String schema, String liveTable,
+                                            DatabaseDialect dialect, SchemaSynchronizer.NameRules rules)
+            throws Exception {
         if (dialect == DatabaseDialect.POSTGRESQL) {
-            return readPostgresIndexes(conn, schema, tableName);
+            return readPostgresIndexes(conn, schema, liveTable);
         }
         if (dialect.isMySqlFamily()) {
-            return readMySqlFamilyIndexes(conn, schema, tableName, dialect);
+            return readMySqlFamilyIndexes(conn, schema, liveTable, dialect, IndexNaming.snapshot(rules));
         }
         return readJdbcIndexes(meta, dialect, dialect.metadataCatalog(conn, schema),
-                dialect.metadataSchemaPattern(schema), tableName);
+                dialect.metadataSchemaPattern(schema), liveTable, IndexNaming.snapshot(rules));
     }
 
     private static List<String> readPostgresIndexes(Connection conn, String schema, String tableName) throws Exception {
@@ -376,49 +548,47 @@ public class SchemaSnapshotWriter {
         return indexes;
     }
 
+    /**
+     * Plain column indexes of {@code liveTable} (its exact catalog spelling) from
+     * {@link DatabaseMetaData#getIndexInfo}, skipping the primary key, UNIQUE-constraint indexes,
+     * and indexes a column list cannot express. Names are rendered per {@code naming}.
+     */
     static List<String> readJdbcIndexes(DatabaseMetaData meta, DatabaseDialect dialect, String catalog,
-                                        String schemaPattern, String tableName) throws SQLException {
-        String metadataTable = dialect.metadataObjectName(tableName);
+                                        String schemaPattern, String liveTable, IndexNaming naming)
+            throws SQLException {
         Set<String> skipIndexes = new HashSet<>();
-        try (ResultSet rows = meta.getPrimaryKeys(catalog, schemaPattern, metadataTable)) {
+        try (ResultSet rows = meta.getPrimaryKeys(catalog, schemaPattern, liveTable)) {
             while (rows.next()) {
-                if (!DatabaseDialect.isRequestedObject(rows, schemaPattern, metadataTable)) {
+                if (!DatabaseDialect.isRequestedObject(rows, schemaPattern, liveTable)) {
                     continue;
                 }
                 String pkName = rows.getString("PK_NAME");
                 if (pkName != null && !pkName.isBlank()) {
-                    skipIndexes.add(pkName.toLowerCase(Locale.ROOT));
+                    skipIndexes.add(pkName);
                 }
             }
         }
         skipIndexes.addAll(uniqueConstraintIndexNames(meta.getConnection(), dialect, catalog, schemaPattern,
-                metadataTable));
-        skipIndexes.addAll(complexIndexNames(meta.getConnection(), dialect, catalog, schemaPattern,
-                metadataTable));
+                liveTable));
+        skipIndexes.addAll(complexIndexNames(meta.getConnection(), dialect, catalog, schemaPattern, liveTable));
         record IndexParts(boolean unique, SortedMap<Short, String> columns) {}
         Map<String, IndexParts> byName = new TreeMap<>();
         // approximate=true: ojdbc otherwise runs ANALYZE TABLE (needs privileges and rewrites optimizer stats).
-        try (ResultSet rows = meta.getIndexInfo(catalog, schemaPattern, metadataTable, false, true)) {
+        try (ResultSet rows = meta.getIndexInfo(catalog, schemaPattern, liveTable, false, true)) {
             while (rows.next()) {
                 String name = rows.getString("INDEX_NAME");
                 short type = rows.getShort("TYPE");
-                if (name == null || type == DatabaseMetaData.tableIndexStatistic) {
-                    continue;
-                }
-                if (skipIndexes.contains(name.toLowerCase(Locale.ROOT))) {
+                if (name == null || type == DatabaseMetaData.tableIndexStatistic || skipIndexes.contains(name)) {
                     continue;
                 }
                 String column = rows.getString("COLUMN_NAME");
                 if (column == null) {
                     continue;
                 }
-                int max = dialect.maxIdentifierLength();
-                name = SqlIdentifiers.requireIdentifier(name.toLowerCase(Locale.ROOT), "index", max);
-                column = SqlIdentifiers.requireIdentifier(column.toLowerCase(Locale.ROOT), "index column", max);
                 boolean unique = !rows.getBoolean("NON_UNIQUE");
                 short position = rows.getShort("ORDINAL_POSITION");
                 String direction = rows.getString("ASC_OR_DESC");
-                String columnSql = column + ("D".equalsIgnoreCase(direction) ? " DESC" : "");
+                String columnSql = naming.column(dialect, column) + ("D".equalsIgnoreCase(direction) ? " DESC" : "");
                 IndexParts parts = byName.computeIfAbsent(name, ignored -> new IndexParts(unique, new TreeMap<>()));
                 if (parts.unique() != unique) {
                     throw new SQLException(dialect.id() + " returned inconsistent uniqueness for index: " + name);
@@ -427,13 +597,13 @@ public class SchemaSnapshotWriter {
             }
         }
         List<String> indexes = new ArrayList<>();
-        String canonicalTable = tableName.toLowerCase(Locale.ROOT);
+        String tableSql = naming.table(dialect, liveTable);
         byName.forEach((name, parts) -> {
             if (parts.columns().isEmpty()) {
                 return;
             }
             indexes.add("CREATE " + (parts.unique() ? "UNIQUE " : "")
-                    + "INDEX " + name + " ON " + canonicalTable + " ("
+                    + "INDEX " + naming.index(dialect, name) + " ON " + tableSql + " ("
                     + String.join(", ", parts.columns().values()) + ")");
         });
         return indexes;
@@ -442,7 +612,8 @@ public class SchemaSnapshotWriter {
     /**
      * Index names that back UNIQUE constraints (not free-standing CREATE UNIQUE INDEX).
      * Excluding them avoids false "drop index" drift when the constraint is managed via CREATE TABLE
-     * or change sets.
+     * or change sets. {@code tableName} and {@code schemaPattern} are exact catalog spellings, and the
+     * returned names are exact too.
      */
     static Set<String> uniqueConstraintIndexNames(Connection conn, DatabaseDialect dialect, String catalog,
                                                   String schemaPattern, String tableName) throws SQLException {
@@ -462,7 +633,7 @@ public class SchemaSnapshotWriter {
                     while (rows.next()) {
                         String name = rows.getString(1);
                         if (name != null) {
-                            names.add(name.toLowerCase(Locale.ROOT));
+                            names.add(name);
                         }
                     }
                 }
@@ -474,16 +645,14 @@ public class SchemaSnapshotWriter {
                 + "WHERE ((constraint_type = 'U') OR (constraint_type = 'P' AND index_name IS NOT NULL)) "
                 + "AND table_name = ? AND owner = ?";
         try (var statement = conn.prepareStatement(sql)) {
-            statement.setString(1, tableName.toUpperCase(Locale.ROOT));
-            statement.setString(2, schemaPattern == null
-                    ? tableName.toUpperCase(Locale.ROOT)
-                    : schemaPattern.toUpperCase(Locale.ROOT));
+            statement.setString(1, tableName);
+            statement.setString(2, schemaPattern == null ? tableName : schemaPattern);
             try (ResultSet rows = statement.executeQuery()) {
                 while (rows.next()) {
                     for (int column = 1; column <= 2; column++) {
                         String name = rows.getString(column);
                         if (name != null) {
-                            names.add(name.toLowerCase(Locale.ROOT));
+                            names.add(name);
                         }
                     }
                 }
@@ -516,17 +685,16 @@ public class SchemaSnapshotWriter {
                         + "WHERE table_name = ? AND table_owner = ? AND index_type <> 'NORMAL'";
         String schema = dialect == DatabaseDialect.SQLSERVER
                 ? (schemaPattern == null ? "dbo" : schemaPattern)
-                : (schemaPattern == null ? tableName : schemaPattern).toUpperCase(Locale.ROOT);
-        String table = dialect == DatabaseDialect.ORACLE ? tableName.toUpperCase(Locale.ROOT) : tableName;
+                : (schemaPattern == null ? tableName : schemaPattern);
         Set<String> names = new HashSet<>();
         try (var statement = conn.prepareStatement(sql)) {
-            statement.setString(1, table);
+            statement.setString(1, tableName);
             statement.setString(2, schema);
             try (ResultSet rows = statement.executeQuery()) {
                 while (rows.next()) {
                     String name = rows.getString(1);
                     if (name != null) {
-                        names.add(name.toLowerCase(Locale.ROOT));
+                        names.add(name);
                     }
                 }
             }
@@ -785,17 +953,31 @@ public class SchemaSnapshotWriter {
             statement.setString(2, tableName);
             try (ResultSet rows = statement.executeQuery()) {
                 while (rows.next()) {
-                    String columnDefault = rows.getString(2);
-                    String extra = rows.getString(3) == null ? "" : rows.getString(3);
-                    boolean literal = mariaDb
-                            ? columnDefault.startsWith("'") || columnDefault.matches("(?i)x'[0-9a-f]*'")
-                            : !extra.toUpperCase(Locale.ROOT).contains("DEFAULT_GENERATED");
-                    if (literal) {
+                    if (isLiteralBinaryDefault(rows.getString(2), rows.getString(3), mariaDb)) {
                         literalColumns.add(rows.getString(1));
                     }
                 }
             }
         }
+        Map<String, String> defaults = new HashMap<>();
+        binaryDefaultsFromCreateTable(conn, schema, tableName, literalColumns)
+                .forEach((column, value) -> defaults.put(column.toLowerCase(Locale.ROOT), value));
+        return defaults;
+    }
+
+    /** Whether a BINARY/VARBINARY COLUMN_DEFAULT is a literal (not an expression default). */
+    static boolean isLiteralBinaryDefault(String columnDefault, String extra, boolean mariaDb) {
+        if (columnDefault == null) {
+            return false;
+        }
+        return mariaDb
+                ? columnDefault.startsWith("'") || columnDefault.matches("(?i)x'[0-9a-f]*'")
+                : !(extra == null ? "" : extra).toUpperCase(Locale.ROOT).contains("DEFAULT_GENERATED");
+    }
+
+    /** The exact defaults of {@code literalColumns}, keyed by the names as given, from SHOW CREATE TABLE. */
+    static Map<String, String> binaryDefaultsFromCreateTable(Connection conn, String schema, String tableName,
+                                                             List<String> literalColumns) throws SQLException {
         Map<String, String> defaults = new HashMap<>();
         if (literalColumns.isEmpty()) {
             return defaults;
@@ -808,7 +990,7 @@ public class SchemaSnapshotWriter {
         }
         for (String column : literalColumns) {
             String exact = binaryDefaultInCreateTable(createTable, column);
-            defaults.put(column.toLowerCase(Locale.ROOT), exact == null ? UNREADABLE_BINARY_DEFAULT : exact);
+            defaults.put(column, exact == null ? UNREADABLE_BINARY_DEFAULT : exact);
         }
         return defaults;
     }
@@ -816,27 +998,41 @@ public class SchemaSnapshotWriter {
     /**
      * SHOW CREATE TABLE with character_set_results=binary, the one server rendering that keeps
      * binary default bytes exactly on MySQL 8 and every MariaDB version; the session setting is
-     * restored afterwards.
+     * restored afterwards. A restore failure is suppressed onto the primary failure, or thrown
+     * when the read itself succeeded: the session would otherwise keep returning binary results.
      */
-    private static byte[] mysqlCreateTableBytes(Connection conn, String schema, String tableName)
+    static byte[] mysqlCreateTableBytes(Connection conn, String schema, String tableName)
             throws SQLException {
         String saved;
         try (var statement = conn.createStatement();
              ResultSet rows = statement.executeQuery("SELECT @@SESSION.character_set_results")) {
-            rows.next();
+            if (!rows.next()) {
+                throw new SQLException("SELECT @@SESSION.character_set_results returned no row");
+            }
             saved = rows.getString(1);
         }
         try (var statement = conn.createStatement()) {
             statement.execute("SET SESSION character_set_results = binary");
+            Throwable primary = null;
             try (ResultSet rows = statement.executeQuery("SHOW CREATE TABLE " + backtickQuoted(schema) + "."
                     + backtickQuoted(tableName))) {
                 if (!rows.next()) {
                     throw new SQLException("SHOW CREATE TABLE returned no row for " + tableName);
                 }
                 return requireBaseTable(rows.getBytes(2), tableName);
+            } catch (SQLException | RuntimeException failure) {
+                primary = failure;
+                throw failure;
             } finally {
-                statement.execute("SET SESSION character_set_results = "
-                        + (saved == null ? "NULL" : "'" + saved.replace("'", "''") + "'"));
+                try {
+                    statement.execute("SET SESSION character_set_results = "
+                            + (saved == null ? "NULL" : "'" + saved.replace("'", "''") + "'"));
+                } catch (SQLException | RuntimeException restoreFailure) {
+                    if (primary == null) {
+                        throw restoreFailure;
+                    }
+                    SchemaExceptions.suppress(primary, restoreFailure);
+                }
             }
         }
     }
@@ -935,7 +1131,7 @@ public class SchemaSnapshotWriter {
         }
         Map<String, String> unreadable = new HashMap<>();
         for (String column : columns) {
-            unreadable.put(column.toLowerCase(Locale.ROOT), UNREADABLE_BINARY_DEFAULT);
+            unreadable.put(column, UNREADABLE_BINARY_DEFAULT);
         }
         return unreadable;
     }
@@ -978,14 +1174,21 @@ public class SchemaSnapshotWriter {
         return result.toString();
     }
 
+    /** A {@code pg_get_indexdef} result as a declared, schema-free, quoted CREATE INDEX IF NOT EXISTS. */
     static String portablePostgresIndex(String indexDefinition) {
         IndexDefinition parsed = IndexDefinition.parse(indexDefinition);
-        return parsed.canonicalSql().replaceFirst(
-                "^CREATE (UNIQUE )?INDEX ", "CREATE $1INDEX IF NOT EXISTS ");
+        return parsed.toSql(DatabaseDialect.POSTGRESQL, SqlIdentifiers.quote(DatabaseDialect.POSTGRESQL, parsed.table()));
     }
 
     static List<String> readMySqlFamilyIndexes(Connection conn, String schema, String tableName, DatabaseDialect dialect)
             throws SQLException {
+        return readMySqlFamilyIndexes(conn, schema, tableName, dialect,
+                IndexNaming.snapshot(new SchemaSynchronizer.NameRules(false, false, false)));
+    }
+
+    /** Column indexes of {@code tableName} (exact catalog spelling) from information_schema, named per {@code naming}. */
+    static List<String> readMySqlFamilyIndexes(Connection conn, String schema, String tableName, DatabaseDialect dialect,
+                                               IndexNaming naming) throws SQLException {
         record IndexParts(boolean unique, SortedMap<Short, String> columns) {}
         Map<String, IndexParts> byName = new TreeMap<>();
         try (var statement = conn.prepareStatement("SELECT index_name, non_unique, seq_in_index, column_name, "
@@ -1004,15 +1207,12 @@ public class SchemaSnapshotWriter {
                 if (column == null) {
                     throw new SQLException(dialect.id() + " expression index cannot be serialized safely: " + name);
                 }
-                int max = dialect.maxIdentifierLength();
-                name = SqlIdentifiers.requireIdentifier(name.toLowerCase(Locale.ROOT), "index", max);
-                column = SqlIdentifiers.requireIdentifier(column.toLowerCase(Locale.ROOT), "index column", max);
                 boolean unique = !rows.getBoolean("non_unique");
                 short position = rows.getShort("seq_in_index");
                 int prefixLength = rows.getInt("sub_part");
                 boolean hasPrefix = !rows.wasNull();
                 String direction = rows.getString("collation");
-                String columnSql = column + (hasPrefix ? "(" + prefixLength + ")" : "")
+                String columnSql = naming.column(dialect, column) + (hasPrefix ? "(" + prefixLength + ")" : "")
                         + ("D".equalsIgnoreCase(direction) ? " DESC" : "");
                 IndexParts parts = byName.computeIfAbsent(name,
                         ignored -> new IndexParts(unique, new TreeMap<>()));
@@ -1025,23 +1225,26 @@ public class SchemaSnapshotWriter {
         }
         List<String> indexes = new ArrayList<>();
         String ifNotExists = dialect == DatabaseDialect.MARIADB ? " IF NOT EXISTS" : "";
+        String tableSql = naming.table(dialect, tableName);
         byName.forEach((name, parts) -> indexes.add("CREATE " + (parts.unique() ? "UNIQUE " : "")
-                + "INDEX" + ifNotExists + " " + name.toLowerCase(Locale.ROOT) + " ON " + tableName + " ("
+                + "INDEX" + ifNotExists + " " + naming.index(dialect, name) + " ON " + tableSql + " ("
                 + String.join(", ", parts.columns().values()) + ")"));
         return indexes;
     }
 
-    private static String buildCreateSql(String tableName, List<Map<String, String>> columns, List<String> pkCols,
-                                         DatabaseDialect dialect) {
+    /** CREATE TABLE for declared names, every identifier quoted in the dialect's style. */
+    static String buildCreateSql(String tableName, List<Map<String, String>> columns, List<String> pkCols,
+                                 DatabaseDialect dialect) {
         if (columns.isEmpty()) return null;
         String cols = columns.stream()
-                .map(c -> c.get("name") + " " + c.get("type"))
+                .map(c -> SqlIdentifiers.quote(dialect, c.get("name")) + " " + c.get("type"))
                 .collect(Collectors.joining(", "));
         if (!pkCols.isEmpty()) {
-            cols += ", PRIMARY KEY (" + String.join(", ", pkCols) + ")";
+            cols += ", PRIMARY KEY (" + pkCols.stream().map(pk -> SqlIdentifiers.quote(dialect, pk))
+                    .collect(Collectors.joining(", ")) + ")";
         }
         String ifNotExists = dialect.supportsCreateTableIfNotExists() ? " IF NOT EXISTS" : "";
-        return "CREATE TABLE" + ifNotExists + " " + tableName + " (" + cols + ")";
+        return "CREATE TABLE" + ifNotExists + " " + SqlIdentifiers.quote(dialect, tableName) + " (" + cols + ")";
     }
 
     private static String buildCreateType(String typeName, int size, Integer scale, String nullable,

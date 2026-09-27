@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Locale;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
@@ -39,13 +40,6 @@ class GuardrailTokenizerContractTest {
             NonDestructiveSqlPolicy.requireSafe(sql, dialect);
             ChangeSetSchemaScope.requireScoped(sql, namespace(dialect), dialect);
         }).as("%s: %s", dialect, sql).doesNotThrowAnyException();
-    }
-
-    private static void rejected(DatabaseDialect dialect, String sql) {
-        assertThatThrownBy(() -> {
-            NonDestructiveSqlPolicy.requireSafe(sql, dialect);
-            ChangeSetSchemaScope.requireScoped(sql, namespace(dialect), dialect);
-        }).as("%s: %s", dialect, sql).isInstanceOf(IllegalArgumentException.class);
     }
 
     private static void policyRejects(DatabaseDialect dialect, String sql, String message) {
@@ -85,6 +79,9 @@ class GuardrailTokenizerContractTest {
     private static final String BODY_DDL = "must not run DDL";
     private static final String CATALOG = "system catalog";
     private static final String THREE_PART = "database.schema.object";
+    private static final String ONE_STATEMENT = "must contain exactly one statement";
+    private static final String UNTERMINATED_BODY = "unterminated routine body (missing END)";
+    private static final String UNSUPPORTED = "unsupported schema change SQL";
 
     private static final String PG_FUNCTION = "CREATE FUNCTION f() RETURNS void AS $$ BEGIN ";
     private static final String PG_FUNCTION_END = " END $$ LANGUAGE plpgsql";
@@ -295,8 +292,8 @@ class GuardrailTokenizerContractTest {
 
         @Test
         void oracle() {
-            rejected(ORACLE, "UPDATE (SELECT note FROM OTHER.items) v SET note = 'x'");
-            rejected(ORACLE, "UPDATE OTHER.items i SET note = 'x'");
+            scopeRejects(ORACLE, "UPDATE (SELECT note FROM OTHER.items) v SET note = 'x'", "targets namespace 'OTHER'");
+            scopeRejects(ORACLE, "UPDATE OTHER.items i SET note = 'x'", "targets namespace 'OTHER'");
             accepted(ORACLE, "UPDATE APP.items i SET note = 'x'");
             accepted(ORACLE, "UPDATE items i SET note = 'x' WHERE EXISTS (SELECT 1 FROM APP.item_log a)");
         }
@@ -430,7 +427,7 @@ class GuardrailTokenizerContractTest {
             policyRejects(MYSQL, trigger + "; UPDATE items SET qty = 0", "exactly one statement");
             scopeRejects(MYSQL, MYSQL_TRIGGER + "SET NEW.qty = 1; "
                     + "SET NEW.note = (SELECT note FROM otherdb.t LIMIT 1); END", "otherdb");
-            rejected(MYSQL, MYSQL_TRIGGER + "SET NEW.qty = 1;");
+            policyRejects(MYSQL, MYSQL_TRIGGER + "SET NEW.qty = 1;", UNTERMINATED_BODY);
         }
 
         @Test
@@ -438,7 +435,7 @@ class GuardrailTokenizerContractTest {
             String trigger = MYSQL_TRIGGER + "WHILE NEW.qty > 10 DO SET NEW.qty = NEW.qty - 1; END WHILE; END";
             accepted(MARIADB, trigger);
             scopeRejects(MARIADB, MYSQL_TRIGGER + "SET NEW.qty = 1; UPDATE otherdb.t SET qty = 2; END", "otherdb");
-            rejected(MARIADB, MYSQL_TRIGGER + "SET NEW.qty = 1; END; END");
+            policyRejects(MARIADB, MYSQL_TRIGGER + "SET NEW.qty = 1; END; END", ONE_STATEMENT);
         }
 
         @Test
@@ -456,8 +453,8 @@ class GuardrailTokenizerContractTest {
                     + ":NEW.qty := 1; END;";
             accepted(ORACLE, trigger);
             scopeRejects(ORACLE, ORACLE_TRIGGER + ":NEW.qty := 1; UPDATE OTHER.items SET qty = 2; END;", "OTHER");
-            rejected(ORACLE, ORACLE_TRIGGER + ":NEW.qty := 1;");
-            rejected(ORACLE, ORACLE_TRIGGER + ":NEW.qty := 1; END; END;");
+            policyRejects(ORACLE, ORACLE_TRIGGER + ":NEW.qty := 1;", UNTERMINATED_BODY);
+            policyRejects(ORACLE, ORACLE_TRIGGER + ":NEW.qty := 1; END; END;", "unbalanced END in routine body");
             accepted(ORACLE, "CREATE OR REPLACE FUNCTION f RETURN NUMBER IS BEGIN "
                     + "FOR i IN 1..3 LOOP NULL; END LOOP; RETURN 1; END;");
         }
@@ -500,8 +497,8 @@ class GuardrailTokenizerContractTest {
                     + "LANGUAGE plpgsql", DESTRUCTIVE);
             policyRejects(PG, "CREATE FUNCTION f() RETURNS void AS E'BEGIN SET \\162OLE admin; END' "
                     + "LANGUAGE plpgsql", BODY_STATEMENT);
-            rejected(PG, "UPDATE items SET note = 'a\\' , qty = (SELECT 1 FROM other.t) --'");
-            rejected(PG, "UPDATE items SET note = 'a\\'");
+            policyRejects(PG, "UPDATE items SET note = 'a\\' , qty = (SELECT 1 FROM other.t) --'", "backslash before a quote in a PostgreSQL string literal");
+            policyRejects(PG, "UPDATE items SET note = 'a\\'", "backslash before a quote in a PostgreSQL string literal");
 
             accepted(PG, "UPDATE items SET note = E'\\x44ROP TABLE items'");
             accepted(PG, "UPDATE items SET note = U&'\\0044ROP TABLE items'");
@@ -511,8 +508,8 @@ class GuardrailTokenizerContractTest {
 
         @Test
         void mysql() {
-            rejected(MYSQL, "UPDATE items SET note = 'C:\\'");
-            rejected(MYSQL, "UPDATE items SET note = 'a\\' , qty = (SELECT 1 FROM otherdb.t) -- '");
+            policyRejects(MYSQL, "UPDATE items SET note = 'C:\\'", "backslash-escaped quote in string literal is ambiguous");
+            policyRejects(MYSQL, "UPDATE items SET note = 'a\\' , qty = (SELECT 1 FROM otherdb.t) -- '", "backslash-escaped quote in string literal is ambiguous");
             accepted(MYSQL, "UPDATE items SET note = 'C:\\\\'");
             accepted(MYSQL, "UPDATE items SET note = 'DROP TABLE items; SET ROLE admin'");
             accepted(MYSQL, "UPDATE items SET note = 'it''s'");
@@ -521,7 +518,7 @@ class GuardrailTokenizerContractTest {
 
         @Test
         void mariadb() {
-            rejected(MARIADB, "UPDATE items SET note = 'a\\'b'");
+            policyRejects(MARIADB, "UPDATE items SET note = 'a\\'b'", "backslash-escaped quote in string literal is ambiguous");
             accepted(MARIADB, "UPDATE items SET note = 'a\\\\b', qty = 1");
             accepted(MARIADB, "UPDATE items SET note = 'EXEC xp_cmdshell'");
         }
@@ -530,16 +527,16 @@ class GuardrailTokenizerContractTest {
         void sqlServer() {
             accepted(MSSQL, "UPDATE items SET note = N'DROP TABLE items; EXEC xp_cmdshell ''dir'''");
             accepted(MSSQL, MSSQL_TRIGGER + "UPDATE item_log SET note = N'DENY; DROP TABLE x'; END");
-            rejected(MSSQL, "UPDATE items SET note = N'x'; DROP TABLE items");
-            rejected(MSSQL, "UPDATE items SET note = N'x''; DROP TABLE items");
+            policyRejects(MSSQL, "UPDATE items SET note = N'x'; DROP TABLE items", ONE_STATEMENT);
+            policyRejects(MSSQL, "UPDATE items SET note = N'x''; DROP TABLE items", "unterminated string literal");
         }
 
         @Test
         void oracle() {
             accepted(ORACLE, "UPDATE items SET note = q'{DROP TABLE items}'");
             accepted(ORACLE, ORACLE_TRIGGER + ":NEW.note := q'[EXECUTE IMMEDIATE 'DROP TABLE x']'; END;");
-            rejected(ORACLE, "UPDATE items SET note = q'!it's!' || (SELECT s FROM OTHER.t)");
-            rejected(ORACLE, "UPDATE items SET note = q'[open");
+            scopeRejects(ORACLE, "UPDATE items SET note = q'!it's!' || (SELECT s FROM OTHER.t)", "targets namespace 'OTHER'");
+            policyRejects(ORACLE, "UPDATE items SET note = q'[open", "unterminated q-quoted string");
         }
     }
 
@@ -935,10 +932,10 @@ class GuardrailTokenizerContractTest {
                 accepted(dialect, MYSQL_TRIGGER + "IF NEW.qty > 0 THEN SET NEW.note = 'a'; "
                         + "ELSE IF NEW.qty < 0 THEN SET NEW.note = 'b'; END IF; END IF; "
                         + "lbl: REPEAT SET NEW.qty = NEW.qty - 1; UNTIL NEW.qty <= 0 END REPEAT lbl; END");
-                rejected(dialect, MYSQL_TRIGGER
-                        + "IF NEW.qty > 0 THEN SET NEW.note = CASE WHEN 1 THEN 'a' ELSE 'b' END; END");
-                rejected(dialect, MYSQL_TRIGGER
-                        + "SET NEW.qty = CASE WHEN 1 THEN IF(1, 1, 2) ELSE 0 END; END; GRANT ALL ON *.* TO x");
+                policyRejects(dialect, MYSQL_TRIGGER
+                        + "IF NEW.qty > 0 THEN SET NEW.note = CASE WHEN 1 THEN 'a' ELSE 'b' END; END", UNTERMINATED_BODY);
+                policyRejects(dialect, MYSQL_TRIGGER
+                        + "SET NEW.qty = CASE WHEN 1 THEN IF(1, 1, 2) ELSE 0 END; END; GRANT ALL ON *.* TO x", ONE_STATEMENT);
             }
         }
 
@@ -948,8 +945,8 @@ class GuardrailTokenizerContractTest {
                     + "LOOP :NEW.note := 'x'; END LOOP; END;");
             accepted(ORACLE, ORACLE_TRIGGER + "CASE WHEN :NEW.qty > 0 THEN :NEW.note := 'a'; "
                     + "ELSE :NEW.note := 'b'; END CASE; END;");
-            rejected(ORACLE, ORACLE_TRIGGER + "FOR i IN 1 .. CASE WHEN :NEW.qty > 0 THEN :NEW.qty ELSE 1 END "
-                    + "LOOP :NEW.note := 'x'; END;");
+            policyRejects(ORACLE, ORACLE_TRIGGER + "FOR i IN 1 .. CASE WHEN :NEW.qty > 0 THEN :NEW.qty ELSE 1 END "
+                    + "LOOP :NEW.note := 'x'; END;", UNTERMINATED_BODY);
         }
 
         @Test
@@ -983,8 +980,8 @@ class GuardrailTokenizerContractTest {
 
         @Test
         void codeAfterACarriageReturnIsChecked() {
-            rejected(PG, "SELECT 1 --\r; CREATE TABLE cr_probe (x int)");
-            rejected(PG, "UPDATE items SET qty = 1 --\r; GRANT ALL ON items TO bob");
+            policyRejects(PG, "SELECT 1 --\r; CREATE TABLE cr_probe (x int)", ONE_STATEMENT);
+            policyRejects(PG, "UPDATE items SET qty = 1 --\r; GRANT ALL ON items TO bob", ONE_STATEMENT);
             policyRejects(PG, "SELECT 1 --\r, pg_read_file('/etc/passwd')", DESTRUCTIVE);
             verificationRejected(PG, "SELECT 1 --\r, pg_read_file('/etc/passwd')");
             scopeRejects(PG, "UPDATE items SET qty = 1 --\r WHERE id IN (SELECT id FROM other.t)", "other");
@@ -998,8 +995,8 @@ class GuardrailTokenizerContractTest {
 
         @Test
         void oracleCommentsContinuePastACarriageReturnSoAQuoteCannotHideTheNextLine() {
-            rejected(ORACLE, "CREATE OR REPLACE TRIGGER cr_trg BEFORE INSERT ON cr_t FOR EACH ROW BEGIN NULL; --\r'\n"
-                    + "EXECUTE IMMEDIATE chr(67)||chr(82); --'\nEND;");
+            policyRejects(ORACLE, "CREATE OR REPLACE TRIGGER cr_trg BEFORE INSERT ON cr_t FOR EACH ROW BEGIN NULL; --\r'\n"
+                    + "EXECUTE IMMEDIATE chr(67)||chr(82); --'\nEND;", DESTRUCTIVE);
             scopeRejects(ORACLE, "UPDATE items SET qty = 1 --\r'\nWHERE 0 < (SELECT count(*) FROM OTHER.t) --'",
                     "OTHER");
             verificationRejected(ORACLE, "SELECT 1 AS a --\r'\n, UTL_HTTP.REQUEST('http://x') AS b --'\nFROM dual");
@@ -1020,7 +1017,7 @@ class GuardrailTokenizerContractTest {
             for (DatabaseDialect dialect : List.of(MYSQL, MARIADB)) {
                 accepted(dialect, "UPDATE items SET qty = 1 -- note\r, GRANT ALL ON *.* TO bob");
                 accepted(dialect, "UPDATE items SET qty = 1 # note\r, GRANT ALL ON *.* TO bob");
-                rejected(dialect, "UPDATE items SET qty = 1 -- note\n; GRANT ALL ON *.* TO bob");
+                policyRejects(dialect, "UPDATE items SET qty = 1 -- note\n; GRANT ALL ON *.* TO bob", ONE_STATEMENT);
             }
         }
     }
@@ -1081,7 +1078,8 @@ class GuardrailTokenizerContractTest {
         void aLiteralBodyNeedsALanguage() {
             policyRejects(PG, "CREATE FUNCTION f() RETURNS int AS 'SELECT 1'", "must declare LANGUAGE");
             policyRejects(PG, "CREATE FUNCTION f() RETURNS int AS $$ SELECT 1 $$", "must declare LANGUAGE");
-            policyRejects(PG, "CREATE PROCEDURE p() AS $$ UPDATE items SET qty = 1 $$", "must declare LANGUAGE");
+            policyRejects(PG, "CREATE PROCEDURE p() AS $$ UPDATE items SET qty = 1 $$",
+                    "CREATE PROCEDURE is not yet supported");
             accepted(PG, "CREATE FUNCTION f() RETURNS int RETURN 1");
             accepted(PG, "CREATE FUNCTION f() RETURNS int BEGIN ATOMIC SELECT 1; END");
             accepted(PG, "CREATE FUNCTION f() RETURNS int AS $$ SELECT 1 $$ LANGUAGE sql");
@@ -1562,7 +1560,7 @@ class GuardrailTokenizerContractTest {
                     "UTL_HTTP", "UTL_TCP", "UTL_SMTP", "UTL_MAIL", "UTL_FILE", "UTL_INADDR")) {
                 policyRejects(ORACLE, ORACLE_TRIGGER + ":NEW.note := " + name + ".run('SELECT 1 FROM dual'); END;",
                         DESTRUCTIVE);
-                policyRejects(ORACLE, ORACLE_TRIGGER + ":NEW.note := sys." + name.toLowerCase()
+                policyRejects(ORACLE, ORACLE_TRIGGER + ":NEW.note := sys." + name.toLowerCase(Locale.ROOT)
                         + ".run('x'); END;", DESTRUCTIVE);
             }
             policyRejects(ORACLE, ORACLE_TRIGGER + ":NEW.note := DBMS_UTILITY.EXPAND_SQL_TEXT('x'); END;", DESTRUCTIVE);
@@ -1654,7 +1652,7 @@ class GuardrailTokenizerContractTest {
         void exportAndQueryStringFunctionsAreRejected() {
             for (String function : EXPORTS_AND_QUERY_STRINGS) {
                 for (String call : List.of(function, "pg_catalog." + function, "\"" + function + "\"",
-                        function.toUpperCase())) {
+                        function.toUpperCase(Locale.ROOT))) {
                     policyRejects(PG, "SELECT " + call + "('items', true, false, '')", DESTRUCTIVE);
                 }
                 policyRejects(PG, PG_FUNCTION + "PERFORM " + function + "('items'); " + PG_FUNCTION_END, DESTRUCTIVE);
@@ -1727,7 +1725,7 @@ class GuardrailTokenizerContractTest {
                 verificationRejected(PG, "SELECT " + function + "('items_idx') = 0");
                 verificationRejected(PG, "SELECT pg_catalog." + function + "('items_idx', 0) = 0");
                 verificationRejected(PG, "SELECT \"" + function + "\"('items_idx') = 0");
-                verificationRejected(PG, "SELECT " + function.toUpperCase() + "('items_idx') = 0");
+                verificationRejected(PG, "SELECT " + function.toUpperCase(Locale.ROOT) + "('items_idx') = 0");
                 accepted(PG, "SELECT " + function + "('items_idx')");
                 verificationAccepted(PG, "SELECT count(*) = 0 FROM items WHERE note = '" + function + "(x)'");
                 verificationAccepted(PG, "SELECT count(*) = 0 FROM items WHERE " + function + "_note IS NULL");
@@ -1824,7 +1822,7 @@ class GuardrailTokenizerContractTest {
                         "CAST('other.x' AS " + type + ")", "CAST('other.x' AS pg_catalog." + type + ")",
                         type + " 'other.x'", "pg_catalog." + type + " 'other.x'",
                         type + "('other.x')", "pg_catalog." + type + "('other.x')",
-                        "'other.x'::" + type.toUpperCase())) {
+                        "'other.x'::" + type.toUpperCase(Locale.ROOT))) {
                     scopeRejects(PG, "SELECT " + form, REJECTED);
                 }
                 accepted(PG, "SELECT 'x'::" + type);
@@ -2178,7 +2176,7 @@ class GuardrailTokenizerContractTest {
                     "CREATE INDEX i ON SYS.DUAL (dummy)",
                     "LOCK TABLE SYS.DUAL IN SHARE MODE",
                     "UPDATE items SET note = SYS.DUAL")) {
-                rejected(ORACLE, sql);
+                scopeRejects(ORACLE, sql, CATALOG + " 'SYS'");
             }
             for (String sql : List.of(
                     "SELECT 1 FROM SYS.DUAL",
@@ -2251,9 +2249,9 @@ class GuardrailTokenizerContractTest {
                     "UPDATE items SET qty = (SELECT COUNT(*) FROM TABLE(OTHER.ODCINUMBERLIST(1)))",
                     "UPDATE items SET qty = (SELECT COUNT(*) FROM TABLE(SYS.ODCINUMBERLIST.x(1)))",
                     "UPDATE items SET note = SYS.ODCINUMBERLIST.ODCIGRANULELIST(1)")) {
-                rejected(ORACLE, sql);
+                scopeRejects(ORACLE, sql, "targets namespace");
             }
-            rejected(ORACLE, "UPDATE items SET note = SYS.XMLTYPE(BFILENAME('D', 'f.xml'), 0).getStringVal()");
+            policyRejects(ORACLE, "UPDATE items SET note = SYS.XMLTYPE(BFILENAME('D', 'f.xml'), 0).getStringVal()", DESTRUCTIVE);
         }
 
         @Test
@@ -2391,24 +2389,55 @@ class GuardrailTokenizerContractTest {
         }
     }
 
-    /** Documented 1.3.0 limitation: these object types are created outside change sets (docs/ROADMAP.md). */
+    /** Documented 2.0.0 limitation: these object types are created outside change sets (docs/ROADMAP.md). */
     @Nested
     class ObjectTypesNotYetSupported {
+        private static final String NOT_YET = "is not yet supported in change sets";
 
         @Test
-        void sequencesViewsProceduresPackagesAndTypesAreRejected() {
+        void sequencesViewsProceduresPackagesAndTypesAreRejectedByObjectTypeOnEveryDialect() {
             for (DatabaseDialect dialect : List.of(PG, MYSQL, MARIADB, MSSQL, ORACLE)) {
-                rejected(dialect, "CREATE SEQUENCE items_seq");
-                rejected(dialect, "CREATE VIEW items_v AS SELECT id FROM items");
-                rejected(dialect, "CREATE PROCEDURE p() BEGIN UPDATE items SET qty = 1; END");
+                policyRejects(dialect, "CREATE SEQUENCE items_seq", "CREATE SEQUENCE " + NOT_YET);
+                policyRejects(dialect, "CREATE VIEW items_v AS SELECT id FROM items", "CREATE VIEW " + NOT_YET);
+                policyRejects(dialect, "create view items_v as select id from items", "CREATE VIEW " + NOT_YET);
+                policyRejects(dialect, "CREATE PROCEDURE p() BEGIN UPDATE items SET qty = 1; END",
+                        "CREATE PROCEDURE " + NOT_YET);
+                policyRejects(dialect, "CREATE VIEW items_v AS SELECT id FROM items", UNSUPPORTED);
             }
-            rejected(PG, "CREATE OR REPLACE VIEW items_v AS SELECT id FROM items");
-            rejected(PG, "CREATE OR REPLACE PROCEDURE p() LANGUAGE sql AS 'UPDATE items SET qty = 1'");
-            rejected(MSSQL, "CREATE OR ALTER VIEW dbo.items_v AS SELECT id FROM dbo.items");
-            rejected(MSSQL, "CREATE PROCEDURE dbo.p AS UPDATE dbo.items SET qty = 1");
-            rejected(ORACLE, "CREATE OR REPLACE PACKAGE util_pkg AS FUNCTION f RETURN NUMBER; END util_pkg;");
-            rejected(ORACLE, "CREATE OR REPLACE TYPE item_t AS OBJECT (id NUMBER)");
-            rejected(MARIADB, "CREATE SEQUENCE IF NOT EXISTS items_seq");
+            policyRejects(PG, "CREATE OR REPLACE VIEW items_v AS SELECT id FROM items", "CREATE VIEW " + NOT_YET);
+            policyRejects(PG, "CREATE MATERIALIZED VIEW items_mv AS SELECT id FROM items", "CREATE VIEW " + NOT_YET);
+            policyRejects(PG, "CREATE OR REPLACE PROCEDURE p() LANGUAGE sql AS 'UPDATE items SET qty = 1'",
+                    "CREATE PROCEDURE " + NOT_YET);
+            policyRejects(PG, "CREATE TYPE mood AS ENUM ('ok', 'sad')", "CREATE TYPE " + NOT_YET);
+            policyRejects(MSSQL, "CREATE OR ALTER VIEW dbo.items_v AS SELECT id FROM dbo.items", "CREATE VIEW " + NOT_YET);
+            policyRejects(MSSQL, "CREATE VIEW dbo.items_v WITH SCHEMABINDING AS SELECT id FROM dbo.items",
+                    "CREATE VIEW " + NOT_YET);
+            policyRejects(MSSQL, "CREATE PROCEDURE dbo.p AS UPDATE dbo.items SET qty = 1", "CREATE PROCEDURE " + NOT_YET);
+            policyRejects(MYSQL, "CREATE ALGORITHM = MERGE SQL SECURITY INVOKER VIEW items_v AS SELECT id FROM items",
+                    "CREATE VIEW " + NOT_YET);
+            policyRejects(MYSQL, "CREATE DEFINER = CURRENT_USER PROCEDURE p() BEGIN UPDATE items SET qty = 1; END",
+                    "CREATE PROCEDURE " + NOT_YET);
+            policyRejects(ORACLE, "CREATE OR REPLACE PACKAGE util_pkg AS FUNCTION f RETURN NUMBER; END util_pkg;",
+                    "CREATE PACKAGE " + NOT_YET);
+            policyRejects(ORACLE, "CREATE OR REPLACE FORCE EDITIONABLE VIEW items_v AS SELECT id FROM items",
+                    "CREATE VIEW " + NOT_YET);
+            policyRejects(ORACLE, "CREATE OR REPLACE TYPE item_t AS OBJECT (id NUMBER)", "CREATE TYPE " + NOT_YET);
+            policyRejects(MARIADB, "CREATE SEQUENCE IF NOT EXISTS items_seq", "CREATE SEQUENCE " + NOT_YET);
+        }
+
+        @Test
+        void supportedCreatesThatMentionTheseWordsAreNotMistakenForThem() {
+            for (DatabaseDialect dialect : List.of(PG, MYSQL, MARIADB, MSSQL, ORACLE)) {
+                String type = dialect == ORACLE ? "VARCHAR2(10)" : "VARCHAR(10)";
+                assertThatCode(() -> NonDestructiveSqlPolicy.requireSafe(
+                        "CREATE TABLE views (sequence " + type + ", procedure_name " + type + ")", dialect))
+                        .as("%s", dialect).doesNotThrowAnyException();
+                assertThatCode(() -> NonDestructiveSqlPolicy.requireSafe(
+                        "CREATE INDEX idx_view_type ON items (qty)", dialect))
+                        .as("%s", dialect).doesNotThrowAnyException();
+            }
+            // Multi-statement input that is not a CREATE of these types keeps the statement-count message.
+            policyRejects(MSSQL, "UPDATE items SET qty = 1 CREATE VIEW v AS SELECT 1", ONE_STATEMENT);
         }
     }
 }

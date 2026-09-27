@@ -1,1 +1,2 @@
 com.thinkaillc.schemasynchronizer.SchemaSynchronizerAutoConfiguration
+com.thinkaillc.schemasynchronizer.SchemaSynchronizerStartupCheck

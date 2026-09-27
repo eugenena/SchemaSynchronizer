@@ -10,14 +10,14 @@ body:
     id: version
     attributes:
       label: SchemaSynchronizer version
-      placeholder: 1.1.0
+      placeholder: 2.0.0
     validations:
       required: true
   - type: input
     id: environment
     attributes:
       label: Java and database versions
-      placeholder: Java 21, PostgreSQL 16.4
+      placeholder: Java 17, PostgreSQL 16.4
     validations:
       required: true
   - type: textarea

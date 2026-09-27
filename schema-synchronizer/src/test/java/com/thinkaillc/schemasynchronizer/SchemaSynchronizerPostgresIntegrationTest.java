@@ -6,7 +6,6 @@ package com.thinkaillc.schemasynchronizer;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.junit.jupiter.api.io.TempDir;
 import org.postgresql.ds.PGSimpleDataSource;
 
@@ -24,7 +23,9 @@ import java.util.concurrent.Executors;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-@EnabledIfSystemProperty(named = "schema.test.jdbc.url", matches = ".+")
+@LiveDatabase(engine = "PostgreSQL", properties = {
+        "schema.test.jdbc.url",
+        "schema.test.jdbc.user"})
 class SchemaSynchronizerPostgresIntegrationTest {
     private final List<String> cleanupSchemas = new ArrayList<>();
 
@@ -36,8 +37,30 @@ class SchemaSynchronizerPostgresIntegrationTest {
         DataSource dataSource = dataSource();
         try (Connection connection = dataSource.getConnection(); var statement = connection.createStatement()) {
             for (String schema : cleanupSchemas) {
+                LiveTestSupport.requireTestNamespace(schema, "schema");
                 statement.execute("DROP SCHEMA " + SqlIdentifiers.requireIdentifier(schema, "test schema")
                         + " CASCADE");
+            }
+        }
+    }
+
+    @Test
+    void ledgersWithDistinctLegacyIdsLockConcurrentlyAndASharedIdSerializes() throws Exception {
+        DataSource dataSource = dataSource();
+        try (Connection first = dataSource.getConnection(); Connection second = dataSource.getConnection()) {
+            first.setAutoCommit(false);
+            second.setAutoCommit(false);
+            try {
+                DialectSupport.acquireLock(first, DatabaseDialect.POSTGRESQL, "app", "history_a", 1L);
+                long started = System.nanoTime();
+                DialectSupport.acquireLock(second, DatabaseDialect.POSTGRESQL, "app", "history_b", 2L);
+                assertThat(System.nanoTime() - started).as("distinct ids do not wait")
+                        .isLessThan(java.util.concurrent.TimeUnit.SECONDS.toNanos(5));
+                assertThat(LiveTestSupport.scalar(second, "SELECT pg_try_advisory_xact_lock(1)"))
+                        .as("the 1.x key a shared id selects is held").isEqualTo("f");
+            } finally {
+                first.rollback();
+                second.rollback();
             }
         }
     }
@@ -105,7 +128,7 @@ class SchemaSynchronizerPostgresIntegrationTest {
         SchemaDefinition edited = definition("CHECK (score > 0)");
         try (Connection connection = dataSource.getConnection()) {
             assertThatThrownBy(() -> synchronizer.synchronizeWithResult(connection, edited))
-                    .isInstanceOf(IllegalStateException.class)
+                    .isInstanceOf(SchemaDefinitionException.class)
                     .hasMessageContaining("checksum mismatch");
         }
     }
@@ -134,8 +157,8 @@ class SchemaSynchronizerPostgresIntegrationTest {
 
         assertThat(definition.tables().get("accounts").indexes())
                 .containsExactly(
-                        "CREATE UNIQUE INDEX IF NOT EXISTS accounts_email_key ON accounts (email)",
-                        "CREATE INDEX IF NOT EXISTS idx_accounts_display_name ON accounts (display_name)");
+                        "CREATE UNIQUE INDEX IF NOT EXISTS \"accounts_email_key\" ON \"accounts\" (\"email\")",
+                        "CREATE INDEX IF NOT EXISTS \"idx_accounts_display_name\" ON \"accounts\" (\"display_name\")");
         try (Connection connection = dataSource.getConnection()) {
             SchemaSynchronizationResult result = synchronizer(dataSource, targetSchema, false)
                     .synchronizeWithResult(connection, definition);
@@ -186,7 +209,7 @@ class SchemaSynchronizerPostgresIntegrationTest {
             SchemaSynchronizationResult result = reportingSynchronizer(dataSource, targetSchema)
                     .synchronizeWithResult(connection, drifted);
             assertThat(result.columnsAltered()).isZero();
-            assertThat(result.pendingSql()).anyMatch(sql -> sql.contains("ALTER COLUMN created_at TYPE TIMESTAMP(6)"));
+            assertThat(result.pendingSql()).anyMatch(sql -> sql.contains("ALTER COLUMN \"created_at\" TYPE TIMESTAMP(6)"));
         }
     }
 
@@ -206,7 +229,7 @@ class SchemaSynchronizerPostgresIntegrationTest {
                 SchemaSnapshotWriter.writeSnapshot(connection, sourceSchema, definitionPath);
             }
         })
-                .isInstanceOf(IllegalStateException.class)
+                .isInstanceOf(SchemaDefinitionException.class)
                 .hasMessageContaining("EXCLUDE constraint")
                 .hasMessageContaining("ordered change set");
     }
@@ -229,7 +252,7 @@ class SchemaSynchronizerPostgresIntegrationTest {
         try (Connection connection = dataSource.getConnection()) {
             assertThatThrownBy(() -> synchronizer(dataSource, schema, false)
                     .synchronizeWithResult(connection, destructive))
-                    .isInstanceOf(IllegalArgumentException.class)
+                    .isInstanceOf(SchemaDefinitionException.class)
                     .hasMessageContaining("not allowed");
             assertThat(tableExists(connection, schema, "schema_synchronizer_history")).isFalse();
         }
@@ -291,7 +314,7 @@ class SchemaSynchronizerPostgresIntegrationTest {
         SchemaDefinition definition = definition("CHECK (score >= 0)");
         try (Connection connection = dataSource.getConnection(); var statement = connection.createStatement()) {
             statement.execute("SET search_path TO " + schema);
-            for (String sql : definition.changes().getFirst().statements()) {
+            for (String sql : definition.changes().get(0).statements()) {
                 statement.execute(sql);
             }
         }
@@ -315,12 +338,15 @@ class SchemaSynchronizerPostgresIntegrationTest {
         CountDownLatch ready = new CountDownLatch(2);
         CountDownLatch start = new CountDownLatch(1);
 
-        try (var executor = Executors.newFixedThreadPool(2)) {
+        var executor = Executors.newFixedThreadPool(2);
+        try {
             var first = executor.submit(() -> applyAfterSignal(dataSource, synchronizer, definition, ready, start));
             var second = executor.submit(() -> applyAfterSignal(dataSource, synchronizer, definition, ready, start));
             ready.await();
             start.countDown();
             assertThat(first.get().changeSetsApplied() + second.get().changeSetsApplied()).isEqualTo(1);
+        } finally {
+            executor.shutdownNow();
         }
         try (Connection connection = dataSource.getConnection()) {
             assertThat(queryLong(connection, "SELECT count(*) FROM " + schema
@@ -342,12 +368,15 @@ class SchemaSynchronizerPostgresIntegrationTest {
         CountDownLatch ready = new CountDownLatch(2);
         CountDownLatch start = new CountDownLatch(1);
 
-        try (var executor = Executors.newFixedThreadPool(2)) {
+        var executor = Executors.newFixedThreadPool(2);
+        try {
             var first = executor.submit(() -> applyAfterSignal(dataSource, synchronizer, definition, ready, start));
             var second = executor.submit(() -> applyAfterSignal(dataSource, synchronizer, definition, ready, start));
             ready.await();
             start.countDown();
             assertThat(first.get().tablesCreated() + second.get().tablesCreated()).isEqualTo(1);
+        } finally {
+            executor.shutdownNow();
         }
     }
 
@@ -363,7 +392,7 @@ class SchemaSynchronizerPostgresIntegrationTest {
         try (Connection connection = dataSource.getConnection()) {
             assertThatThrownBy(() -> synchronizer.synchronizeWithResult(
                     connection, new SchemaDefinition(Map.of(), List.of())))
-                    .isInstanceOf(IllegalStateException.class)
+                    .isInstanceOf(SchemaDefinitionException.class)
                     .hasMessageContaining("missing from the immutable ledger");
         }
     }
@@ -403,7 +432,7 @@ class SchemaSynchronizerPostgresIntegrationTest {
             assertThatThrownBy(() -> synchronizer.synchronizeWithResult(connection,
                     new SchemaDefinition(Map.of(), List.of(new SchemaDefinition.ChangeSet(
                             "bad", "fails policy", List.of("DROP TABLE caller_work"))))))
-                    .isInstanceOf(IllegalArgumentException.class);
+                    .isInstanceOf(SchemaDefinitionException.class);
             statement.execute("INSERT INTO caller_work VALUES (2)");
             connection.commit();
         }
@@ -467,12 +496,12 @@ class SchemaSynchronizerPostgresIntegrationTest {
                 statement.execute("ALTER TABLE items DROP CONSTRAINT items_pkey");
             }
             assertThatThrownBy(() -> synchronizer.synchronizeWithResult(connection, definition))
-                    .isInstanceOf(IllegalStateException.class)
+                    .isInstanceOf(SchemaDefinitionException.class)
                     .hasMessageContaining("primary key is missing");
             SchemaSynchronizationResult missingPrimaryKey = reportingSynchronizer(dataSource, schema)
                     .synchronizeWithResult(connection, definition);
             assertThat(missingPrimaryKey.pendingSql()).contains(
-                    "ALTER TABLE items ADD PRIMARY KEY (id); -- pending: primary key is missing");
+                    "ALTER TABLE \"items\" ADD PRIMARY KEY (\"id\"); -- pending: primary key is missing");
             try (var statement = connection.createStatement()) {
                 statement.execute("SET search_path TO " + schema);
                 statement.execute("ALTER TABLE items ADD PRIMARY KEY (code)");
@@ -481,9 +510,9 @@ class SchemaSynchronizerPostgresIntegrationTest {
                     .synchronizeWithResult(connection, definition);
             assertThat(driftedPrimaryKey.pendingSql())
                     .anySatisfy(sql -> assertThat(sql)
-                            .matches("ALTER TABLE items DROP CONSTRAINT items_pkey\\d*;"))
-                    .contains("ALTER TABLE items ADD PRIMARY KEY (id);",
-                            "ALTER TABLE items ALTER COLUMN code DROP NOT NULL;");
+                            .matches("ALTER TABLE \"items\" DROP CONSTRAINT \"items_pkey\\d*\";"))
+                    .contains("ALTER TABLE \"items\" ADD PRIMARY KEY (\"id\");",
+                            "ALTER TABLE \"items\" ALTER COLUMN \"code\" DROP NOT NULL;");
             try (var statement = connection.createStatement()) {
                 statement.execute("SET search_path TO " + schema);
                 for (String sql : driftedPrimaryKey.pendingSql()) {
@@ -495,13 +524,13 @@ class SchemaSynchronizerPostgresIntegrationTest {
                 statement.execute("CREATE INDEX idx_items_code ON items (id)");
             }
             assertThatThrownBy(() -> synchronizer.synchronizeWithResult(connection, definition))
-                    .isInstanceOf(IllegalStateException.class)
+                    .isInstanceOf(SchemaDefinitionException.class)
                     .hasMessageContaining("index definition drift");
             SchemaSynchronizationResult driftedIndex = reportingSynchronizer(dataSource, schema)
                     .synchronizeWithResult(connection, definition);
             assertThat(driftedIndex.pendingSql()).containsSubsequence(
-                    "DROP INDEX IF EXISTS idx_items_code;",
-                    "CREATE INDEX IF NOT EXISTS idx_items_code ON items (code);");
+                    "DROP INDEX IF EXISTS \"idx_items_code\";",
+                    "CREATE INDEX IF NOT EXISTS \"idx_items_code\" ON \"items\" (\"code\");");
             try (var statement = connection.createStatement()) {
                 statement.execute("SET search_path TO " + schema);
                 statement.execute("DROP INDEX idx_items_code");
@@ -509,12 +538,12 @@ class SchemaSynchronizerPostgresIntegrationTest {
                 statement.execute("CREATE TABLE forgotten_table (value INTEGER)");
             }
             assertThatThrownBy(() -> synchronizer.synchronizeWithResult(connection, definition))
-                    .isInstanceOf(IllegalStateException.class)
+                    .isInstanceOf(SchemaDefinitionException.class)
                     .hasMessageContaining("table absent from definition");
             SchemaSynchronizationResult orphanTable = reportingSynchronizer(dataSource, schema)
                     .synchronizeWithResult(connection, definition);
             assertThat(orphanTable.pendingSql()).contains(
-                    "DROP TABLE forgotten_table; -- pending: table absent from definition");
+                    "DROP TABLE \"forgotten_table\"; -- pending: table absent from definition");
         }
     }
 
@@ -558,13 +587,13 @@ class SchemaSynchronizerPostgresIntegrationTest {
             }
             assertThatThrownBy(() -> synchronizer(dataSource, schema, false)
                     .synchronizeWithResult(connection, definition))
-                    .isInstanceOf(IllegalStateException.class)
+                    .isInstanceOf(SchemaDefinitionException.class)
                     .hasMessageContaining("index definition drift");
             SchemaSynchronizationResult plan = reportingSynchronizer(dataSource, schema)
                     .synchronizeWithResult(connection, definition);
             assertThat(plan.pendingSql()).containsSubsequence(
-                    "DROP INDEX IF EXISTS uq_jobs_active;",
-                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_jobs_active ON jobs (id) WHERE status = 'ACTIVE';");
+                    "DROP INDEX IF EXISTS \"uq_jobs_active\";",
+                    "CREATE UNIQUE INDEX IF NOT EXISTS \"uq_jobs_active\" ON \"jobs\" (\"id\") WHERE status = 'ACTIVE';");
         }
     }
 
@@ -823,7 +852,7 @@ class SchemaSynchronizerPostgresIntegrationTest {
             // No history table: every change set is checked, and nothing runs.
             assertThatThrownBy(() -> synchronizer(dataSource, schema, false).synchronizeWithResult(connection,
                     new SchemaDefinition(Map.of(), List.of(first, legacy))))
-                    .isInstanceOf(IllegalArgumentException.class)
+                    .isInstanceOf(SchemaDefinitionException.class)
                     .hasMessageContaining("not allowed");
             assertThat(tableExists(connection, schema, "first_t")).isFalse();
             assertThat(tableExists(connection, schema, "schema_synchronizer_history")).isFalse();
@@ -850,7 +879,7 @@ class SchemaSynchronizerPostgresIntegrationTest {
                 assertThatThrownBy(() -> synchronizer(dataSource, schema, dryRun)
                         .synchronizeWithResult(connection, withForbidden))
                         .as("dryRun=%s", dryRun)
-                        .isInstanceOf(IllegalArgumentException.class)
+                        .isInstanceOf(SchemaDefinitionException.class)
                         .hasMessageContaining("not allowed");
             }
             assertThat(tableExists(connection, schema, "third_t")).isFalse();
@@ -861,7 +890,7 @@ class SchemaSynchronizerPostgresIntegrationTest {
                     "applied before the policy", List.of("DROP TABLE keep_me CASCADE"));
             assertThatThrownBy(() -> synchronizer(dataSource, schema, false).synchronizeWithResult(connection,
                     new SchemaDefinition(Map.of(), List.of(edited, first, second))))
-                    .isInstanceOf(IllegalStateException.class)
+                    .isInstanceOf(SchemaDefinitionException.class)
                     .hasMessageContaining("checksum mismatch");
         }
     }
@@ -880,11 +909,11 @@ class SchemaSynchronizerPostgresIntegrationTest {
         try (Connection connection = dataSource.getConnection()) {
             assertThatThrownBy(() -> synchronizer(dataSource, schema, false)
                     .synchronizeWithResult(connection, multipleRows))
-                    .isInstanceOf(IllegalArgumentException.class)
+                    .isInstanceOf(SchemaDefinitionException.class)
                     .hasMessageContaining("exactly one row");
             assertThatThrownBy(() -> synchronizer(dataSource, schema, false)
                     .synchronizeWithResult(connection, nullResult))
-                    .isInstanceOf(IllegalArgumentException.class)
+                    .isInstanceOf(SchemaDefinitionException.class)
                     .hasMessageContaining("returned NULL");
         }
     }

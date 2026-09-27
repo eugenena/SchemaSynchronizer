@@ -4,16 +4,56 @@ on:
   pull_request:
   push:
     branches: [main]
+  workflow_call:
 
 permissions:
   contents: read
 
 jobs:
-  test:
+  unit:
+    name: Unit tests (JDK ${{ matrix.java }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        java: ["17", "21"]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.9.1
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java }}
+          cache: maven
+      - name: Unit tests (live-database suites skip without connection properties)
+        run: mvn --batch-mode --no-transfer-progress verify
+
+  release-artifacts:
+    name: Release artifacts (javadoc, sources, standalone licenses)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.9.1
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+      - name: Build release artifacts without signing
+        run: mvn --batch-mode --no-transfer-progress -Prelease -Dgpg.skip=true -DskipTests package
+      - name: Check standalone jar license payload
+        run: scripts/check-standalone-licenses.sh
+
+  # Release gate: every live-database suite must run. schema.test.require.live=true turns a
+  # missing engine property into a failure instead of a skip.
+  integration:
+    name: Integration (all engines, current versions)
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16-alpine
+        image: pgvector/pgvector:pg16
         env:
           POSTGRES_DB: schema_applier_test
           POSTGRES_USER: postgres
@@ -21,7 +61,7 @@ jobs:
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U postgres -d schema_applier_test"
+          --health-cmd "pg_isready -h 127.0.0.1 -U postgres -d schema_applier_test"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
@@ -49,7 +89,7 @@ jobs:
         ports:
           - 3307:3306
         options: >-
-          --health-cmd "mysqladmin ping -h localhost -uroot -proot"
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -proot"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
@@ -66,32 +106,6 @@ jobs:
           --health-timeout 5s
           --health-retries 30
           --health-start-period 40s
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
-        with:
-          distribution: temurin
-          java-version: "21"
-          cache: maven
-      - name: Unit and dialect integration tests
-        run: >-
-          mvn --batch-mode --no-transfer-progress verify
-          -Dschema.test.jdbc.url=jdbc:postgresql://localhost:5432/schema_applier_test
-          -Dschema.test.jdbc.user=postgres
-          -Dschema.test.jdbc.password=postgres
-          -Dschema.test.mariadb.jdbc.url=jdbc:mariadb://localhost:3306/schema_synchronizer_test
-          -Dschema.test.mariadb.jdbc.user=schema_sync
-          -Dschema.test.mariadb.jdbc.password=schema_sync
-          -Dschema.test.mysql.jdbc.url=jdbc:mysql://localhost:3307/schema_synchronizer_test
-          -Dschema.test.mysql.jdbc.user=schema_sync
-          -Dschema.test.mysql.jdbc.password=schema_sync
-          "-Dschema.test.sqlserver.jdbc.url=jdbc:sqlserver://localhost:1433;databaseName=master;encrypt=false;trustServerCertificate=true"
-          -Dschema.test.sqlserver.jdbc.user=sa
-          -Dschema.test.sqlserver.jdbc.password=Schema_Sync_Test_1
-
-  oracle:
-    runs-on: ubuntu-latest
-    services:
       oracle:
         image: gvenzl/oracle-xe:21-slim-faststart
         env:
@@ -106,21 +120,136 @@ jobs:
           --health-timeout 10s
           --health-retries 40
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.9.1
         with:
           distribution: temurin
-          java-version: "21"
+          java-version: "17"
           cache: maven
-      - name: Grant DBMS_LOCK to app user
+      - name: Grant DBMS_LOCK to Oracle app user
+        env:
+          ORACLE_CONTAINER: ${{ job.services.oracle.id }}
         run: |
-          docker exec $(docker ps -q --filter ancestor=gvenzl/oracle-xe:21-slim-faststart) \
-            bash -lc "echo \"GRANT EXECUTE ON DBMS_LOCK TO schema_sync;\" | sqlplus -s 'sys/oracle@XEPDB1 as sysdba'"
-      - name: Oracle dialect integration tests
+          # healthcheck.sh can pass before APP_USER exists; retry until the grant succeeds.
+          for attempt in $(seq 1 30); do
+            if printf 'WHENEVER SQLERROR EXIT FAILURE\nGRANT EXECUTE ON SYS.DBMS_LOCK TO schema_sync;\nEXIT\n' \
+                | docker exec -i "$ORACLE_CONTAINER" sqlplus -s -L 'sys/oracle@XEPDB1 as sysdba'; then
+              exit 0
+            fi
+            echo "grant attempt $attempt failed; retrying"
+            sleep 10
+          done
+          exit 1
+      - name: Unit and live integration tests (all five engines)
         run: >-
-          mvn --batch-mode --no-transfer-progress -pl schema-synchronizer test
-          -Dtest=SchemaSynchronizerOracleIntegrationTest
+          mvn --batch-mode --no-transfer-progress verify
+          -Dschema.test.require.live=true
+          -Dschema.test.jdbc.url=jdbc:postgresql://localhost:5432/schema_applier_test
+          -Dschema.test.jdbc.user=postgres
+          -Dschema.test.jdbc.password=postgres
+          -Dschema.test.mariadb.jdbc.url=jdbc:mariadb://localhost:3306/schema_synchronizer_test
+          -Dschema.test.mariadb.jdbc.user=schema_sync
+          -Dschema.test.mariadb.jdbc.password=schema_sync
+          -Dschema.test.mariadb.jdbc.admin.user=root
+          -Dschema.test.mariadb.jdbc.admin.password=root
+          -Dschema.test.mysql.jdbc.url=jdbc:mysql://localhost:3307/schema_synchronizer_test
+          -Dschema.test.mysql.jdbc.user=schema_sync
+          -Dschema.test.mysql.jdbc.password=schema_sync
+          -Dschema.test.mysql.jdbc.admin.user=root
+          -Dschema.test.mysql.jdbc.admin.password=root
+          "-Dschema.test.sqlserver.jdbc.url=jdbc:sqlserver://localhost:1433;databaseName=master;encrypt=true;trustServerCertificate=true"
+          -Dschema.test.sqlserver.jdbc.user=sa
+          -Dschema.test.sqlserver.jdbc.password=Schema_Sync_Test_1
           -Dschema.test.oracle.jdbc.url=jdbc:oracle:thin:@localhost:1521/XEPDB1
           -Dschema.test.oracle.jdbc.user=schema_sync
           -Dschema.test.oracle.jdbc.password=schema_sync
           -Dschema.test.oracle.jdbc.schema=schema_sync
+          "-Dschema.test.oracle.jdbc.admin.user=sys as sysdba"
+          -Dschema.test.oracle.jdbc.admin.password=oracle
+
+  # Documented minimum engine versions that have public container images. Oracle 19c has no
+  # public XE image; Oracle is CI-tested on XE 21c only.
+  engine-floors:
+    name: Integration (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: MariaDB 10.3
+            engine: mariadb
+            image: mariadb:10.3
+            health: mysqladmin ping -h 127.0.0.1 -uroot -proot
+          - name: MariaDB 11.8
+            engine: mariadb
+            image: mariadb:11.8
+            health: healthcheck.sh --connect --innodb_initialized
+          - name: MySQL 8.0
+            engine: mysql
+            image: mysql:8.0
+            health: mysqladmin ping -h 127.0.0.1 -uroot -proot
+          - name: SQL Server 2019
+            engine: sqlserver
+            image: mcr.microsoft.com/mssql/server:2019-CU32-ubuntu-20.04
+            health: bash -c '</dev/tcp/127.0.0.1/1433'
+    services:
+      db:
+        image: ${{ matrix.image }}
+        env:
+          MYSQL_DATABASE: schema_synchronizer_test
+          MYSQL_USER: schema_sync
+          MYSQL_PASSWORD: schema_sync
+          MYSQL_ROOT_PASSWORD: root
+          ACCEPT_EULA: "Y"
+          MSSQL_SA_PASSWORD: "Schema_Sync_Test_1"
+        ports:
+          - 3306:3306
+          - 1433:1433
+        options: >-
+          --health-cmd "${{ matrix.health }}"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 30
+          --health-start-period 30s
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.9.1
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+      - name: MariaDB integration suite
+        if: matrix.engine == 'mariadb'
+        run: >-
+          mvn --batch-mode --no-transfer-progress -pl schema-synchronizer verify
+          -Dtest=SchemaSynchronizerMariaDbIntegrationTest,IdentifierQuotingMariaDbIntegrationTest -Dsurefire.failIfNoSpecifiedTests=true
+          -Dschema.test.require.live=true
+          -Dschema.test.mariadb.jdbc.url=jdbc:mariadb://localhost:3306/schema_synchronizer_test
+          -Dschema.test.mariadb.jdbc.user=schema_sync
+          -Dschema.test.mariadb.jdbc.password=schema_sync
+          -Dschema.test.mariadb.jdbc.admin.user=root
+          -Dschema.test.mariadb.jdbc.admin.password=root
+      - name: MySQL integration suite
+        if: matrix.engine == 'mysql'
+        run: >-
+          mvn --batch-mode --no-transfer-progress -pl schema-synchronizer verify
+          -Dtest=SchemaSynchronizerMySqlIntegrationTest,IdentifierQuotingMySqlIntegrationTest -Dsurefire.failIfNoSpecifiedTests=true
+          -Dschema.test.require.live=true
+          -Dschema.test.mysql.jdbc.url=jdbc:mysql://localhost:3306/schema_synchronizer_test
+          -Dschema.test.mysql.jdbc.user=schema_sync
+          -Dschema.test.mysql.jdbc.password=schema_sync
+          -Dschema.test.mysql.jdbc.admin.user=root
+          -Dschema.test.mysql.jdbc.admin.password=root
+      - name: SQL Server integration suite
+        if: matrix.engine == 'sqlserver'
+        run: >-
+          mvn --batch-mode --no-transfer-progress -pl schema-synchronizer verify
+          -Dtest=SchemaSynchronizerSqlServerIntegrationTest,IdentifierQuotingSqlServerIntegrationTest -Dsurefire.failIfNoSpecifiedTests=true
+          -Dschema.test.require.live=true
+          "-Dschema.test.sqlserver.jdbc.url=jdbc:sqlserver://localhost:1433;databaseName=master;encrypt=true;trustServerCertificate=true"
+          -Dschema.test.sqlserver.jdbc.user=sa
+          -Dschema.test.sqlserver.jdbc.password=Schema_Sync_Test_1

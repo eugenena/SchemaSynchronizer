@@ -53,8 +53,10 @@ class PkIdentityTest {
 
     @Test
     void lockTableSql_shareRowExclusive() {
-        assertThat(PkIdentity.lockTableSql("access_rules"))
-                .isEqualTo("LOCK TABLE access_rules IN SHARE ROW EXCLUSIVE MODE");
+        assertThat(PkIdentity.lockTableSql("public", "access_rules"))
+                .isEqualTo("LOCK TABLE \"public\".\"access_rules\" IN SHARE ROW EXCLUSIVE MODE");
+        assertThat(PkIdentity.lockTableSql("Tenant", "order"))
+                .isEqualTo("LOCK TABLE \"Tenant\".\"order\" IN SHARE ROW EXCLUSIVE MODE");
     }
 
     @Test
@@ -83,12 +85,12 @@ class PkIdentityTest {
 
     @Test
     void syncIdentitySequenceSql_advancesPastMaxId_andIsCalledFalseWhenEmpty() {
-        String sql = PkIdentity.syncIdentitySequenceSql("access_rules");
+        String sql = PkIdentity.syncIdentitySequenceSql("public", "access_rules");
         assertThat(sql).contains("GREATEST");
         assertThat(sql).contains("last_value");
         assertThat(sql).contains("setval");
-        assertThat(sql).contains("MAX(id)");
-        assertThat(sql).contains("pg_get_serial_sequence('access_rules', 'id')");
+        assertThat(sql).contains("MAX(\"id\") FROM \"public\".\"access_rules\"");
+        assertThat(sql).contains("pg_get_serial_sequence('\"public\".\"access_rules\"', 'id')");
         assertThat(sql).contains("IS NOT NULL");
     }
 }

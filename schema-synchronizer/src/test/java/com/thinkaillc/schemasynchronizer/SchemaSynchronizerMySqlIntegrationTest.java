@@ -4,10 +4,10 @@
 package com.thinkaillc.schemasynchronizer;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
@@ -18,23 +18,34 @@ import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.junit.jupiter.api.Assumptions.assumeTrue;
-
-@EnabledIfSystemProperty(named = "schema.test.mysql.jdbc.url", matches = ".+")
+@LiveDatabase(engine = "MySQL", properties = {
+        "schema.test.mysql.jdbc.url",
+        "schema.test.mysql.jdbc.user",
+        "schema.test.mysql.jdbc.password"})
 class SchemaSynchronizerMySqlIntegrationTest {
+
+    /** Randomized per run so a leaked account is never a known credential. */
+    private static final String DDL_ONLY_USER = "ss_ddl_" + LiveTestSupport.randomHex(4);
+    private static final String DDL_ONLY_PASSWORD = "Pw_" + LiveTestSupport.randomHex(12);
 
     @BeforeEach
     @AfterEach
     void cleanDatabase() throws Exception {
-        try (Connection connection = connection(); var statement = connection.createStatement()) {
-            statement.execute("DROP TABLE IF EXISTS mysql_items");
-            statement.execute("DROP TABLE IF EXISTS mysql_flag");
-            statement.execute("DROP TABLE IF EXISTS mysql_strict");
-            statement.execute("DROP TABLE IF EXISTS mysqlxstrict");
-            statement.execute("DROP TABLE IF EXISTS mysql_case_items");
-            statement.execute("DROP TABLE IF EXISTS mysql_staged");
-            statement.execute("DROP TABLE IF EXISTS mysql_tags");
-            statement.execute("DROP TABLE IF EXISTS schema_synchronizer_history");
+        try (Connection connection = connection()) {
+            LiveTestSupport.cleanMySqlFamilyDatabase(connection);
+        }
+    }
+
+    @AfterAll
+    static void dropDdlOnlyAccount() throws Exception {
+        String adminUser = System.getProperty("schema.test.mysql.jdbc.admin.user");
+        if (adminUser == null || adminUser.isBlank()) {
+            return;
+        }
+        try (Connection admin = DriverManager.getConnection(System.getProperty("schema.test.mysql.jdbc.url"),
+                adminUser, System.getProperty("schema.test.mysql.jdbc.admin.password"));
+             var statement = admin.createStatement()) {
+            statement.execute("DROP USER IF EXISTS " + DDL_ONLY_USER);
         }
     }
 
@@ -144,6 +155,23 @@ class SchemaSynchronizerMySqlIntegrationTest {
     }
 
     @Test
+    void mixedCaseColumnsKeepEveryAttributeInTheSnapshot(@TempDir Path tempDir) throws Exception {
+        Path snapshot = tempDir.resolve("mixed-case.json");
+        try (Connection connection = connection(); var statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE mysql_mixed (Id BIGINT NOT NULL PRIMARY KEY, "
+                    + "RawBytes VARBINARY(4) DEFAULT (0xFF), Fixed VARBINARY(4) DEFAULT 'ab', "
+                    + "TouchedAt DATETIME(3) DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3), "
+                    + "Latin VARCHAR(10) CHARACTER SET latin1 COLLATE latin1_bin DEFAULT 'x' COMMENT 'c', "
+                    + "YesNo TINYINT(1) DEFAULT 1, Note VARCHAR(20) DEFAULT 'n')");
+            SchemaSnapshotWriter.writeSnapshot(connection, catalog(), snapshot);
+        }
+        assertThat(java.nio.file.Files.readString(snapshot)).contains("`fixed` VARBINARY(4) DEFAULT 0x6162",
+                "`touchedat` DATETIME(3) DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3)",
+                "CHARACTER SET latin1 COLLATE latin1_bin DEFAULT 'x' COMMENT 'c'",
+                "`yesno` BOOLEAN DEFAULT 1", "`note` VARCHAR(20) DEFAULT 'n'");
+    }
+
+    @Test
     void createsSerializesReplaysWidensIndexesAndReportsDestructiveDrift(@TempDir Path tempDir) throws Exception {
         SchemaSynchronizer synchronizer = synchronizer();
         SchemaDefinition initial = definition(List.of(
@@ -182,7 +210,7 @@ class SchemaSynchronizerMySqlIntegrationTest {
 
         try (Connection connection = connection()) {
             assertThat(synchronizer.synchronizeWithResult(connection, initial).pendingSql())
-                    .anyMatch(sql -> sql.contains("DROP COLUMN notes"));
+                    .anyMatch(sql -> sql.contains("DROP COLUMN `notes`"));
         }
     }
 
@@ -276,9 +304,9 @@ class SchemaSynchronizerMySqlIntegrationTest {
                 "DEFAULT 0x00FF", "DEFAULT 0x6100", "ON UPDATE CURRENT_TIMESTAMP(3)",
                 "CHARACTER SET latin1 COLLATE latin1_bin", "COMMENT 'it''s'", "INT INVISIBLE",
                 // MySQL 8.0.19+ keeps the TINYINT(1) display width only when signed (MariaDB also when unsigned).
-                "flags TINYINT UNSIGNED DEFAULT 1", "amount NUMERIC(5,2) UNSIGNED DEFAULT 1.50",
+                "`flags` TINYINT UNSIGNED DEFAULT 1", "`amount` NUMERIC(5,2) UNSIGNED DEFAULT 1.50",
                 // Connector/J omits ZEROFILL from TYPE_NAME; the snapshot restores it from COLUMN_TYPE.
-                "zfill NUMERIC(8,2) UNSIGNED ZEROFILL", "zint INT UNSIGNED ZEROFILL");
+                "`zfill` NUMERIC(8,2) UNSIGNED ZEROFILL", "`zint` INT UNSIGNED ZEROFILL");
         SchemaDefinition serialized = new ObjectMapper().readValue(snapshot.toFile(), SchemaDefinition.class);
         try (Connection connection = connection(); var statement = connection.createStatement()) {
             statement.execute("DROP TABLE mysql_strict");
@@ -326,11 +354,11 @@ class SchemaSynchronizerMySqlIntegrationTest {
             SchemaSynchronizationResult result = synchronizer().synchronizeWithResult(connection, relaxed);
             assertThat(result.columnsAltered()).isEqualTo(1);
             assertThat(result.pendingSql()).hasSize(3);
-            assertThat(result.pendingSql()).anyMatch(sql -> sql.contains("MODIFY COLUMN d SMALLINT")
+            assertThat(result.pendingSql()).anyMatch(sql -> sql.contains("MODIFY COLUMN `d` SMALLINT")
                     && !sql.contains("display width"));
-            assertThat(result.pendingSql()).anyMatch(sql -> sql.contains("MODIFY COLUMN a")
+            assertThat(result.pendingSql()).anyMatch(sql -> sql.contains("MODIFY COLUMN `a`")
                     && sql.contains("TINYINT(1) display width"));
-            assertThat(result.pendingSql()).anyMatch(sql -> sql.contains("c BOOLEAN DEFAULT 1")
+            assertThat(result.pendingSql()).anyMatch(sql -> sql.contains("`c` BOOLEAN DEFAULT 1")
                     && sql.contains("display width to (1)"));
         }
         try (Connection connection = connection(); var statement = connection.createStatement();
@@ -387,7 +415,7 @@ class SchemaSynchronizerMySqlIntegrationTest {
         try (Connection connection = connection(); var statement = connection.createStatement()) {
             statement.execute("SET SESSION explicit_defaults_for_timestamp = 0");
             assertThatThrownBy(() -> synchronizer().synchronizeWithResult(connection, declared))
-                    .isInstanceOf(IllegalStateException.class)
+                    .isInstanceOf(SchemaDefinitionException.class)
                     .hasMessageContaining("modifying column mysql_strict.ts");
         }
         SchemaDefinition converged = new SchemaDefinition(2, "mysql", Map.of("mysql_strict",
@@ -429,7 +457,7 @@ class SchemaSynchronizerMySqlIntegrationTest {
             statement.execute("SET SESSION explicit_defaults_for_timestamp = 0");
             assertThatThrownBy(() -> synchronizer().synchronizeWithResult(connection,
                     new SchemaDefinition(2, "mysql", Map.of("mysql_strict", strict), List.of())))
-                    .isInstanceOf(IllegalStateException.class)
+                    .isInstanceOf(SchemaDefinitionException.class)
                     .hasMessageContaining("creating table mysql_strict");
         }
         assertThat(tableExists("mysql_strict")).isFalse();
@@ -459,7 +487,7 @@ class SchemaSynchronizerMySqlIntegrationTest {
         try (Connection connection = connection(); var statement = connection.createStatement()) {
             statement.execute("SET SESSION explicit_defaults_for_timestamp = 0");
             assertThatThrownBy(() -> synchronizer().synchronizeWithResult(connection, withChange))
-                    .isInstanceOf(IllegalStateException.class)
+                    .isInstanceOf(SchemaDefinitionException.class)
                     .hasMessageContaining("TIMESTAMP columns of mysql_strict after BEFORE_SCHEMA change set "
                             + "002-strict-index");
         }
@@ -479,7 +507,7 @@ class SchemaSynchronizerMySqlIntegrationTest {
             SchemaSynchronizationResult again = synchronizer().synchronizeWithResult(connection, withChange);
             assertThat(again.changeSetsApplied()).isZero();
             assertThat(again.columnsAdded() + again.columnsAltered() + again.tablesCreated()).isZero();
-            assertThat(again.pendingSql()).containsExactly("DROP TABLE mysql_flag; -- pending: table absent from definition");
+            assertThat(again.pendingSql()).containsExactly("DROP TABLE `mysql_flag`; -- pending: table absent from definition");
         }
     }
 
@@ -511,11 +539,11 @@ class SchemaSynchronizerMySqlIntegrationTest {
                 SchemaSynchronizationResult result = synchronizer().synchronizeWithResult(connection, declared);
                 assertThat(result.pendingSql()).hasSize(3);
                 assertThat(result.pendingSql()).anySatisfy(line -> assertThat(line)
-                        .contains("MODIFY COLUMN label").contains("latin1 character set"));
+                        .contains("MODIFY COLUMN `label`").contains("latin1 character set"));
                 assertThat(result.pendingSql()).anySatisfy(line -> assertThat(line)
-                        .contains("ADD COLUMN note").contains("latin1 character set"));
+                        .contains("ADD COLUMN `note`").contains("latin1 character set"));
                 assertThat(result.pendingSql()).anySatisfy(line -> assertThat(line)
-                        .contains("CREATE INDEX idx_strict_note").contains("mysql_strict.note was not added"));
+                        .contains("CREATE INDEX `idx_strict_note`").contains("mysql_strict.note was not added"));
             }
         }
         try (Connection connection = connection(); var statement = connection.createStatement();
@@ -569,8 +597,8 @@ class SchemaSynchronizerMySqlIntegrationTest {
             SchemaSynchronizationResult result = synchronizer().synchronizeWithResult(connection, declared);
             assertThat(result.columnsAltered()).isZero();
             assertThat(result.pendingSql()).hasSize(2)
-                    .anyMatch(sql -> sql.contains("MODIFY COLUMN binned") && sql.contains("utf8mb3_bin"))
-                    .anyMatch(sql -> sql.contains("MODIFY COLUMN wide") && sql.contains("utf8mb4"))
+                    .anyMatch(sql -> sql.contains("MODIFY COLUMN `binned`") && sql.contains("utf8mb3_bin"))
+                    .anyMatch(sql -> sql.contains("MODIFY COLUMN `wide`") && sql.contains("utf8mb4"))
                     .noneMatch(sql -> sql.contains("nick"));
         }
     }
@@ -604,17 +632,17 @@ class SchemaSynchronizerMySqlIntegrationTest {
         try (Connection connection = connection()) {
             SchemaSynchronizationResult result = synchronizer().synchronizeWithResult(connection, declared);
             assertThat(result.columnsAltered()).isZero();
-            assertThat(result.pendingSql()).anyMatch(sql -> sql.contains("MODIFY COLUMN wide")
+            assertThat(result.pendingSql()).anyMatch(sql -> sql.contains("MODIFY COLUMN `wide`")
                     && sql.contains("utf8mb4"));
-            assertThat(result.pendingSql()).anyMatch(sql -> sql.contains("MODIFY COLUMN binned")
+            assertThat(result.pendingSql()).anyMatch(sql -> sql.contains("MODIFY COLUMN `binned`")
                     && sql.contains("utf8mb3_bin"));
-            assertThat(result.pendingSql()).anyMatch(sql -> sql.contains("MODIFY COLUMN stamp"));
-            assertThat(result.pendingSql()).anyMatch(sql -> sql.contains("MODIFY COLUMN tag")
+            assertThat(result.pendingSql()).anyMatch(sql -> sql.contains("MODIFY COLUMN `stamp`"));
+            assertThat(result.pendingSql()).anyMatch(sql -> sql.contains("MODIFY COLUMN `tag`")
                     && sql.contains("is not auto-applied because the server may store it rewritten"));
-            assertThat(result.pendingSql()).anyMatch(sql -> sql.contains("MODIFY COLUMN tiny BIT(1)"));
-            assertThat(result.pendingSql()).anyMatch(sql -> sql.contains("MODIFY COLUMN labeled")
+            assertThat(result.pendingSql()).anyMatch(sql -> sql.contains("MODIFY COLUMN `tiny` BIT(1)"));
+            assertThat(result.pendingSql()).anyMatch(sql -> sql.contains("MODIFY COLUMN `labeled`")
                     && sql.contains("utf8mb4_bin"));
-            assertThat(result.pendingSql()).anyMatch(sql -> sql.contains("MODIFY COLUMN upd")
+            assertThat(result.pendingSql()).anyMatch(sql -> sql.contains("MODIFY COLUMN `upd`")
                     && sql.contains("ON UPDATE differs"));
         }
         try (Connection connection = connection(); var statement = connection.createStatement();
@@ -636,7 +664,8 @@ class SchemaSynchronizerMySqlIntegrationTest {
     @Test
     void binaryDefaultsConvergeForADdlOnlyAccount(@TempDir Path tempDir) throws Exception {
         String adminUser = System.getProperty("schema.test.mysql.jdbc.admin.user");
-        assumeTrue(adminUser != null && !adminUser.isBlank(), "needs schema.test.mysql.jdbc.admin.user");
+        LiveTestSupport.assumeOrRequire(adminUser != null && !adminUser.isBlank(),
+                "needs schema.test.mysql.jdbc.admin.user");
         String catalog = catalog();
         List<SchemaDefinition.ChangeSet> history = List.of(new SchemaDefinition.ChangeSet("001-mysql-flag",
                 "creates the history table",
@@ -650,12 +679,13 @@ class SchemaSynchronizerMySqlIntegrationTest {
         try (Connection connection = connection(); var statement = connection.createStatement()) {
             statement.execute("DROP TABLE mysql_flag");
         }
+        LiveTestSupport.requireTestNamespace(catalog, "database");
         try (Connection admin = adminConnection(adminUser); var statement = admin.createStatement()) {
-            statement.execute("DROP USER IF EXISTS ss_ddl_only");
-            statement.execute("CREATE USER ss_ddl_only IDENTIFIED BY 'ss_ddl_only_pw'");
-            statement.execute("GRANT CREATE, ALTER, INDEX, REFERENCES ON `" + catalog + "`.* TO ss_ddl_only");
+            statement.execute("DROP USER IF EXISTS " + DDL_ONLY_USER);
+            statement.execute("CREATE USER " + DDL_ONLY_USER + " IDENTIFIED BY '" + DDL_ONLY_PASSWORD + "'");
+            statement.execute("GRANT CREATE, ALTER, INDEX, REFERENCES ON `" + catalog + "`.* TO " + DDL_ONLY_USER);
             statement.execute("GRANT SELECT, INSERT, UPDATE, DELETE ON `" + catalog
-                    + "`.schema_synchronizer_history TO ss_ddl_only");
+                    + "`.schema_synchronizer_history TO " + DDL_ONLY_USER);
         }
         String create = "CREATE TABLE IF NOT EXISTS mysql_strict (id BIGINT NOT NULL PRIMARY KEY, "
                 + "nn VARBINARY(8) NOT NULL DEFAULT 0x00FF, one VARBINARY(4) DEFAULT 'ab', "
@@ -692,7 +722,7 @@ class SchemaSynchronizerMySqlIntegrationTest {
             try (Connection ddlOnly = ddlOnlyConnection()) {
                 assertThat(synchronizer().synchronizeWithResult(ddlOnly, new SchemaDefinition(2, "mysql",
                         Map.of("mysql_strict", new SchemaDefinition.TableDef(create, drifted, List.of())), history))
-                        .pendingSql()).anyMatch(sql -> sql.contains("MODIFY COLUMN nn"));
+                        .pendingSql()).anyMatch(sql -> sql.contains("MODIFY COLUMN `nn`"));
             }
             Path snapshot = tempDir.resolve("ddl-only.json");
             try (Connection ddlOnly = ddlOnlyConnection()) {
@@ -702,7 +732,7 @@ class SchemaSynchronizerMySqlIntegrationTest {
                     "DEFAULT 0x6162", "DEFAULT 0x61620000", "DEFAULT 0xFF80");
         } finally {
             try (Connection admin = adminConnection(adminUser); var statement = admin.createStatement()) {
-                statement.execute("DROP USER IF EXISTS ss_ddl_only");
+                statement.execute("DROP USER IF EXISTS " + DDL_ONLY_USER);
             }
         }
     }
@@ -726,7 +756,7 @@ class SchemaSynchronizerMySqlIntegrationTest {
                 System.getProperty("schema.test.mysql.jdbc.password"))) {
             SchemaSynchronizationResult result = synchronizer().synchronizeWithResult(latin1, widened);
             assertThat(result.columnsAltered()).isZero();
-            assertThat(result.pendingSql()).anyMatch(sql -> sql.contains("MODIFY COLUMN v"));
+            assertThat(result.pendingSql()).anyMatch(sql -> sql.contains("MODIFY COLUMN `v`"));
         }
         try (Connection connection = connection(); var statement = connection.createStatement();
              var rows = statement.executeQuery("SHOW CREATE TABLE mysql_strict")) {
@@ -756,10 +786,8 @@ class SchemaSynchronizerMySqlIntegrationTest {
             SchemaSynchronizationResult result = synchronizer().synchronizeWithResult(switched, narrower);
             assertThat(result.tablesCreated()).isZero();
             assertThat(result.columnsAltered()).isZero();
-            assertThat(result.pendingSql()).singleElement().asString().contains("MODIFY COLUMN label");
+            assertThat(result.pendingSql()).singleElement().asString().contains("MODIFY COLUMN `label`");
         }
-        String schemaTerm = url + (url.contains("?") ? "&" : "?")
-                + (url.startsWith("jdbc:mariadb:") ? "useCatalogTerm=Schema" : "databaseTerm=SCHEMA");
         SchemaDefinition same = new SchemaDefinition(2, "mysql", Map.of("mysql_strict",
                 new SchemaDefinition.TableDef("CREATE TABLE IF NOT EXISTS mysql_strict (id BIGINT NOT NULL PRIMARY KEY)",
                         List.of(new SchemaDefinition.ColumnDef("id", "BIGINT NOT NULL"),
@@ -767,32 +795,44 @@ class SchemaSynchronizerMySqlIntegrationTest {
                 List.of());
         // In schema-term mode the schema argument is a LIKE pattern: a sibling database whose name
         // differs only where the schema has `_` must stay invisible.
+        // Both databases are created for this run only; the decoy is never derived from the live catalog.
         String adminUser = System.getProperty("schema.test.mysql.jdbc.admin.user");
-        String decoy = catalog.contains("_") && adminUser != null && !adminUser.isBlank()
-                ? catalog.replaceFirst("_", "x") : null;
+        boolean withDecoy = adminUser != null && !adminUser.isBlank();
+        if (LiveDatabaseExtension.requireLive()) {
+            assertThat(withDecoy).as("schema.test.mysql.jdbc.admin.user is required for the decoy cell").isTrue();
+        }
+        String suffix = LiveTestSupport.randomHex(4);
+        String scoped = withDecoy ? "test_ss_" + suffix : catalog;
+        String decoy = "test_ssx" + suffix;
+        String testUser = System.getProperty("schema.test.mysql.jdbc.user");
+        String scopedUrl = withDecoy ? url.replaceFirst("(//[^/]+/)[^?]*", "$1" + scoped) : url;
+        String schemaTerm = scopedUrl + (scopedUrl.contains("?") ? "&" : "?")
+                + (url.startsWith("jdbc:mariadb:") ? "useCatalogTerm=Schema" : "databaseTerm=SCHEMA");
         try {
-            if (decoy != null) {
+            if (withDecoy) {
                 try (Connection admin = adminConnection(adminUser); var statement = admin.createStatement()) {
-                    statement.execute("DROP DATABASE IF EXISTS `" + decoy + "`");
-                    statement.execute("CREATE DATABASE `" + decoy + "`");
-                    statement.execute("CREATE TABLE `" + decoy + "`.mysql_strict (id BIGINT NOT NULL PRIMARY KEY, "
-                            + "label VARCHAR(10), ghost INT NOT NULL)");
-                    statement.execute("CREATE TABLE `" + decoy + "`.ghost_table (id INT)");
-                    statement.execute("GRANT SELECT ON `" + decoy + "`.* TO "
-                            + System.getProperty("schema.test.mysql.jdbc.user"));
+                    statement.execute("CREATE DATABASE " + LiveTestSupport.backtick(scoped));
+                    statement.execute("CREATE DATABASE " + LiveTestSupport.backtick(decoy));
+                    statement.execute("CREATE TABLE " + LiveTestSupport.backtick(scoped)
+                            + ".mysql_strict (id BIGINT NOT NULL PRIMARY KEY, label VARCHAR(40))");
+                    statement.execute("CREATE TABLE " + LiveTestSupport.backtick(decoy)
+                            + ".mysql_strict (id BIGINT NOT NULL PRIMARY KEY, label VARCHAR(10), ghost INT NOT NULL)");
+                    statement.execute("CREATE TABLE " + LiveTestSupport.backtick(decoy) + ".ghost_table (id INT)");
+                    statement.execute("GRANT ALL PRIVILEGES ON " + LiveTestSupport.backtick(scoped) + ".* TO " + testUser);
+                    statement.execute("GRANT SELECT ON " + LiveTestSupport.backtick(decoy) + ".* TO " + testUser);
                 }
             }
             try (Connection schemaMode = DriverManager.getConnection(schemaTerm,
-                    System.getProperty("schema.test.mysql.jdbc.user"), System.getProperty("schema.test.mysql.jdbc.password"))) {
-                SchemaSynchronizationResult strict = synchronizer(true).synchronizeWithResult(schemaMode, same);
+                    testUser, System.getProperty("schema.test.mysql.jdbc.password"))) {
+                SchemaSynchronizationResult strict = new SchemaSynchronizer(new ObjectMapper(), null, "",
+                        new SchemaSynchronizerOptions(scoped, "schema_synchronizer_history", 7_249_031_147L,
+                                false, true, true)).synchronizeWithResult(schemaMode, same);
                 assertThat(strict.pendingSql()).isEmpty();
                 assertThat(strict.changed()).isFalse();
             }
         } finally {
-            if (decoy != null) {
-                try (Connection admin = adminConnection(adminUser); var statement = admin.createStatement()) {
-                    statement.execute("DROP DATABASE IF EXISTS `" + decoy + "`");
-                }
+            if (withDecoy) {
+                dropPerRunDatabases(adminUser, testUser, scoped, decoy);
             }
         }
         try (Connection connection = connection(); var statement = connection.createStatement();
@@ -803,6 +843,34 @@ class SchemaSynchronizerMySqlIntegrationTest {
         }
     }
 
+    /** Drops databases this run created and revokes their grants: DROP DATABASE alone leaves grants behind. */
+    private void dropPerRunDatabases(String adminUser, String testUser, String... databases) throws Exception {
+        List<String> errors = new java.util.ArrayList<>();
+        try (Connection admin = adminConnection(adminUser); var statement = admin.createStatement()) {
+            for (String database : databases) {
+                LiveTestSupport.requireTestNamespace(database, "per-run database");
+                for (String sql : List.of(
+                        "REVOKE ALL PRIVILEGES ON " + LiveTestSupport.backtick(database) + ".* FROM " + testUser,
+                        "DROP DATABASE IF EXISTS " + LiveTestSupport.backtick(database))) {
+                    try {
+                        statement.execute(sql);
+                    } catch (java.sql.SQLException e) {
+                        // REVOKE fails with 1141 when the grant was never created.
+                        if (e.getErrorCode() != 1141) {
+                            errors.add(sql + " -> " + e.getMessage());
+                        }
+                    }
+                }
+            }
+            try (var rows = statement.executeQuery("SELECT COUNT(*) FROM mysql.db WHERE User = '" + testUser
+                    + "' AND Db IN ('" + String.join("','", databases) + "')")) {
+                rows.next();
+                assertThat(rows.getInt(1)).as("grants left for %s", List.of(databases)).isZero();
+            }
+        }
+        assertThat(errors).as("per-run database cleanup").isEmpty();
+    }
+
     private Connection adminConnection(String adminUser) throws Exception {
         return DriverManager.getConnection(System.getProperty("schema.test.mysql.jdbc.url"),
                 adminUser, System.getProperty("schema.test.mysql.jdbc.admin.password"));
@@ -810,7 +878,7 @@ class SchemaSynchronizerMySqlIntegrationTest {
 
     private Connection ddlOnlyConnection() throws Exception {
         return DriverManager.getConnection(System.getProperty("schema.test.mysql.jdbc.url"),
-                "ss_ddl_only", "ss_ddl_only_pw");
+                DDL_ONLY_USER, DDL_ONLY_PASSWORD);
     }
 
     private SchemaDefinition definition(List<SchemaDefinition.ColumnDef> columns) {
@@ -874,7 +942,7 @@ class SchemaSynchronizerMySqlIntegrationTest {
         try (Connection connection = connection()) {
             assertThatThrownBy(() -> synchronizer().synchronizeWithResult(connection,
                     new SchemaDefinition(2, "mysql", Map.of(), List.of(flag, legacy))))
-                    .isInstanceOf(IllegalArgumentException.class)
+                    .isInstanceOf(SchemaDefinitionException.class)
                     .hasMessageContaining("not allowed");
         }
         assertThat(tableExists("mysql_flag")).isFalse();
@@ -899,7 +967,7 @@ class SchemaSynchronizerMySqlIntegrationTest {
         try (Connection connection = connection()) {
             assertThatThrownBy(() -> synchronizer().synchronizeWithResult(connection,
                     new SchemaDefinition(2, "mysql", Map.of(), List.of(legacy, flag, strict, forbidden))))
-                    .isInstanceOf(IllegalArgumentException.class)
+                    .isInstanceOf(SchemaDefinitionException.class)
                     .hasMessageContaining("not allowed");
         }
         assertThat(tableExists("mysql_strict")).isFalse();
@@ -974,7 +1042,8 @@ class SchemaSynchronizerMySqlIntegrationTest {
     void multiStatementTriggerBodyIsOneChangeSetStatement() throws Exception {
         // With binary logging on, CREATE TRIGGER needs SUPER (or log_bin_trust_function_creators).
         String adminUser = System.getProperty("schema.test.mysql.jdbc.admin.user");
-        assumeTrue(adminUser != null && !adminUser.isBlank(), "needs schema.test.mysql.jdbc.admin.user");
+        LiveTestSupport.assumeOrRequire(adminUser != null && !adminUser.isBlank(),
+                "needs schema.test.mysql.jdbc.admin.user");
         SchemaDefinition withTrigger = new SchemaDefinition(2, "mysql", Map.of(), List.of(
                 new SchemaDefinition.ChangeSet("001-mysql-items", "table",
                         List.of("CREATE TABLE mysql_items (id BIGINT PRIMARY KEY, note VARCHAR(40), qty INT)"),
@@ -1003,7 +1072,8 @@ class SchemaSynchronizerMySqlIntegrationTest {
     @Test
     void caseExpressionsWithIfAndRepeatCallsRunInRoutines() throws Exception {
         String adminUser = System.getProperty("schema.test.mysql.jdbc.admin.user");
-        assumeTrue(adminUser != null && !adminUser.isBlank(), "needs schema.test.mysql.jdbc.admin.user");
+        LiveTestSupport.assumeOrRequire(adminUser != null && !adminUser.isBlank(),
+                "needs schema.test.mysql.jdbc.admin.user");
         SchemaDefinition withRoutines = new SchemaDefinition(2, "mysql", Map.of(), List.of(
                 new SchemaDefinition.ChangeSet("001-mysql-case-items", "table",
                         List.of("CREATE TABLE mysql_case_items (id BIGINT PRIMARY KEY, note VARCHAR(40), qty INT, "

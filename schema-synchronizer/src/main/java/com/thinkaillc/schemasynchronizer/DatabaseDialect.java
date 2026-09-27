@@ -9,7 +9,10 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.Locale;
 
-/** Database family of a serialized schema and its synchronization target. */
+/**
+ * Database family of a serialized schema and its synchronization target. A definition names its
+ * dialect in the {@code dialect} field, and it is applied only to a database of that dialect.
+ */
 public enum DatabaseDialect {
     POSTGRESQL("postgresql"),
     MARIADB("mariadb"),
@@ -23,26 +26,27 @@ public enum DatabaseDialect {
         this.id = id;
     }
 
+    /** The lower-case name used in the definition's {@code dialect} field. */
     public String id() {
         return id;
     }
 
-    public boolean isMySqlFamily() {
+    boolean isMySqlFamily() {
         return this == MARIADB || this == MYSQL;
     }
 
     /** PostgreSQL and SQL Server resolve unqualified names within a schema namespace. */
-    public boolean usesSchemaNamespace() {
+    boolean usesSchemaNamespace() {
         return this == POSTGRESQL || this == SQLSERVER;
     }
 
     /** MySQL/MariaDB treat the database/catalog as the managed namespace. */
-    public boolean usesCatalogNamespace() {
+    boolean usesCatalogNamespace() {
         return isMySqlFamily();
     }
 
     /** Oracle maps the managed namespace to a user/schema. */
-    public boolean usesUserSchemaNamespace() {
+    boolean usesUserSchemaNamespace() {
         return this == ORACLE;
     }
 
@@ -50,22 +54,29 @@ public enum DatabaseDialect {
      * Engines where DDL may commit outside the JDBC transaction (retry requires
      * verificationSql and single-statement change sets when unverified).
      */
-    public boolean ddlMayCommitImplicitly() {
+    boolean ddlMayCommitImplicitly() {
         return isMySqlFamily() || this == ORACLE;
     }
 
-    public boolean supportsTransactionalDryRun() {
+    boolean supportsTransactionalDryRun() {
         return this == POSTGRESQL || this == SQLSERVER;
     }
 
     /** Unquoted identifier length limit for this dialect. */
-    public int maxIdentifierLength() {
+    int maxIdentifierLength() {
         if (this == POSTGRESQL) {
             return SqlIdentifiers.DEFAULT_MAX_LENGTH;
         }
         return isMySqlFamily() ? SqlIdentifiers.MYSQL_MAX_LENGTH : SqlIdentifiers.EXTENDED_MAX_LENGTH;
     }
 
+    /**
+     * The dialect of a live database, from its product name (and version, which tells MariaDB
+     * apart when Connector/J reports it as MySQL).
+     *
+     * @throws SchemaSynchronizationException when the product is not one of the supported databases
+     * @throws SQLException when the driver cannot report the product
+     */
     public static DatabaseDialect detect(DatabaseMetaData metadata) throws SQLException {
         String product = metadata.getDatabaseProductName();
         String normalized = product == null ? "" : product.toLowerCase(Locale.ROOT);
@@ -86,9 +97,16 @@ public enum DatabaseDialect {
         if (normalized.contains("oracle")) {
             return ORACLE;
         }
-        throw new IllegalStateException("Unsupported database: " + product);
+        throw new SchemaSynchronizationException("Unsupported database: " + product);
     }
 
+    /**
+     * The dialect named by a definition's {@code dialect} field: an id ({@code postgresql},
+     * {@code mysql}, {@code mariadb}, {@code sqlserver}, {@code oracle}) or {@code mssql} /
+     * {@code sql-server}, in any case. Null or blank means PostgreSQL, the 1.x default.
+     *
+     * @throws SchemaDefinitionException for any other value
+     */
     public static DatabaseDialect parse(String value) {
         if (value == null || value.isBlank()) {
             return POSTGRESQL;
@@ -102,7 +120,7 @@ public enum DatabaseDialect {
                 return dialect;
             }
         }
-        throw new IllegalArgumentException("Unsupported schema dialect: " + value);
+        throw new SchemaDefinitionException("Unsupported schema dialect: " + value);
     }
 
     /**
@@ -111,7 +129,7 @@ public enum DatabaseDialect {
      * verified equals {@code DATABASE()} (Connector/J caches the URL database across {@code USE}).
      * SQL Server: connected database. Oracle: {@code null} (schema pattern selects the user).
      */
-    public String metadataCatalog(Connection connection, String configuredNamespace) throws SQLException {
+    String metadataCatalog(Connection connection, String configuredNamespace) throws SQLException {
         if (usesCatalogNamespace()) {
             return configuredNamespace;
         }
@@ -127,12 +145,12 @@ public enum DatabaseDialect {
      * too: Connector/J {@code databaseTerm=SCHEMA} and MariaDB {@code useCatalogTerm=Schema}
      * ignore the catalog argument and would otherwise list every database.
      */
-    public String metadataSchemaPattern(String configuredNamespace) {
+    String metadataSchemaPattern(String configuredNamespace) {
         if (usesCatalogNamespace()) {
             return configuredNamespace;
         }
-        if (usesSchemaNamespace() || usesUserSchemaNamespace()) {
-            return metadataObjectName(configuredNamespace);
+        if (configuredNamespace != null && (usesSchemaNamespace() || usesUserSchemaNamespace())) {
+            return SqlIdentifiers.storedNamespace(this, configuredNamespace);
         }
         return null;
     }
@@ -146,7 +164,7 @@ public enum DatabaseDialect {
      * passed unescaped and every row is filtered; a {@code null} request matches any row. The
      * schema is {@code TABLE_SCHEM}, or {@code TABLE_CAT} when a MySQL-family driver reports none.
      */
-    public static boolean isRequestedObject(ResultSet row, String schema, String table) throws SQLException {
+    static boolean isRequestedObject(ResultSet row, String schema, String table) throws SQLException {
         if (schema != null) {
             String reported = row.getString("TABLE_SCHEM");
             if (!matchesLiterally(schema, reported != null ? reported : row.getString("TABLE_CAT"))) {
@@ -178,7 +196,7 @@ public enum DatabaseDialect {
      * Statement text as sent over JDBC. Oracle rejects a trailing {@code ;} on SQL statements
      * (ORA-00933/00911) but requires it at the end of PL/SQL blocks and stored-code DDL.
      */
-    public String executableSql(String sql) {
+    String executableSql(String sql) {
         if (this != ORACLE || sql == null) {
             return sql;
         }
@@ -201,17 +219,17 @@ public enum DatabaseDialect {
                     + "(?:(?:NON)?EDITIONABLE\\s+)?(?:FUNCTION|PROCEDURE|TRIGGER|PACKAGE|TYPE)\\b)");
 
     /** Engines that accept {@code CREATE INDEX IF NOT EXISTS}. */
-    public boolean supportsCreateIndexIfNotExists() {
+    boolean supportsCreateIndexIfNotExists() {
         return this == POSTGRESQL || this == MARIADB;
     }
 
     /** Engines that accept {@code CREATE TABLE IF NOT EXISTS}. */
-    public boolean supportsCreateTableIfNotExists() {
+    boolean supportsCreateTableIfNotExists() {
         return this == POSTGRESQL || isMySqlFamily();
     }
 
     /** Engines that accept {@code ADD COLUMN IF NOT EXISTS}. */
-    public boolean supportsAddColumnIfNotExists() {
+    boolean supportsAddColumnIfNotExists() {
         return this == POSTGRESQL || this == MARIADB;
     }
 
@@ -219,7 +237,7 @@ public enum DatabaseDialect {
      * Identifier form expected by JDBC {@link DatabaseMetaData} lookups.
      * Oracle folds unquoted identifiers to uppercase.
      */
-    public String metadataObjectName(String identifier) {
+    String metadataObjectName(String identifier) {
         if (identifier == null) {
             return null;
         }
@@ -230,11 +248,18 @@ public enum DatabaseDialect {
     }
 
 
-    public String qualifyHistoryTable(String configuredNamespace, String historyTable) {
+    /**
+     * The history table as emitted SQL, quoted: schema-qualified except on the MySQL family, whose
+     * namespace is the verified current database.
+     */
+    String qualifyHistoryTable(String configuredNamespace, String historyTable) {
         int max = maxIdentifierLength();
+        String table = SqlIdentifiers.quote(this,
+                SqlIdentifiers.requireIdentifier(historyTable, "history table", max));
         if (usesCatalogNamespace()) {
-            return SqlIdentifiers.requireIdentifier(historyTable, "history table", max);
+            return table;
         }
-        return SqlIdentifiers.qualified(configuredNamespace, historyTable, max);
+        return SqlIdentifiers.quoteNamespace(this,
+                SqlIdentifiers.requireIdentifierPreservingCase(configuredNamespace, "schema", max)) + "." + table;
     }
 }

@@ -187,7 +187,7 @@ final class ChangeSetSchemaScope {
             return -1;
         }
         if (chain.parts().size() == 3) {
-            Token schema = chain.parts().getFirst();
+            Token schema = chain.parts().get(0);
             if (!allowed.matches(schema.value(), schema.quoted())) {
                 throw new IllegalArgumentException("schema change SQL targets namespace '" + schema.value()
                         + "' but synchronizer is configured for '" + configuredNamespace + "': " + summarize(sql));
@@ -391,7 +391,7 @@ final class ChangeSetSchemaScope {
                 throw new IllegalArgumentException("schema change SQL must not use database.schema.object references"
                         + where + ": " + summarize(sql));
             }
-            Token schema = chain.parts().getFirst();
+            Token schema = chain.parts().get(0);
             if (anchor && parts >= 3 && dialect == DatabaseDialect.ORACLE && routine
                     && correlations.routineItem(chain.first(), schema)) {
                 continue;
@@ -509,7 +509,7 @@ final class ChangeSetSchemaScope {
         Token itemStart = tokens.get(first - 2);
         if (itemStart.keyword("ADD") || itemStart.keyword("MODIFY") || itemStart.keyword("COLUMN")
                 || (itemStart.keyword("EXISTS") && first >= 4 && tokens.get(first - 3).keyword("NOT"))) {
-            return !tokens.isEmpty() && tokens.getFirst().keyword("ALTER");
+            return !tokens.isEmpty() && tokens.get(0).keyword("ALTER");
         }
         if (!(itemStart.punct("(") || itemStart.punct(","))) {
             return false;
@@ -665,7 +665,7 @@ final class ChangeSetSchemaScope {
         if (chain.parts().size() != 2) {
             return false;
         }
-        String pseudo = canonical(chain.parts().getLast().value(), chain.parts().getLast().quoted(),
+        String pseudo = canonical(chain.parts().get(chain.parts().size() - 1).value(), chain.parts().get(chain.parts().size() - 1).quoted(),
                 DatabaseDialect.ORACLE);
         Token after = SqlTokenizer.next(tokens, chain.last());
         return (pseudo.equals("NEXTVAL") || pseudo.equals("CURRVAL")) && (after == null || !after.punct("("));
@@ -721,7 +721,7 @@ final class ChangeSetSchemaScope {
 
     private static boolean oracleSuppliedType(Chain chain) {
         List<Token> parts = chain.parts();
-        boolean sys = oracleName(parts.getFirst()).equals("SYS");
+        boolean sys = oracleName(parts.get(0)).equals("SYS");
         if (parts.size() == 2 && sys) {
             return ORACLE_SUPPLIED_TYPES.containsKey(oracleName(parts.get(1)));
         }
@@ -735,8 +735,8 @@ final class ChangeSetSchemaScope {
 
     /** Oracle {@code SYS.DUAL}, the read-only one-row table. */
     private static boolean oracleDual(Chain chain) {
-        return chain.parts().size() == 2 && oracleName(chain.parts().getFirst()).equals("SYS")
-                && oracleName(chain.parts().getLast()).equals("DUAL");
+        return chain.parts().size() == 2 && oracleName(chain.parts().get(0)).equals("SYS")
+                && oracleName(chain.parts().get(chain.parts().size() - 1)).equals("DUAL");
     }
 
     /** Whether a table stands where a query reads it: after {@code FROM}/{@code JOIN} or in a {@code FROM} list. */
@@ -758,7 +758,7 @@ final class ChangeSetSchemaScope {
         int offset;
         if (parts.size() == 2) {
             offset = 0;
-        } else if (parts.size() == 3 && oracleName(parts.getFirst()).equals("SYS")) {
+        } else if (parts.size() == 3 && oracleName(parts.get(0)).equals("SYS")) {
             offset = 1;
         } else {
             return false;
@@ -871,7 +871,7 @@ final class ChangeSetSchemaScope {
                     }
                     continue;
                 }
-                checkNameArgument(tokens, token, arguments.getFirst(), relationCallKind(token), check, required);
+                checkNameArgument(tokens, token, arguments.get(0), relationCallKind(token), check, required);
                 continue;
             }
             if (call && SqlTokenizer.nameMatches(token, PRIVILEGE_CALLS, SqlLexer.Mode.POSTGRES)) {
@@ -1183,7 +1183,7 @@ final class ChangeSetSchemaScope {
         if (arguments.size() < 2) {
             return;
         }
-        int valueAt = arguments.getFirst();
+        int valueAt = arguments.get(0);
         int typeAt = arguments.get(1);
         Token type = reducedLiteral(tokens, typeAt, argumentEnd(tokens, typeAt));
         if (type == null) {
@@ -1205,7 +1205,7 @@ final class ChangeSetSchemaScope {
         if (typeParts == null || typeParts.isEmpty()) {
             return;
         }
-        Token typeName = typeParts.getLast();
+        Token typeName = typeParts.get(typeParts.size() - 1);
         String name = canonical(typeName.value(), typeName.quoted(), DatabaseDialect.POSTGRESQL);
         NameKind kind = regKind(name);
         if (kind == null) {
@@ -1270,7 +1270,7 @@ final class ChangeSetSchemaScope {
                         throw new IllegalArgumentException("schema change SQL must name a schema as one identifier"
                                 + where + ": " + summarize(sql));
                     }
-                    requireSchema(parts.getFirst());
+                    requireSchema(parts.get(0));
                 }
                 case QUALIFIED -> {
                     Matcher qualifier = NAME_QUALIFIER.matcher(literal.value());
@@ -1334,7 +1334,7 @@ final class ChangeSetSchemaScope {
                     + where + ": " + summarize(sql));
         }
         if (parts.size() == 2) {
-            Token schema = parts.getFirst();
+            Token schema = parts.get(0);
             if (!allowed.matches(schema.value(), schema.quoted()) && !isSystemCatalog(schema, allowed.dialect())) {
                 throw new IllegalArgumentException(
                         "schema change SQL targets namespace" + where + " '" + schema.value()
@@ -1410,7 +1410,7 @@ final class ChangeSetSchemaScope {
         if (name == null) {
             return names;
         }
-        names.add(name.parts().getLast());
+        names.add(name.parts().get(name.parts().size() - 1));
         int open = name.last() + 1;
         if (open >= tokens.size() || !tokens.get(open).punct("(")) {
             return names;
@@ -1544,13 +1544,13 @@ final class ChangeSetSchemaScope {
             int last = tokens.size() - 1;
             inherited.forEach(name -> ranged.add(new Declared(name, 0, last)));
             if (!inherited.isEmpty()) {
-                blocks.add(new Declared(inherited.getFirst(), 0, last));
+                blocks.add(new Declared(inherited.get(0), 0, last));
             }
             if (routine) {
                 List<Token> header = routineNames(tokens, mode);
                 header.forEach(name -> ranged.add(new Declared(name, 0, last)));
                 if (!header.isEmpty()) {
-                    blocks.add(new Declared(header.getFirst(), 0, last));
+                    blocks.add(new Declared(header.get(0), 0, last));
                 }
                 int[] typed = routineHeader(tokens, mode, dialect);
                 if (typed != null) {
@@ -1722,7 +1722,7 @@ final class ChangeSetSchemaScope {
          * are never routine items.
          */
         boolean routineItemChain(Chain chain, ListOwners lists) {
-            Token qualifier = chain.parts().getFirst();
+            Token qualifier = chain.parts().get(0);
             int index = chain.first();
             if (objectKeywordPosition(tokens, chain, lists) || !declaredIn(ranged, index, qualifier)) {
                 return false;
@@ -1922,7 +1922,7 @@ final class ChangeSetSchemaScope {
             int after = name == null ? start + 1 : name.last() + 1;
             List<Token> items = new ArrayList<>();
             if (name != null) {
-                items.add(name.parts().getLast());
+                items.add(name.parts().get(name.parts().size() - 1));
             }
             if (after < tokens.size() && tokens.get(after).punct("(")) {
                 items.addAll(parameterNames(tokens, after));
@@ -1948,7 +1948,7 @@ final class ChangeSetSchemaScope {
                     int scopeEnd = end;
                     items.forEach(item -> ranged.add(new Declared(item, start, scopeEnd)));
                     if (name != null) {
-                        blocks.add(new Declared(name.parts().getLast(), start, scopeEnd));
+                        blocks.add(new Declared(name.parts().get(name.parts().size() - 1), start, scopeEnd));
                     }
                     if (end + 1 < tokens.size() && tokens.get(end + 1).name() && end + 2 < tokens.size()
                             && tokens.get(end + 2).punct(";")) {
@@ -2042,7 +2042,7 @@ final class ChangeSetSchemaScope {
                 if (chain == null) {
                     return null;
                 }
-                names.add(chain.parts().getLast());
+                names.add(chain.parts().get(chain.parts().size() - 1));
                 last = chain.last();
                 if (last + 1 < end && tokens.get(last + 1).punct("(")) {
                     last = matchingClose(tokens, last + 1);
@@ -2087,7 +2087,7 @@ final class ChangeSetSchemaScope {
          * {@code EXCLUDED} in an {@code ON CONFLICT} statement.
          */
         boolean pseudoRow(Chain chain) {
-            Token qualifier = chain.parts().getFirst();
+            Token qualifier = chain.parts().get(0);
             int index = chain.first();
             if (qualifier.quoted() || chain.parts().size() != 2) {
                 return false;
@@ -2378,15 +2378,15 @@ final class ChangeSetSchemaScope {
             return;
         }
         if (chain.parts().size() >= 2) {
-            if (isSystemCatalog(chain.parts().getFirst(), dialect)) {
-                throw catalogWrite(chain.parts().getFirst(), sql);
+            if (isSystemCatalog(chain.parts().get(0), dialect)) {
+                throw catalogWrite(chain.parts().get(0), sql);
             }
             return;
         }
         if (hops > 8) {
             return;
         }
-        Token name = chain.parts().getFirst();
+        Token name = chain.parts().get(0);
         for (int at = 0; at < tokens.size(); at++) {
             if (at == index) {
                 continue;
@@ -2451,8 +2451,8 @@ final class ChangeSetSchemaScope {
     private static void rejectCatalogInside(List<Token> tokens, int open, int close, DatabaseDialect dialect,
                                             SqlLexer.Mode mode, String sql) {
         for (Chain chain : chains(tokens.subList(open, close + 1), mode)) {
-            if (isSystemCatalog(chain.parts().getFirst(), dialect)) {
-                throw catalogWrite(chain.parts().getFirst(), sql);
+            if (isSystemCatalog(chain.parts().get(0), dialect)) {
+                throw catalogWrite(chain.parts().get(0), sql);
             }
         }
     }

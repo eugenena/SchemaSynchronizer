@@ -7,136 +7,79 @@ on:
 permissions:
   contents: read
 
-jobs:
-  oracle-verify:
-    runs-on: ubuntu-latest
-    services:
-      oracle:
-        image: gvenzl/oracle-xe:21-slim-faststart
-        env:
-          ORACLE_PASSWORD: oracle
-          APP_USER: schema_sync
-          APP_USER_PASSWORD: schema_sync
-        ports:
-          - 1521:1521
-        options: >-
-          --health-cmd "healthcheck.sh"
-          --health-interval 20s
-          --health-timeout 10s
-          --health-retries 40
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
-        with:
-          distribution: temurin
-          java-version: "21"
-          cache: maven
-      - name: Grant DBMS_LOCK to app user
-        run: |
-          docker exec $(docker ps -q --filter ancestor=gvenzl/oracle-xe:21-slim-faststart) \
-            bash -lc "echo \"GRANT EXECUTE ON DBMS_LOCK TO schema_sync;\" | sqlplus -s 'sys/oracle@XEPDB1 as sysdba'"
-      - name: Oracle dialect integration tests
-        run: >-
-          mvn --batch-mode --no-transfer-progress -pl schema-synchronizer test
-          -Dtest=SchemaSynchronizerOracleIntegrationTest
-          -Dschema.test.oracle.jdbc.url=jdbc:oracle:thin:@localhost:1521/XEPDB1
-          -Dschema.test.oracle.jdbc.user=schema_sync
-          -Dschema.test.oracle.jdbc.password=schema_sync
-          -Dschema.test.oracle.jdbc.schema=schema_sync
+# Secrets (environment "maven-central"; restrict the environment to v* tags and require a reviewer):
+#   CENTRAL_USERNAME / CENTRAL_PASSWORD  Sonatype Central Portal user token
+#   GPG_PRIVATE_KEY                      ASCII-armored release signing key
+#   GPG_PASSPHRASE                       passphrase for GPG_PRIVATE_KEY
+#   MAVEN_GPG_KEY_FINGERPRINT            full 40-hex fingerprint of the release key; the build signs
+#                                        only with this key (maven-gpg-plugin keyname)
 
-  publish:
-    needs: [oracle-verify]
+jobs:
+  tag-on-main:
+    name: Tag is on main
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_DB: schema_applier_test
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres -d schema_applier_test"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-      mariadb:
-        image: mariadb:10.11
-        env:
-          MARIADB_DATABASE: schema_synchronizer_test
-          MARIADB_USER: schema_sync
-          MARIADB_PASSWORD: schema_sync
-          MARIADB_ROOT_PASSWORD: root
-        ports:
-          - 3306:3306
-        options: >-
-          --health-cmd "healthcheck.sh --connect --innodb_initialized"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 20
-      mysql:
-        image: mysql:8.4
-        env:
-          MYSQL_DATABASE: schema_synchronizer_test
-          MYSQL_USER: schema_sync
-          MYSQL_PASSWORD: schema_sync
-          MYSQL_ROOT_PASSWORD: root
-        ports:
-          - 3307:3306
-        options: >-
-          --health-cmd "mysqladmin ping -h localhost -uroot -proot"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 20
-      sqlserver:
-        image: mcr.microsoft.com/mssql/server:2022-CU16-ubuntu-22.04
-        env:
-          ACCEPT_EULA: "Y"
-          MSSQL_SA_PASSWORD: "Schema_Sync_Test_1"
-        ports:
-          - 1433:1433
-        options: >-
-          --health-cmd "bash -c '</dev/tcp/127.0.0.1/1433'"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 30
-          --health-start-period 40s
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require the tagged commit to be an ancestor of origin/main
+        run: |
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::Tag ${GITHUB_REF_NAME} ($GITHUB_SHA) is not on main; refusing to publish"
+            exit 1
+          fi
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.9.1
         with:
           distribution: temurin
-          java-version: "21"
+          java-version: "17"
           cache: maven
-          server-id: central
-          server-username: CENTRAL_USERNAME
-          server-password: CENTRAL_PASSWORD
       - name: Verify tag matches Maven version
         env:
           RELEASE_VERSION: ${{ github.ref_name }}
         run: |
-          test "${RELEASE_VERSION#v}" = "$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)"
+          test "${RELEASE_VERSION#v}" = "$(mvn --batch-mode --no-transfer-progress help:evaluate -Dexpression=project.version -q -DforceStdout)"
+
+  # Same gate as pull requests: unit tests on JDK 17/21, release artifacts + license payload,
+  # all five engines with schema.test.require.live=true, and the engine version floors.
+  verify:
+    needs: [tag-on-main]
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    needs: [tag-on-main, verify]
+    runs-on: ubuntu-latest
+    environment: maven-central
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.9.1
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+          server-id: central
+          server-username: CENTRAL_USERNAME
+          server-password: CENTRAL_PASSWORD
       - name: Import release signing key
         env:
           GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
-        run: printf '%s' "$GPG_PRIVATE_KEY" | gpg --batch --import
-      - name: Verify and publish
-        run: >-
-          mvn --batch-mode --no-transfer-progress -Prelease deploy
-          -Dschema.test.jdbc.url=jdbc:postgresql://localhost:5432/schema_applier_test
-          -Dschema.test.jdbc.user=postgres
-          -Dschema.test.jdbc.password=postgres
-          -Dschema.test.mariadb.jdbc.url=jdbc:mariadb://localhost:3306/schema_synchronizer_test
-          -Dschema.test.mariadb.jdbc.user=schema_sync
-          -Dschema.test.mariadb.jdbc.password=schema_sync
-          -Dschema.test.mysql.jdbc.url=jdbc:mysql://localhost:3307/schema_synchronizer_test
-          -Dschema.test.mysql.jdbc.user=schema_sync
-          -Dschema.test.mysql.jdbc.password=schema_sync
-          "-Dschema.test.sqlserver.jdbc.url=jdbc:sqlserver://localhost:1433;databaseName=master;encrypt=false;trustServerCertificate=true"
-          -Dschema.test.sqlserver.jdbc.user=sa
-          -Dschema.test.sqlserver.jdbc.password=Schema_Sync_Test_1
+          MAVEN_GPG_KEY_FINGERPRINT: ${{ secrets.MAVEN_GPG_KEY_FINGERPRINT }}
+        run: |
+          test -n "$MAVEN_GPG_KEY_FINGERPRINT" || { echo "::error::MAVEN_GPG_KEY_FINGERPRINT secret is not set"; exit 1; }
+          printf '%s' "$GPG_PRIVATE_KEY" | gpg --batch --import
+          gpg --batch --list-secret-keys "$MAVEN_GPG_KEY_FINGERPRINT" >/dev/null \
+            || { echo "::error::Imported key does not contain MAVEN_GPG_KEY_FINGERPRINT"; exit 1; }
+      - name: Build release artifacts
+        run: mvn --batch-mode --no-transfer-progress -Prelease -Dgpg.skip=true -DskipTests package
+      - name: Check standalone jar license payload
+        run: scripts/check-standalone-licenses.sh
+      - name: Sign and publish (tests ran in the verify job for this commit)
+        run: mvn --batch-mode --no-transfer-progress -Prelease -DskipTests deploy
         env:
           CENTRAL_USERNAME: ${{ secrets.CENTRAL_USERNAME }}
           CENTRAL_PASSWORD: ${{ secrets.CENTRAL_PASSWORD }}
           MAVEN_GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          MAVEN_GPG_KEY_FINGERPRINT: ${{ secrets.MAVEN_GPG_KEY_FINGERPRINT }}

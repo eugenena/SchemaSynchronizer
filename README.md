@@ -1,7 +1,7 @@
 # SchemaSynchronizer
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![Java](https://img.shields.io/badge/Java-21%2B-orange.svg)](https://www.oracle.com/java/)
+[![Java](https://img.shields.io/badge/Java-17%2B-orange.svg)](https://www.oracle.com/java/)
 [![Maven Central](https://img.shields.io/maven-central/v/com.thinkaillc/schema-synchronizer.svg)](https://central.sonatype.com/artifact/com.thinkaillc/schema-synchronizer)
 [![Javadocs](https://javadoc.io/badge2/com.thinkaillc/schema-synchronizer/javadoc.svg)](https://javadoc.io/doc/com.thinkaillc/schema-synchronizer)
 
@@ -39,7 +39,9 @@ optional bootstrap. See [Hand-authoring](docs/HAND_AUTHORING.md).
 
 The [Javadocs](https://javadoc.io/doc/com.thinkaillc/schema-synchronizer) cover the
 public Java API. See [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow
-and [SECURITY.md](SECURITY.md) for private vulnerability reporting.
+and [SECURITY.md](SECURITY.md) for private vulnerability reporting and the security scope.
+Upgrading from 1.2.0? Read [Upgrading from 1.2.0](CHANGELOG.md#upgrading-from-120) first:
+2.0.0 contains breaking changes.
 
 ## Current dialect support
 
@@ -49,9 +51,13 @@ and [SECURITY.md](SECURITY.md) for private vulnerability reporting.
 | MariaDB 10.3+ | Available | Named locking; DDL may commit implicitly |
 | MySQL 8.0+ | Available | Separate dialect; named locking and implicit DDL commits |
 | SQL Server 2019+ | Available | Transactional DDL and `sp_getapplock` |
-| Oracle 19c+ | Available | `DBMS_LOCK`; DDL may commit implicitly |
-| Percona Server 8.4 | Compatible | Certified against the MySQL dialect |
-| TiDB 8.5 LTS | Compatible | Certified against the MySQL dialect |
+| Oracle 19c+ | Available | `DBMS_LOCK`; DDL may commit implicitly. CI tests Oracle XE 21c; 19c is supported by design but not CI-tested |
+| Percona Server 8.4 | Compatible | Uses the MySQL dialect; verified with `scripts/verify-mysql-compatible.sh`, not CI-tested |
+| TiDB 8.5 LTS | Partial | Uses the MySQL dialect for tables, columns, and indexes. TiDB lacks triggers, stored functions, `INVISIBLE` columns, and other DDL the MySQL suite covers, so 2.0.0 is not verified on TiDB; not CI-tested |
+
+CI runs the full integration suite on PostgreSQL 16, MariaDB 10.11, MySQL 8.4, SQL Server 2022,
+and Oracle XE 21c, plus the engine suites on the version floors MariaDB 10.3, MySQL 8.0, and
+SQL Server 2019, and on MariaDB 11.8.
 
 PostgreSQL, MariaDB, MySQL, SQL Server, and Oracle are the current dialect implementations.
 SchemaSynchronizer is designed to add more relational database dialects, each with
@@ -118,13 +124,13 @@ operating model, not a claim that one approach is universally better.
 
 ## Quick start: Spring Boot
 
-SchemaSynchronizer requires Java 21 or later. Add the Maven Central release:
+SchemaSynchronizer requires Java 17 or later. Add the Maven Central release:
 
 ```xml
 <dependency>
   <groupId>com.thinkaillc</groupId>
   <artifactId>schema-synchronizer</artifactId>
-  <version>1.3.0</version>
+  <version>2.0.0</version>
 </dependency>
 ```
 
@@ -136,20 +142,35 @@ and are printed as SQL for operator review.
 Follow the [five-minute quick start](docs/QUICK_START_SPRING_BOOT.md) for a complete
 working definition and configuration.
 
+Connect as a **schema-scoped, least-privilege database account**, never a superuser, `sa`,
+`root`, or `SYSTEM`. The change-set SQL checks catch mistakes; they are not a security
+boundary. Per-engine grants: [Least-privilege database account](docs/OPERATIONS.md#least-privilege-database-account-required).
+
 ## Quick start: command line
 
-The self-contained CLI requires Java 21. It includes the PostgreSQL, MariaDB, MySQL,
-SQL Server, and Oracle JDBC drivers.
+The self-contained CLI requires Java 17 or later. It includes the PostgreSQL, MariaDB, MySQL,
+SQL Server, and Oracle JDBC drivers, so the standalone JAR carries their licenses as well as
+SchemaSynchronizer's Apache-2.0 license: MySQL Connector/J (GPLv2 with the Universal FOSS
+Exception), MariaDB Connector/J (LGPL-2.1-or-later), Oracle ojdbc11 (Oracle Free Use Terms
+and Conditions), PostgreSQL JDBC (BSD-2-Clause), Microsoft JDBC Driver for SQL Server (MIT),
+Protocol Buffers (BSD-3-Clause), Jackson (Apache-2.0), SLF4J (MIT), and Checker Framework
+qualifiers (MIT). The JAR contains `LICENSE`, `NOTICE`, and
+`META-INF/licenses/THIRD-PARTY.txt` plus each dependency's license text under
+`META-INF/licenses/<artifact>/`. Review these terms before redistributing the JAR. The
+library artifact `schema-synchronizer` bundles no third-party code.
+
+Connect as a schema-scoped, least-privilege account; see
+[Least-privilege database account](docs/OPERATIONS.md#least-privilege-database-account-required).
 
 ### 1. Download the executable JAR
 
 ```bash
-curl -fLO https://repo1.maven.org/maven2/com/thinkaillc/schema-synchronizer-cli/1.3.0/schema-synchronizer-cli-1.3.0-standalone.jar
-java -jar schema-synchronizer-cli-1.3.0-standalone.jar --version
+curl -fLO https://repo1.maven.org/maven2/com/thinkaillc/schema-synchronizer-cli/2.0.0/schema-synchronizer-cli-2.0.0-standalone.jar
+java -jar schema-synchronizer-cli-2.0.0-standalone.jar --version
 ```
 
 Maven Central publishes `.sha256` and `.sha512` files beside the JAR for integrity
-verification. GitHub releases also attach the executable.
+verification.
 
 ### 2. Serialize a source database
 
@@ -163,14 +184,14 @@ export SCHEMA_DB_PASSWORD='source-password'
 PostgreSQL example:
 
 ```bash
-java -jar schema-synchronizer-cli-1.3.0-standalone.jar serialize \
+java -jar schema-synchronizer-cli-2.0.0-standalone.jar serialize \
   jdbc:postgresql://localhost:5432/source_app app_user - public schema-definition.json
 ```
 
 MariaDB example (the schema argument is the database/catalog name):
 
 ```bash
-java -jar schema-synchronizer-cli-1.3.0-standalone.jar serialize \
+java -jar schema-synchronizer-cli-2.0.0-standalone.jar serialize \
   jdbc:mariadb://localhost:3306/source_app app_user - source_app schema-definition.json
 ```
 
@@ -178,26 +199,32 @@ MySQL uses the same argument shape with a `jdbc:mysql:` URL. Its serialized
 definition declares `"dialect": "mysql"`; MariaDB and MySQL definitions are not
 interchanged implicitly.
 
-SQL Server example (schema argument is normally `dbo`):
+SQL Server example (the schema argument must be the login's `DEFAULT_SCHEMA`, here `app`;
+use a dedicated login, never `sa`):
 
 ```bash
-java -jar schema-synchronizer-cli-1.3.0-standalone.jar serialize \
-  "jdbc:sqlserver://localhost:1433;databaseName=app;encrypt=false;trustServerCertificate=true" \
-  sa - dbo schema-definition.json
+java -jar schema-synchronizer-cli-2.0.0-standalone.jar serialize \
+  "jdbc:sqlserver://localhost:1433;databaseName=app;encrypt=true;trustServerCertificate=true" \
+  schema_sync - app schema-definition.json
 ```
+
+Keep `encrypt=true`. `trustServerCertificate=true` skips certificate validation and is only
+for local or test servers with self-signed certificates; in production, trust the server's
+certificate (for example with `trustStore=` or a CA-issued certificate) and drop it.
 
 Oracle example (schema argument is the Oracle user/schema):
 
 ```bash
-java -jar schema-synchronizer-cli-1.3.0-standalone.jar serialize \
+java -jar schema-synchronizer-cli-2.0.0-standalone.jar serialize \
   jdbc:oracle:thin:@localhost:1521/XEPDB1 \
   app_user - app_user schema-definition.json
 ```
 
-Percona Server and TiDB use the MySQL dialect and Connector/J URL shape. Their
-database-specific release contract can be reproduced with
-`bash scripts/verify-mysql-compatible.sh`; compatibility does not imply support for
-vendor extensions outside SchemaSynchronizer's documented schema model.
+Percona Server and TiDB use the MySQL dialect and Connector/J URL shape. Percona's release
+contract can be reproduced with `bash scripts/verify-mysql-compatible.sh`
+(`VERIFY_TIDB=1` also runs the suite against TiDB, where the trigger, routine, and
+`INVISIBLE`-column cells fail); compatibility does not imply support for vendor extensions
+outside SchemaSynchronizer's documented schema model.
 
 Review the generated file before committing it. If the file already exists, the
 serializer preserves its hand-authored `changes` array.
@@ -211,7 +238,7 @@ export SCHEMA_DB_PASSWORD='target-password'
 PostgreSQL example:
 
 ```bash
-java -jar schema-synchronizer-cli-1.3.0-standalone.jar sync \
+java -jar schema-synchronizer-cli-2.0.0-standalone.jar sync \
   jdbc:postgresql://localhost:5432/target_app app_user - \
   schema-definition.json public schema_synchronizer_history
 ```
@@ -219,13 +246,19 @@ java -jar schema-synchronizer-cli-1.3.0-standalone.jar sync \
 MariaDB example:
 
 ```bash
-java -jar schema-synchronizer-cli-1.3.0-standalone.jar sync \
+java -jar schema-synchronizer-cli-2.0.0-standalone.jar sync \
   jdbc:mariadb://localhost:3306/target_app app_user - \
   schema-definition.json target_app schema_synchronizer_history
 ```
 
+Preview first with `dry-run` (same arguments as `sync`), and check a hand-edited file offline
+with `validate schema-definition.json [schema]`. On SQL Server, Oracle, MySQL, and MariaDB pass
+the schema argument explicitly: the default `public` is rejected there.
+
 The database account must be able to read catalog metadata and execute the DDL in
-the definition. The process exits with an error when manual work is required.
+the definition, and nothing more; see
+[Least-privilege database account](docs/OPERATIONS.md#least-privilege-database-account-required).
+The process exits with an error when manual work is required.
 
 ## Add the library to an application
 
@@ -235,7 +268,7 @@ Add the Maven Central release to an application:
 <dependency>
   <groupId>com.thinkaillc</groupId>
   <artifactId>schema-synchronizer</artifactId>
-  <version>1.3.0</version>
+  <version>2.0.0</version>
 </dependency>
 ```
 
@@ -265,50 +298,60 @@ bundle. Central releases are immutable; never reuse a published version number.
 
 ## CLI reference
 
-### SchemaSerializer
-
-`SchemaSerializer` reads a live database through JDBC and writes a target-state
-document:
+The standalone JAR has one entry point with six commands:
 
 ```text
-SchemaSerializer <jdbc-url> <user> - <schema> <output-path>
+java -jar schema-synchronizer-cli-2.0.0-standalone.jar serialize <jdbc-url> <user> - <schema> <output-path>
+java -jar schema-synchronizer-cli-2.0.0-standalone.jar sync      <jdbc-url> <user> - <schema-file> [schema] [history-table]
+java -jar schema-synchronizer-cli-2.0.0-standalone.jar dry-run   <jdbc-url> <user> - <schema-file> [schema] [history-table]
+java -jar schema-synchronizer-cli-2.0.0-standalone.jar validate  <schema-file> [schema]
+java -jar schema-synchronizer-cli-2.0.0-standalone.jar help      (also --help, -h)
+java -jar schema-synchronizer-cli-2.0.0-standalone.jar version   (also --version, -V)
 ```
+
+Exit codes: `0` success, `1` the command failed (including pending manual SQL), `2` unknown
+command or wrong argument count. A failure is printed as one `SchemaSynchronizer failed: …`
+line without a stack trace, with `password=`/`pwd=`-style values and URL credentials masked
+as `****`.
 
 | Argument | Description |
 |---|---|
 | `jdbc-url` | JDBC URL for an available dialect |
-| `user` | Database username |
-| `-` | Required password placeholder; reads `SCHEMA_DB_PASSWORD` |
-| `schema` | Dialect-specific schema namespace (a database/catalog in MariaDB and MySQL) |
-| `output-path` | Definition file to create or update |
+| `user` | Database username (a least-privilege account) |
+| `-` | Required password placeholder; the password is read from `SCHEMA_DB_PASSWORD`. Literal passwords are rejected |
+| `schema` | Dialect-specific schema namespace: `public` (PostgreSQL), the login's default schema (SQL Server), the connected user (Oracle), or the database name (MySQL/MariaDB). Defaults to `public`, which is rejected on SQL Server, Oracle, MySQL, and MariaDB |
+| `output-path` | Definition file to create or update (`serialize`) |
+| `schema-file` | Definition to apply, preview, or validate |
+| `history-table` | Change-set ledger table; default `schema_synchronizer_history` |
 
-The serializer captures tables, columns, primary keys, defaults, nullability, and
-indexes. PostgreSQL `UNIQUE` constraints are emitted as equivalent unique indexes,
-preserving enforcement on the target. PostgreSQL `EXCLUDE` constraints cannot be
-represented as ordinary indexes, so serialization stops with an actionable error
-instead of silently weakening the target schema; express them in the `changes` array.
-The serializer does not invent changes for backfills, foreign keys, check constraints,
-functions, triggers, extensions, comments, or grants.
+Optional `SCHEMA_SYNCHRONIZER_ACTOR` is stored in history `applied_by`.
 
-### SchemaSynchronizer
+### serialize
 
-`SchemaSynchronizer` applies a definition to a target database:
+Reads a live database through JDBC and writes a target-state document. It captures tables,
+columns, primary keys, defaults, nullability, and indexes. PostgreSQL `UNIQUE` constraints
+are emitted as equivalent unique indexes, preserving enforcement on the target. PostgreSQL
+`EXCLUDE` constraints cannot be represented as ordinary indexes, so serialization stops with
+an actionable error instead of silently weakening the target schema; express them in the
+`changes` array. The serializer does not invent changes for backfills, foreign keys, check
+constraints, functions, triggers, extensions, comments, or grants. An existing file keeps its
+hand-authored `changes` array.
 
-```text
-SchemaSynchronizer <jdbc-url> <user> - <schema-file> [schema] [history-table]
-```
+### sync
 
-| Argument | Required | Default | Description |
-|---|---:|---|---|
-| `jdbc-url` | Yes | — | Target JDBC URL |
-| `user` | Yes | — | Database username |
-| `-` | Yes | — | Password placeholder; reads `SCHEMA_DB_PASSWORD` |
-| `schema-file` | Yes | — | Path to the definition |
-| `schema` | No | `public` | Dialect-specific schema namespace |
-| `history-table` | No | `schema_synchronizer_history` | Change-set ledger table |
+Applies a definition to a target database: safe differences and unapplied change sets are
+executed; destructive differences are printed as SQL and the command exits `1`.
 
-Literal passwords on the command line are rejected. Set `SCHEMA_DB_PASSWORD` and
-pass `-`. Optional `SCHEMA_SYNCHRONIZER_ACTOR` is stored in history `applied_by`.
+### dry-run
+
+Plans the same work as `sync` without executing DDL, change sets, or `verificationSql`.
+PostgreSQL and SQL Server also roll back control work; MariaDB, MySQL, and Oracle only skip
+execution. It still connects, reads history, and runs the change-set checks.
+
+### validate
+
+Checks a definition offline (no database connection): structure, identifiers, dialect, and the
+change-set SQL checks, applied to every change set as for an empty database.
 
 ## Spring Boot usage
 
@@ -342,7 +385,7 @@ the connected user (Oracle), or the catalog/database name (MySQL/MariaDB).
 | `resource` | `/schema-definition.json` | Classpath definition to load |
 | `schema` | `public` | Dialect-specific schema namespace |
 | `history-table` | `schema_synchronizer_history` | Applied change-set ledger |
-| `advisory-lock-id` | `7249031147` | PostgreSQL advisory-lock key |
+| `advisory-lock-id` | `7249031147` | Legacy lock key that 1.x instances used (PostgreSQL advisory key, Oracle `DBMS_LOCK` id); still acquired for rolling upgrades. The main lock is derived from the schema and history table. |
 | `dry-run` | `false` | Plan changes; roll back when `supportsTransactionalDryRun` |
 | `fail-on-pending` | `true` | Stop when manual SQL remains |
 | `require-definition` | `true` | Stop when the classpath definition is absent |
@@ -378,7 +421,7 @@ SchemaDefinition definition = mapper.readValue(
 SchemaSynchronizerOptions options = new SchemaSynchronizerOptions(
         "public",                         // dialect-specific schema namespace
         "schema_synchronizer_history",   // history table
-        7_249_031_147L,                   // PostgreSQL advisory-lock ID
+        7_249_031_147L,                   // legacy lock ID (keep the 1.x value for rolling upgrades)
         false,                            // dry run
         true,                             // fail on pending manual SQL
         true);                            // require classpath definition
@@ -405,6 +448,52 @@ try (Connection connection = dataSource.getConnection()) {
 `plannedSql()` contains SQL selected for the invocation, including a dry run.
 `pendingSql()` contains destructive or unsafe reconciliation that was not executed.
 `changed()` reports whether any safe table, column, or change-set work occurred.
+`dryRun()` is true when nothing was changed; in that case the counts are what would be
+applied, so check it before `changed()`. A dry run against an empty database (no history
+table yet) succeeds and reports every change set and table it would create.
+
+`lockReleased()` is false when releasing a session-level synchronization lock failed after
+the outcome was decided. The work is still committed, but the session may keep the lock until
+the connection closes, so close or discard that connection. `cleanupWarnings()` lists those
+release failures, and failures to restore the connection's auto-commit mode, as
+`"ExceptionType: message"`. PostgreSQL locks are transaction-scoped and always report `true`.
+
+The synchronization lock is derived from the schema and history table on every engine.
+`advisoryLockId` only selects the additional lock that 1.x releases took, which 2.0.0 still
+acquires so that a rolling upgrade excludes older instances; keep it equal to the value they
+used. Because that lock is still taken, synchronizers that share an `advisoryLockId` on
+PostgreSQL or Oracle, or share a schema on MySQL, MariaDB, or SQL Server, run one at a time,
+as in 1.2.0. Give unrelated products distinct `advisoryLockId` values on PostgreSQL or Oracle
+if they must run concurrently.
+
+#### Exceptions
+
+The public methods throw unchecked exceptions; nothing declares `throws Exception`. Every
+failure is a `SchemaSynchronizationException`; catch the subclass that matches the decision you
+need to make:
+
+| Exception | Meaning | Retry? |
+|---|---|---|
+| `SchemaLockUnavailableException` | Another synchronizer held the lock for 30 seconds. Nothing was changed. | Yes, later |
+| `SchemaDefinitionException` | The definition is invalid, a change set violates the SQL policy, an applied change set was edited, the live schema conflicts with the declaration, or pending manual work exists while `failOnPending` is set. | No; fix the definition or the database |
+| `SchemaDatabaseException` | The database rejected a statement or the connection failed. `getCause()` is the driver's `SQLException`; `getSQLState()` and `getErrorCode()` delegate to it. | Depends on the SQLState |
+
+```java
+try {
+    synchronizer.synchronizeWithResult(connection, definition);
+} catch (SchemaLockUnavailableException busy) {
+    // another deployment is synchronizing this schema; retry after it finishes
+} catch (SchemaDefinitionException invalid) {
+    // fail the deployment: the definition or live schema needs a human
+} catch (SchemaDatabaseException database) {
+    log.error("database failure, SQLState {}", database.getSQLState(), database);
+}
+```
+
+Any other `RuntimeException` escaping the API is a defect in the library. On MySQL, MariaDB,
+and Oracle the connection must have `autoCommit=true`, because their first DDL statement would
+commit the caller's open transaction; a connection with `autoCommit=false` is rejected before
+any work.
 
 ### Load a definition from the classpath
 
@@ -485,14 +574,17 @@ a new change set for subsequent work.
 - `AFTER_SCHEMA` suits constraints, functions, and triggers that depend on newly
   created tables or columns.
 
-`verificationSql` must be a read-only query whose first column is a boolean. It
-verifies a fresh application and can adopt an already-existing change only when the
-database proves the expected object or state exists. Any function called by a
-verification query must be side-effect-free.
+`verificationSql` must be a read-only `SELECT`/`WITH` query that returns exactly one row
+whose first column is non-null and readable as a boolean (`TRUE`/`FALSE`, or `1`/`0` on
+engines without a boolean type); additional columns are ignored, and zero rows, several
+rows, or `NULL` fail the sync. It verifies a fresh application and can adopt an
+already-existing change only when the database proves the expected object or state exists.
+Any function called by a verification query must be side-effect-free.
 
 Each item in `statements` must contain exactly one JDBC statement. Definitions are
-trusted application artifacts, not untrusted user input: the SQL policy prevents
-accidental destructive DDL, but it is not a SQL sandbox.
+trusted application artifacts, not untrusted user input: the SQL checks catch accidental
+destructive DDL, but they are not a security boundary. A change-set author can reach
+anything the database account can reach; see [SECURITY.md](SECURITY.md#scope-the-sql-checks-are-not-a-security-boundary).
 
 Because MariaDB and MySQL DDL may commit implicitly, every unapplied change set for either dialect must
 provide `verificationSql`. If verification is false, the change set must contain
@@ -526,8 +618,11 @@ transaction and schema-scoped `search_path`. MariaDB prints individually reviewa
 statements because its DDL may commit implicitly.
 
 Set `fail-on-pending=false` only when the application may safely start while manual
-work remains unresolved. Quoted identifiers are rejected rather than handled
-approximately; definitions should use ordinary unquoted identifiers.
+work remains unresolved.
+
+Declared names are plain identifiers, folded like unquoted SQL names, and always emitted
+quoted, so reserved words such as `order` work; see
+[Reserved words and identifier case](docs/SCHEMA_DEFINITION.md#reserved-words-and-identifier-case).
 
 ## Moving from a migration tool
 
@@ -537,38 +632,61 @@ are outside `tables` as ordered change sets with `verificationSql`, then test bo
 1. an empty database applies the complete definition; and
 2. an existing database adopts verified historical changes without rerunning them.
 
+The empty-database path is stricter: when the history table does not exist yet, every
+change set is checked against the current SQL rules, including change sets an existing
+database recorded long ago. A historical change set that uses a now-rejected statement
+passes on existing databases and fails on a fresh one. Run `validate` (it applies the
+empty-database checks) and a sync against an empty database in CI.
+
 Both paths must converge to the same schema before disabling the previous migration
 tool. Preserve historical migration files in source control as audit evidence.
 
 ## Testing and development
 
-Run the normal test suite:
+Run the unit tests (no database needed):
 
 ```bash
-mvn test
+mvn verify
 ```
 
-Run the PostgreSQL acceptance suite:
+The integration suites run only when their properties are set; otherwise they are skipped.
+Pass `-Dschema.test.require.live=true` to turn a missing property into a failure instead of a
+skip (CI does this). With it set, every engine's properties must be present, or run one suite
+with `-pl schema-synchronizer -Dtest=<Suite>`.
+
+| Engine | Properties |
+|---|---|
+| PostgreSQL | `schema.test.jdbc.url`, `schema.test.jdbc.user`, `schema.test.jdbc.password` |
+| MariaDB | `schema.test.mariadb.jdbc.url`, `.user`, `.password`, `.admin.user`, `.admin.password` (an account that can create databases, for the identifier-quoting suite) |
+| MySQL | `schema.test.mysql.jdbc.url`, `.user`, `.password`, `.admin.user`, `.admin.password` (an account that can create databases and users; used by the identifier-quoting suite and the least-privilege convergence test) |
+| SQL Server | `schema.test.sqlserver.jdbc.url`, `.user`, `.password` |
+| Oracle | `schema.test.oracle.jdbc.url`, `.user`, `.password`, `.admin.user`, `.admin.password` (for example `sys as sysdba`; creates per-run users and grants `DBMS_LOCK`); optional `schema.test.oracle.jdbc.schema` (defaults to the connected user) |
+
+Example with all five engines:
 
 ```bash
-mvn verify \
+mvn verify -Dschema.test.require.live=true \
   -Dschema.test.jdbc.url=jdbc:postgresql://localhost:5432/postgres \
-  -Dschema.test.jdbc.user="$USER" \
-  -Dschema.test.jdbc.password="$SCHEMA_DB_PASSWORD"
-```
-
-Run the MariaDB acceptance suite:
-
-```bash
-mvn verify \
+  -Dschema.test.jdbc.user=ss -Dschema.test.jdbc.password="$PG_PASSWORD" \
   -Dschema.test.mariadb.jdbc.url=jdbc:mariadb://localhost:3306/test \
-  -Dschema.test.mariadb.jdbc.user=test_user \
-  -Dschema.test.mariadb.jdbc.password="$SCHEMA_DB_PASSWORD"
+  -Dschema.test.mariadb.jdbc.user=test_user -Dschema.test.mariadb.jdbc.password="$MARIADB_PASSWORD" \
+  -Dschema.test.mariadb.jdbc.admin.user=root -Dschema.test.mariadb.jdbc.admin.password="$MARIADB_ROOT_PASSWORD" \
+  -Dschema.test.mysql.jdbc.url=jdbc:mysql://localhost:3307/test \
+  -Dschema.test.mysql.jdbc.user=test_user -Dschema.test.mysql.jdbc.password="$MYSQL_PASSWORD" \
+  -Dschema.test.mysql.jdbc.admin.user=root -Dschema.test.mysql.jdbc.admin.password="$MYSQL_ROOT_PASSWORD" \
+  "-Dschema.test.sqlserver.jdbc.url=jdbc:sqlserver://localhost:1433;encrypt=true;trustServerCertificate=true" \
+  -Dschema.test.sqlserver.jdbc.user=sa -Dschema.test.sqlserver.jdbc.password="$MSSQL_PASSWORD" \
+  -Dschema.test.oracle.jdbc.url=jdbc:oracle:thin:@localhost:1521/XEPDB1 \
+  -Dschema.test.oracle.jdbc.user=schema_sync -Dschema.test.oracle.jdbc.password="$ORACLE_PASSWORD" \
+  "-Dschema.test.oracle.jdbc.admin.user=sys as sysdba" -Dschema.test.oracle.jdbc.admin.password="$ORACLE_SYS_PASSWORD"
 ```
 
-The MySQL suite uses `schema.test.mysql.jdbc.url`, `.user`, and `.password`. When you also pass
-`schema.test.mysql.jdbc.admin.user` and `.admin.password` (an account that can create users),
-it runs the convergence test as a least-privilege account too.
+The test suites create and drop their own schemas, so they use administrative accounts on
+disposable local containers; that is not a template for production accounts. The PostgreSQL
+properties also drive the CLI end-to-end test in `schema-synchronizer-cli`. Percona Server is
+checked with `bash scripts/verify-mysql-compatible.sh` (TiDB with `VERIFY_TIDB=1`). The release build
+(`mvn -Prelease -Dgpg.skip=true -DskipTests package`) followed by
+`scripts/check-standalone-licenses.sh` checks the license files in the standalone JAR.
 
 ## Author
 

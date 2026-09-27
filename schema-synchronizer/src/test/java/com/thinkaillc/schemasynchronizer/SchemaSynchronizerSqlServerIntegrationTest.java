@@ -4,10 +4,11 @@
 package com.thinkaillc.schemasynchronizer;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
@@ -18,29 +19,53 @@ import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-@EnabledIfSystemProperty(named = "schema.test.sqlserver.jdbc.url", matches = ".+")
+@LiveDatabase(engine = "SQL Server", properties = {
+        "schema.test.sqlserver.jdbc.url",
+        "schema.test.sqlserver.jdbc.user",
+        "schema.test.sqlserver.jdbc.password"})
 class SchemaSynchronizerSqlServerIntegrationTest {
 
-    @BeforeEach
-    void ensureDatabase() throws Exception {
+    /** Created by this suite for this run only; every test operates inside it and it is dropped afterwards. */
+    private static final String DATABASE = "schema_synchronizer_test_" + LiveTestSupport.randomHex(4);
+
+    @BeforeAll
+    static void createDatabase() throws Exception {
         try (Connection connection = adminConnection(); var statement = connection.createStatement()) {
-            statement.execute(
-                    "IF DB_ID(N'schema_synchronizer_test') IS NULL CREATE DATABASE schema_synchronizer_test");
+            statement.execute("CREATE DATABASE " + LiveTestSupport.bracket(DATABASE));
+        }
+    }
+
+    @AfterAll
+    static void dropDatabase() throws Exception {
+        LiveTestSupport.requireTestNamespace(DATABASE, "database");
+        try (Connection connection = adminConnection(); var statement = connection.createStatement()) {
+            statement.execute("IF DB_ID(N'" + DATABASE + "') IS NOT NULL BEGIN "
+                    + "ALTER DATABASE " + LiveTestSupport.bracket(DATABASE) + " SET SINGLE_USER WITH ROLLBACK IMMEDIATE; "
+                    + "DROP DATABASE " + LiveTestSupport.bracket(DATABASE) + "; END");
+            try (var rows = statement.executeQuery("SELECT DB_ID(N'" + DATABASE + "')")) {
+                rows.next();
+                assertThat(rows.getObject(1)).as("database %s after DROP", DATABASE).isNull();
+            }
         }
     }
 
     @BeforeEach
     @AfterEach
     void cleanDatabase() throws Exception {
-        try (Connection connection = connection(); var statement = connection.createStatement()) {
-            statement.execute("IF OBJECT_ID(N'dbo.sqlserver_items', N'U') IS NOT NULL DROP TABLE dbo.sqlserver_items");
-            statement.execute("IF OBJECT_ID(N'dbo.sqlserver_strict', N'U') IS NOT NULL DROP TABLE dbo.sqlserver_strict");
-            statement.execute("IF OBJECT_ID(N'dbo.sqlserverxitems', N'U') IS NOT NULL DROP TABLE dbo.sqlserverxitems");
-            statement.execute("IF OBJECT_ID(N'dbo.sqlserver_staged', N'U') IS NOT NULL DROP TABLE dbo.sqlserver_staged");
-            statement.execute("IF OBJECT_ID(N'dbo.sqlserver_tags', N'U') IS NOT NULL DROP TABLE dbo.sqlserver_tags");
-            statement.execute("IF OBJECT_ID(N'dbo.schema_synchronizer_history', N'U') IS NOT NULL "
-                    + "DROP TABLE dbo.schema_synchronizer_history");
-            statement.execute("IF TYPE_ID(N'dbo.sqlserver_label') IS NOT NULL DROP TYPE dbo.sqlserver_label");
+        try (Connection connection = connection()) {
+            assertThat(LiveTestSupport.scalar(connection, "SELECT DB_NAME()")).isEqualTo(DATABASE);
+            LiveTestSupport.cleanSqlServerDatabase(connection);
+        }
+    }
+
+    @Test
+    void historyDescriptionBytesAreMeasuredInTheDatabaseCollation() throws Exception {
+        try (Connection connection = connection()) {
+            String collation = LiveTestSupport.scalar(connection,
+                    "SELECT CAST(DATABASEPROPERTYEX(DB_NAME(), 'Collation') AS NVARCHAR(128))");
+            int expected = collation.toUpperCase(java.util.Locale.ROOT).contains("UTF8") ? 501 : 251;
+            assertThat(ChangeSetExecutor.storedBytes(connection, DatabaseDialect.SQLSERVER)
+                    .of("é".repeat(250) + "a")).as(collation).isEqualTo(expected);
         }
     }
 
@@ -142,7 +167,7 @@ class SchemaSynchronizerSqlServerIntegrationTest {
 
         try (Connection connection = connection()) {
             assertThat(synchronizer.synchronizeWithResult(connection, initial).pendingSql())
-                    .anyMatch(sql -> sql.contains("DROP COLUMN notes"));
+                    .anyMatch(sql -> sql.contains("DROP COLUMN [notes]"));
         }
     }
 
@@ -181,7 +206,7 @@ class SchemaSynchronizerSqlServerIntegrationTest {
             SchemaSynchronizationResult drift = synchronizer(false)
                     .synchronizeWithResult(connection, strictDefinition(create, finer, indexes));
             assertThat(drift.columnsAltered()).isZero();
-            assertThat(drift.pendingSql()).anyMatch(sql -> sql.contains("ALTER COLUMN stamp DATETIME2"));
+            assertThat(drift.pendingSql()).anyMatch(sql -> sql.contains("ALTER COLUMN [stamp] DATETIME2"));
         }
 
         // Indexed VARCHAR with a DEFAULT constraint: a length-only widen is executable on SQL Server.
@@ -201,9 +226,9 @@ class SchemaSynchronizerSqlServerIntegrationTest {
             SchemaSynchronizationResult reported = synchronizer(false).synchronizeWithResult(connection, blocked);
             assertThat(reported.columnsAltered()).isZero();
             assertThat(reported.pendingSql())
-                    .anyMatch(sql -> sql.contains("ALTER COLUMN qty BIGINT NULL") && sql.contains("DEFAULT constraint"))
-                    .anyMatch(sql -> sql.contains("ALTER COLUMN code INT NULL") && sql.contains("used by an index"))
-                    .anyMatch(sql -> sql.startsWith("-- pending: SQL Server DEFAULT for sqlserver_strict.qty"));
+                    .anyMatch(sql -> sql.contains("ALTER COLUMN [qty] BIGINT NULL") && sql.contains("DEFAULT constraint"))
+                    .anyMatch(sql -> sql.contains("ALTER COLUMN [code] INT NULL") && sql.contains("used by an index"))
+                    .anyMatch(sql -> sql.startsWith("-- pending: SQL Server DEFAULT for [dbo].[sqlserver_strict].[qty]"));
         }
 
         // A computed column referencing label blocks even a length-only widen.
@@ -216,7 +241,7 @@ class SchemaSynchronizerSqlServerIntegrationTest {
             SchemaSynchronizationResult computed = synchronizer(false).synchronizeWithResult(connection, widenedAgain);
             assertThat(computed.columnsAltered()).isZero();
             assertThat(computed.pendingSql())
-                    .anyMatch(sql -> sql.contains("ALTER COLUMN label VARCHAR(120)") && sql.contains("computed column"));
+                    .anyMatch(sql -> sql.contains("ALTER COLUMN [label] VARCHAR(120)") && sql.contains("computed column"));
         }
         try (Connection connection = connection(); var statement = connection.createStatement()) {
             statement.execute("ALTER TABLE sqlserver_strict DROP COLUMN label_len");
@@ -434,8 +459,8 @@ class SchemaSynchronizerSqlServerIntegrationTest {
             SchemaSynchronizationResult drift = synchronizer(false).synchronizeWithResult(connection, swapped);
             assertThat(drift.columnsAltered()).isZero();
             assertThat(drift.pendingSql()).hasSize(2)
-                    .anyMatch(sql -> sql.contains("ALTER COLUMN fine DATETIME2(3)"))
-                    .anyMatch(sql -> sql.contains("ALTER COLUMN coarse DATETIME2"));
+                    .anyMatch(sql -> sql.contains("ALTER COLUMN [fine] DATETIME2(3)"))
+                    .anyMatch(sql -> sql.contains("ALTER COLUMN [coarse] DATETIME2"));
         }
     }
 
@@ -487,7 +512,7 @@ class SchemaSynchronizerSqlServerIntegrationTest {
                 System.getProperty("schema.test.sqlserver.jdbc.password"));
     }
 
-    private Connection adminConnection() throws Exception {
+    private static Connection adminConnection() throws Exception {
         return DriverManager.getConnection(
                 System.getProperty("schema.test.sqlserver.jdbc.url"),
                 System.getProperty("schema.test.sqlserver.jdbc.user"),
@@ -497,8 +522,8 @@ class SchemaSynchronizerSqlServerIntegrationTest {
     private String jdbcUrl() {
         String base = System.getProperty("schema.test.sqlserver.jdbc.url");
         if (base.contains("databaseName=")) {
-            return base.replaceAll("(?i)databaseName=[^;]*", "databaseName=schema_synchronizer_test");
+            return base.replaceAll("(?i)databaseName=[^;]*", "databaseName=" + DATABASE);
         }
-        return base + (base.contains(";") ? "" : ";") + "databaseName=schema_synchronizer_test";
+        return base + (base.endsWith(";") ? "" : ";") + "databaseName=" + DATABASE;
     }
 }

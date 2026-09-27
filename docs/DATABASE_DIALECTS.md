@@ -8,21 +8,33 @@ instances of the same dialect, not between SQL dialects.
 
 - Supported baseline: PostgreSQL 16+
 - Namespace: schema, normally `public`
-- Locking: two-key `pg_try_advisory_xact_lock` (schema namespace + configured lock id),
-  30s timeout; legacy single-key also acquired during 1.3.x upgrades
+- Locking: two-key `pg_try_advisory_xact_lock` derived from the schema and history table,
+  30s timeout; the locks earlier releases took (namespace key + `advisoryLockId`, and
+  `advisoryLockId` alone) are also acquired, so a rolling upgrade still excludes older
+  instances
 - DDL: transactional for supported operations
 - Dry run: planned work is rolled back (`supportsTransactionalDryRun()=true`);
   `verificationSql` is not executed
-- Identifiers: unquoted lower-case, within PostgreSQL's 63-byte limit
+- Identifiers: declared names fold to lower case and are emitted quoted, within PostgreSQL's
+  63-byte limit (see [Reserved words and identifier case](SCHEMA_DEFINITION.md#reserved-words-and-identifier-case))
 
 PostgreSQL pending destructive output is wrapped in a transaction and includes a
 schema-scoped `search_path` for operator review.
+
+Extension types (pgvector `vector(n)`, `citext`, …) installed in `public` while the
+synchronized schema is another one: declare them as `public.vector(n)` wherever
+SchemaSynchronizer creates the column, because sync sets `search_path` to the configured
+schema only. An unqualified `vector(n)` still compares correctly against existing columns,
+and snapshots of a non-public schema write `"public".vector(n)`. PostgreSQL is the only
+dialect that accepts schema-qualified column types. See
+[Extension types in another schema](SCHEMA_DEFINITION.md#extension-types-in-another-schema).
 
 ## MariaDB
 
 - Supported baseline: MariaDB 10.3+
 - Namespace: database/catalog name
-- Locking: named `GET_LOCK` (hashed when the resource would exceed 64 characters)
+- Locking: named `GET_LOCK` on a 64-character SHA-256 name of the schema and history table;
+  the lock name 1.2.0 used is also acquired, so a rolling upgrade still excludes older instances
 - DDL: may commit implicitly
 - Dry run: statements and verification are not executed; live apply may still commit DDL
 
@@ -36,10 +48,12 @@ ascending indexes there or the live index will not match the declaration.
 
 - Supported baseline: MySQL 8.0+
 - Namespace: database/catalog name
-- Locking: named `GET_LOCK` (hashed when the resource would exceed 64 characters)
+- Locking: named `GET_LOCK` on a 64-character SHA-256 name of the schema and history table;
+  the lock name 1.2.0 used is also acquired, so a rolling upgrade still excludes older instances
 - DDL: may commit implicitly
 - Dry run: statements and verification are not executed; live apply may still commit DDL
-- Identifiers: unquoted lower-case, up to 64 characters (MariaDB as well)
+- Identifiers: declared names fold to lower case and are emitted with backticks, up to 64
+  characters (MariaDB as well)
 - Schema: the configured schema must equal the session's `DATABASE()` exactly (case-sensitive);
   a sync or snapshot fails otherwise, including when no database is selected or a later `USE`
   switched it. With `lower_case_table_names=1` or `2` the server can report the database name in
@@ -172,9 +186,11 @@ ascending indexes there or the live index will not match the declaration.
   `TIMESTAMP WITH LOCAL TIME ZONE` and `TIMESTAMP WITH TIME ZONE` are distinct types.
   Snapshots record non-default precision.
 
-The MySQL dialect is also compatibility-tested against Percona Server 8.4 and TiDB
-8.5 LTS. This covers SchemaSynchronizer's documented schema model, not every vendor
-extension.
+The MySQL dialect is also compatibility-tested against Percona Server 8.4 with
+`scripts/verify-mysql-compatible.sh` (not in CI). TiDB 8.5 LTS works for tables, columns, and
+indexes, but it lacks triggers, stored functions, `INVISIBLE` columns, and other DDL the MySQL
+suite covers, so 2.0.0 is not verified on TiDB. This covers SchemaSynchronizer's documented
+schema model, not every vendor extension.
 
 ## SQL Server
 
@@ -183,7 +199,7 @@ extension.
 - Locking: `sp_getapplock` / `sp_releaseapplock` (session owner)
 - DDL: transactional for supported operations
 - Dry run: planned work is rolled back; `verificationSql` is not executed
-- Identifiers: unquoted portable names up to 128 characters
+- Identifiers: declared names fold to lower case and are emitted in brackets, up to 128 characters
 - Idempotent DDL: no `IF NOT EXISTS` for `CREATE TABLE` / `CREATE INDEX`; existence is
   checked via metadata before apply, and change-set adoption recognizes SQL Server
   duplicate-object codes (`2714`, `1913`, `2705`, …)
@@ -211,15 +227,15 @@ extension.
 
 ## Oracle
 
-- Supported baseline: Oracle Database 19c+ (tested with Oracle XE 21c)
+- Supported baseline: Oracle Database 19c+. CI tests Oracle XE 21c; 19c is supported by design (emitted SQL avoids syntax newer than 19c) but not CI-tested
 - Namespace: user/schema (Oracle folds unquoted identifiers to uppercase)
 - Locking: `DBMS_LOCK` with `release_on_commit=false` (grant `EXECUTE ON DBMS_LOCK` to
   the application user)
 - DDL: may commit implicitly
 - Dry run: statements and verification are not executed; live apply may still commit DDL
-- Identifiers: serialize and hand-author lower-case names up to 128 characters (requires
-  `COMPATIBLE` ≥ 12.2; older compatibility settings limit names to 30 bytes); metadata
-  lookups upper-case
+- Identifiers: declared names fold to upper case (Oracle's unquoted form) and are emitted
+  quoted, up to 128 characters (requires `COMPATIBLE` ≥ 12.2; older compatibility settings
+  limit names to 30 bytes)
 - Statements: a trailing `;` (including one followed by a comment) is removed before
   execution, except on statements that start with `BEGIN`, `DECLARE`, or
   `CREATE [OR REPLACE] TRIGGER|PROCEDURE|FUNCTION|PACKAGE|TYPE`. A PL/SQL trigger or
