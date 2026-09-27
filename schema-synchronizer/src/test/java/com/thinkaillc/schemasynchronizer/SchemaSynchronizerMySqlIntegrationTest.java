@@ -155,6 +155,23 @@ class SchemaSynchronizerMySqlIntegrationTest {
     }
 
     @Test
+    void mixedCaseColumnsKeepEveryAttributeInTheSnapshot(@TempDir Path tempDir) throws Exception {
+        Path snapshot = tempDir.resolve("mixed-case.json");
+        try (Connection connection = connection(); var statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE mysql_mixed (Id BIGINT NOT NULL PRIMARY KEY, "
+                    + "RawBytes VARBINARY(4) DEFAULT (0xFF), Fixed VARBINARY(4) DEFAULT 'ab', "
+                    + "TouchedAt DATETIME(3) DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3), "
+                    + "Latin VARCHAR(10) CHARACTER SET latin1 COLLATE latin1_bin DEFAULT 'x' COMMENT 'c', "
+                    + "YesNo TINYINT(1) DEFAULT 1, Note VARCHAR(20) DEFAULT 'n')");
+            SchemaSnapshotWriter.writeSnapshot(connection, catalog(), snapshot);
+        }
+        assertThat(java.nio.file.Files.readString(snapshot)).contains("`fixed` VARBINARY(4) DEFAULT 0x6162",
+                "`touchedat` DATETIME(3) DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3)",
+                "CHARACTER SET latin1 COLLATE latin1_bin DEFAULT 'x' COMMENT 'c'",
+                "`yesno` BOOLEAN DEFAULT 1", "`note` VARCHAR(20) DEFAULT 'n'");
+    }
+
+    @Test
     void createsSerializesReplaysWidensIndexesAndReportsDestructiveDrift(@TempDir Path tempDir) throws Exception {
         SchemaSynchronizer synchronizer = synchronizer();
         SchemaDefinition initial = definition(List.of(

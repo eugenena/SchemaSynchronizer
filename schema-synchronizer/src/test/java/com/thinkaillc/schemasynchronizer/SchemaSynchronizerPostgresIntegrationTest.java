@@ -45,6 +45,27 @@ class SchemaSynchronizerPostgresIntegrationTest {
     }
 
     @Test
+    void ledgersWithDistinctLegacyIdsLockConcurrentlyAndASharedIdSerializes() throws Exception {
+        DataSource dataSource = dataSource();
+        try (Connection first = dataSource.getConnection(); Connection second = dataSource.getConnection()) {
+            first.setAutoCommit(false);
+            second.setAutoCommit(false);
+            try {
+                DialectSupport.acquireLock(first, DatabaseDialect.POSTGRESQL, "app", "history_a", 1L);
+                long started = System.nanoTime();
+                DialectSupport.acquireLock(second, DatabaseDialect.POSTGRESQL, "app", "history_b", 2L);
+                assertThat(System.nanoTime() - started).as("distinct ids do not wait")
+                        .isLessThan(java.util.concurrent.TimeUnit.SECONDS.toNanos(5));
+                assertThat(LiveTestSupport.scalar(second, "SELECT pg_try_advisory_xact_lock(1)"))
+                        .as("the 1.x key a shared id selects is held").isEqualTo("f");
+            } finally {
+                first.rollback();
+                second.rollback();
+            }
+        }
+    }
+
+    @Test
     void schemaAndTableNamesAreNotMetadataPatterns() throws Exception {
         DataSource dataSource = dataSource();
         String schema = uniqueSchema("pattern_case");

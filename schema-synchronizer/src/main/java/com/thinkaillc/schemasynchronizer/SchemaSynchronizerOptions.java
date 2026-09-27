@@ -13,7 +13,7 @@ package com.thinkaillc.schemasynchronizer;
  * @param historyTable      change-set history table in that namespace, folded like an unquoted identifier
  * @param advisoryLockId    legacy lock key. The synchronization lock is derived from
  *                          {@code (schema, historyTable)} on every dialect; this id only selects the
- *                          additional lock that releases 1.2.0 and 1.3.0 took (PostgreSQL advisory
+ *                          additional lock that 1.x instances took (PostgreSQL advisory
  *                          key, Oracle DBMS_LOCK id), which 2.0 keeps acquiring so that a rolling
  *                          upgrade still excludes older instances. Keep it equal to the value those
  *                          instances used (default {@code 7249031147}).

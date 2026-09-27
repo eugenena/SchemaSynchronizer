@@ -121,11 +121,14 @@ Work through these steps in order; each one is a behavior change that can stop a
   on every dialect** with `CREATE VIEW is not yet supported in change sets; create this object
   outside SchemaSynchronizer (see docs/ROADMAP.md)` (naming the object type). Support is
   planned in [docs/ROADMAP.md](docs/ROADMAP.md#change-set-support-for-more-object-types).
-- **Lock identity.** The synchronization lock is derived from `(schema, historyTable)` on every
-  dialect, so two ledgers in one schema no longer share a lock and two products in one cluster
-  no longer serialize on the default id. The 1.x locks are still acquired after it, so a
-  rolling upgrade excludes older peers; `advisoryLockId` now only selects those legacy locks
-  (PostgreSQL advisory key, Oracle `DBMS_LOCK` id). Keep it equal to the value 1.x used.
+- **Lock identity.** A new synchronization lock is derived from `(schema, historyTable)` on
+  every dialect. The 1.x locks are still acquired after it, so a rolling upgrade excludes older
+  peers; `advisoryLockId` now only selects those legacy locks (PostgreSQL advisory key, Oracle
+  `DBMS_LOCK` id). Keep it equal to the value 1.x used. Because the 1.x locks are still taken,
+  runs still serialize exactly as they did in 1.2.0: on PostgreSQL and Oracle every synchronizer
+  sharing an `advisoryLockId` (the default is the same everywhere) waits for the others, and on
+  MySQL, MariaDB, and SQL Server every ledger in one schema does. Give unrelated products
+  distinct `advisoryLockId` values if they must run concurrently on PostgreSQL or Oracle.
 - **Dry-run on a first deploy succeeds.** Against an empty database (no history table), a dry
   run reports every change set and table it would create instead of failing.
 - **Smaller public API.** Internal types are now package-private: `ColumnDefinitionParser`,

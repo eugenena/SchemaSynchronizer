@@ -193,7 +193,9 @@ advisory lock remain active until the caller commits or rolls back.
 
 Every dialect derives its lock from the configured schema and history table, waiting at most
 30 seconds in total, and then also takes the locks 1.x took so a rolling upgrade still
-excludes older instances; `advisoryLockId` selects only those legacy locks. PostgreSQL uses
+excludes older instances; `advisoryLockId` selects only those legacy locks. Those legacy locks
+mean runs sharing an `advisoryLockId` (PostgreSQL, Oracle) or a schema (MySQL, MariaDB, SQL
+Server) still wait for each other, as in 1.2.0. PostgreSQL uses
 `pg_try_advisory_xact_lock` (unbounded `pg_advisory_xact_lock` is not used). MySQL/MariaDB
 `GET_LOCK` resource names are 64-character SHA-256 names; SQL Server uses `sp_getapplock`.
 Oracle `DBMS_LOCK` uses `release_on_commit=false` so implicit DDL commits do not release

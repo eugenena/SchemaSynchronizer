@@ -461,7 +461,10 @@ release failures, and failures to restore the connection's auto-commit mode, as
 The synchronization lock is derived from the schema and history table on every engine.
 `advisoryLockId` only selects the additional lock that 1.x releases took, which 2.0.0 still
 acquires so that a rolling upgrade excludes older instances; keep it equal to the value they
-used.
+used. Because that lock is still taken, synchronizers that share an `advisoryLockId` on
+PostgreSQL or Oracle, or share a schema on MySQL, MariaDB, or SQL Server, run one at a time,
+as in 1.2.0. Give unrelated products distinct `advisoryLockId` values on PostgreSQL or Oracle
+if they must run concurrently.
 
 #### Exceptions
 

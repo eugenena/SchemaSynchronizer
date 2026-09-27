@@ -76,7 +76,7 @@ final class DialectSupport {
         };
     }
 
-    /** Adds {@code applied_by} to an existing history table created before 1.3.0. */
+    /** Adds {@code applied_by} to an existing history table created by 1.2.0. */
     static String addAppliedByColumnDdl(DatabaseDialect dialect, String qualifiedHistory) {
         String appliedBy = SqlIdentifiers.quote(dialect, "applied_by");
         return switch (dialect) {
@@ -201,7 +201,7 @@ final class DialectSupport {
         return switch (dialect) {
             case POSTGRESQL -> {
                 int[] identity = postgresIdentityKeys(namespace, historyTable);
-                // 1.3.0: namespace key paired with the configured id. 1.2.0: the configured id alone.
+                // Pre-release 2.0 builds: namespace key paired with the configured id. 1.2.0: the configured id alone.
                 int key1 = namespaceLockKey(namespace);
                 int key2 = Math.floorMod(Long.hashCode(advisoryLockId), Integer.MAX_VALUE);
                 acquirePostgresLocks(conn, deadline, List.of(
@@ -344,7 +344,7 @@ final class DialectSupport {
         }
     }
 
-    /** The 1.3.0 lock name: SHA-256 form when over 64 characters. */
+    /** The lock name pre-release 2.0 builds used: SHA-256 form when over 64 characters. */
     static String mysqlLockResource(String namespace) {
         String full = "schema_synchronizer_" + namespace.toLowerCase(Locale.ROOT);
         if (full.length() <= MYSQL_LOCK_NAME_MAX) {
@@ -365,7 +365,7 @@ final class DialectSupport {
                 ? full : mysqlLockResource(namespace);
     }
 
-    /** The 1.3.0 PostgreSQL namespace key. */
+    /** The PostgreSQL namespace key pre-release 2.0 builds used. */
     static int namespaceLockKey(String namespace) {
         return Math.floorMod(("schema_synchronizer_" + namespace.toLowerCase(Locale.ROOT)).hashCode(),
                 Integer.MAX_VALUE);
