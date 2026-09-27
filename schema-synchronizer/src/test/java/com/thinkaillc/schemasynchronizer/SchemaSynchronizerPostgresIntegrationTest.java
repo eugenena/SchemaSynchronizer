@@ -43,6 +43,39 @@ class SchemaSynchronizerPostgresIntegrationTest {
     }
 
     @Test
+    void schemaAndTableNamesAreNotMetadataPatterns() throws Exception {
+        DataSource dataSource = dataSource();
+        String schema = uniqueSchema("pattern_case");
+        createSchema(dataSource, schema);
+        // `_` is a metadata wildcard: neither the sibling schema nor the sibling table may be read.
+        String siblingSchema = schema.replaceFirst("_", "x");
+        createSchema(dataSource, siblingSchema);
+        try (Connection connection = dataSource.getConnection(); var statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE " + schema + ".pt_items (id BIGINT PRIMARY KEY)");
+            statement.execute("CREATE TABLE " + schema + ".ptxitems (id BIGINT PRIMARY KEY, extra INTEGER)");
+            statement.execute("CREATE TABLE " + siblingSchema + ".ghost_table (id INTEGER)");
+            statement.execute("CREATE TABLE " + siblingSchema + ".pt_items (id BIGINT PRIMARY KEY, ghost INTEGER NOT NULL)");
+        }
+        List<SchemaDefinition.ColumnDef> columns = List.of(new SchemaDefinition.ColumnDef("id", "BIGINT NOT NULL"),
+                new SchemaDefinition.ColumnDef("extra", "INTEGER"));
+        SchemaDefinition declared = new SchemaDefinition(2, "postgresql", Map.of(
+                "pt_items", new SchemaDefinition.TableDef(
+                        "CREATE TABLE IF NOT EXISTS pt_items (id BIGINT PRIMARY KEY)", columns, List.of()),
+                "ptxitems", new SchemaDefinition.TableDef(
+                        "CREATE TABLE IF NOT EXISTS ptxitems (id BIGINT PRIMARY KEY, extra INTEGER)", columns, List.of())),
+                List.of());
+        SchemaSynchronizer synchronizer = synchronizer(dataSource, schema, false);
+        try (Connection connection = dataSource.getConnection()) {
+            SchemaSynchronizationResult result = synchronizer.synchronizeWithResult(connection, declared);
+            assertThat(result.columnsAdded()).isEqualTo(1);
+            assertThat(result.pendingSql()).isEmpty();
+        }
+        try (Connection connection = dataSource.getConnection()) {
+            assertThat(synchronizer.synchronizeWithResult(connection, declared).changed()).isFalse();
+        }
+    }
+
+    @Test
     void appliesComplexChangesOnceAndRejectsChecksumDrift() throws Exception {
         DataSource dataSource = dataSource();
         String schema = uniqueSchema("apply_case");

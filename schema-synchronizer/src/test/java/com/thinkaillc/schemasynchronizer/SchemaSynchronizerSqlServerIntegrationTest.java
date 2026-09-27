@@ -35,8 +35,64 @@ class SchemaSynchronizerSqlServerIntegrationTest {
         try (Connection connection = connection(); var statement = connection.createStatement()) {
             statement.execute("IF OBJECT_ID(N'dbo.sqlserver_items', N'U') IS NOT NULL DROP TABLE dbo.sqlserver_items");
             statement.execute("IF OBJECT_ID(N'dbo.sqlserver_strict', N'U') IS NOT NULL DROP TABLE dbo.sqlserver_strict");
+            statement.execute("IF OBJECT_ID(N'dbo.sqlserverxitems', N'U') IS NOT NULL DROP TABLE dbo.sqlserverxitems");
             statement.execute("IF OBJECT_ID(N'dbo.schema_synchronizer_history', N'U') IS NOT NULL "
                     + "DROP TABLE dbo.schema_synchronizer_history");
+        }
+    }
+
+    @Test
+    void tableNamesAreNotMetadataPatterns() throws Exception {
+        try (Connection connection = connection(); var statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE dbo.sqlserver_items (id BIGINT NOT NULL PRIMARY KEY)");
+            // `_` is a metadata wildcard: this table must not lend its columns to sqlserver_items.
+            statement.execute("CREATE TABLE dbo.sqlserverxitems (id BIGINT NOT NULL PRIMARY KEY, extra INT)");
+        }
+        List<SchemaDefinition.ColumnDef> columns = List.of(new SchemaDefinition.ColumnDef("id", "BIGINT NOT NULL"),
+                new SchemaDefinition.ColumnDef("extra", "INT"));
+        SchemaDefinition declared = new SchemaDefinition(2, "sqlserver", Map.of(
+                "sqlserver_items", new SchemaDefinition.TableDef(
+                        "CREATE TABLE sqlserver_items (id BIGINT NOT NULL PRIMARY KEY)", columns, List.of()),
+                "sqlserverxitems", new SchemaDefinition.TableDef(
+                        "CREATE TABLE sqlserverxitems (id BIGINT NOT NULL PRIMARY KEY, extra INT)", columns, List.of())),
+                List.of());
+        try (Connection connection = connection()) {
+            SchemaSynchronizationResult result = synchronizer(true).synchronizeWithResult(connection, declared);
+            assertThat(result.columnsAdded()).isEqualTo(1);
+            assertThat(result.pendingSql()).isEmpty();
+        }
+        try (Connection connection = connection()) {
+            assertThat(synchronizer(true).synchronizeWithResult(connection, declared).changed()).isFalse();
+        }
+
+        // A bare DEC is DECIMAL(18,0): it matches that column and never rounds a wider one.
+        try (Connection connection = connection(); var statement = connection.createStatement()) {
+            statement.execute("ALTER TABLE dbo.sqlserver_items ADD plain DECIMAL(18,0) NOT NULL DEFAULT 0, "
+                    + "wide DECIMAL(20,4) NULL");
+        }
+        List<SchemaDefinition.ColumnDef> numeric = new java.util.ArrayList<>(columns);
+        numeric.add(new SchemaDefinition.ColumnDef("plain", "DEC DEFAULT 0"));
+        numeric.add(new SchemaDefinition.ColumnDef("wide", "DEC"));
+        SchemaDefinition bare = new SchemaDefinition(2, "sqlserver", Map.of(
+                "sqlserver_items", new SchemaDefinition.TableDef(
+                        "CREATE TABLE sqlserver_items (id BIGINT NOT NULL PRIMARY KEY)", numeric, List.of()),
+                "sqlserverxitems", declared.tables().get("sqlserverxitems")), List.of());
+        for (int run = 0; run < 2; run++) {
+            try (Connection connection = connection()) {
+                SchemaSynchronizationResult result = synchronizer(false).synchronizeWithResult(connection, bare);
+                // First run: ALTER COLUMN plain DEC NULL keeps DECIMAL(18,0); then nothing is left to apply.
+                assertThat(result.columnsAltered()).isEqualTo(run == 0 ? 1 : 0);
+                assertThat(result.pendingSql()).singleElement().asString().contains("wide");
+            }
+        }
+        try (Connection connection = connection(); var statement = connection.createStatement();
+             var rows = statement.executeQuery("SELECT name, precision, scale, is_nullable FROM sys.columns "
+                     + "WHERE object_id = OBJECT_ID('dbo.sqlserver_items') AND name IN ('plain', 'wide')")) {
+            Map<String, String> live = new java.util.HashMap<>();
+            while (rows.next()) {
+                live.put(rows.getString(1), rows.getInt(2) + "," + rows.getInt(3) + " " + rows.getBoolean(4));
+            }
+            assertThat(live).containsEntry("plain", "18,0 true").containsEntry("wide", "20,4 true");
         }
     }
 

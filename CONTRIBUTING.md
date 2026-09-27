@@ -53,6 +53,19 @@ no integration test was skipped. Commands and properties are documented in
 - JDBC metadata fields that snapshot or compare code relies on (`DECIMAL_DIGITS`,
   `COLUMN_SIZE`, `TYPE_NAME`) must be proven against each real driver in an integration
   test; drivers disagree (MySQL and MariaDB drivers report no temporal precision).
+- A type the parser newly accepts (a new spelling or attribute such as `UNSIGNED`) needs a
+  comparison cell against a live column of different length, precision, or scale, and one
+  for the bare form without precision on every engine, which compares as that engine's
+  default (`DECIMAL` is `(10,0)` on MySQL/MariaDB, `(18,0)` on SQL Server, `(38,0)` on
+  Oracle, unbounded on PostgreSQL). Arithmetic on
+  `BigDecimal` precision and scale uses `long`. When a change makes a spelling normalize to a
+  portable type (`FIXED`, `NUMBER` → `NUMERIC`), reject it in validation on every engine that
+  does not accept it, with a cell per engine, because comparison can no longer tell it apart.
+- Rows from `getTables`, `getColumns`, and `getPrimaryKeys` go through
+  `DatabaseDialect.isRequestedObject`: drivers match those schema and table arguments with
+  `LIKE` (Oracle even the `getPrimaryKeys` schema), and escaping them breaks Connector/J under
+  `NO_BACKSLASH_ESCAPES`. Pass names unescaped. Integration fixtures include a
+  sibling name that differs only where the real name has `_`.
 - A column-change path must pass the strict round trip: a second sync with
   `failOnPending=true` reports nothing, and a snapshot replayed into an empty schema
   reports nothing.

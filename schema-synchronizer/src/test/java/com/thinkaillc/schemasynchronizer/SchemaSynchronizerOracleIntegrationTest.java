@@ -28,7 +28,56 @@ class SchemaSynchronizerOracleIntegrationTest {
         try (Connection connection = connection(); var statement = connection.createStatement()) {
             dropIfExists(statement, "oracle_items");
             dropIfExists(statement, "oracle_strict");
+            dropIfExists(statement, "oraclexitems");
             dropIfExists(statement, "schema_synchronizer_history");
+        }
+    }
+
+    @Test
+    void tableNamesAreNotMetadataPatterns() throws Exception {
+        try (Connection connection = connection(); var statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE oracle_items (id NUMBER(10) NOT NULL, PRIMARY KEY (id))");
+            // `_` is a metadata wildcard: this table must not lend its columns to oracle_items.
+            statement.execute("CREATE TABLE oraclexitems (id NUMBER(10) NOT NULL, extra NUMBER(10), PRIMARY KEY (id))");
+        }
+        List<SchemaDefinition.ColumnDef> columns = List.of(new SchemaDefinition.ColumnDef("id", "NUMBER(10) NOT NULL"),
+                new SchemaDefinition.ColumnDef("extra", "NUMBER(10)"));
+        SchemaDefinition declared = new SchemaDefinition(2, "oracle", Map.of(
+                "oracle_items", new SchemaDefinition.TableDef(
+                        "CREATE TABLE oracle_items (id NUMBER(10) NOT NULL, PRIMARY KEY (id))", columns, List.of()),
+                "oraclexitems", new SchemaDefinition.TableDef(
+                        "CREATE TABLE oraclexitems (id NUMBER(10) NOT NULL, extra NUMBER(10), PRIMARY KEY (id))",
+                        columns, List.of())), List.of());
+        try (Connection connection = connection()) {
+            SchemaSynchronizationResult result = synchronizer(true).synchronizeWithResult(connection, declared);
+            assertThat(result.columnsAdded()).isEqualTo(1);
+            assertThat(result.pendingSql()).isEmpty();
+        }
+        try (Connection connection = connection()) {
+            assertThat(synchronizer(true).synchronizeWithResult(connection, declared).changed()).isFalse();
+        }
+
+        // A bare DEC is NUMBER(38,0): it matches that column and never rounds a wider-scale one.
+        try (Connection connection = connection(); var statement = connection.createStatement()) {
+            statement.execute("ALTER TABLE oracle_items ADD (plain NUMBER(38,0), wide NUMBER(20,4))");
+            statement.execute("INSERT INTO oracle_items (id, wide) VALUES (1, 1.2345)");
+        }
+        List<SchemaDefinition.ColumnDef> numeric = new java.util.ArrayList<>(columns);
+        numeric.add(new SchemaDefinition.ColumnDef("plain", "DEC"));
+        numeric.add(new SchemaDefinition.ColumnDef("wide", "DEC"));
+        SchemaDefinition bare = new SchemaDefinition(2, "oracle", Map.of(
+                "oracle_items", new SchemaDefinition.TableDef(
+                        "CREATE TABLE oracle_items (id NUMBER(10) NOT NULL, PRIMARY KEY (id))", numeric, List.of()),
+                "oraclexitems", declared.tables().get("oraclexitems")), List.of());
+        try (Connection connection = connection()) {
+            SchemaSynchronizationResult result = synchronizer(false).synchronizeWithResult(connection, bare);
+            assertThat(result.columnsAltered()).isZero();
+            assertThat(result.pendingSql()).singleElement().asString().contains("wide");
+        }
+        try (Connection connection = connection(); var statement = connection.createStatement();
+             var rows = statement.executeQuery("SELECT wide FROM oracle_items WHERE id = 1")) {
+            assertThat(rows.next()).isTrue();
+            assertThat(rows.getBigDecimal(1)).isEqualByComparingTo("1.2345");
         }
     }
 

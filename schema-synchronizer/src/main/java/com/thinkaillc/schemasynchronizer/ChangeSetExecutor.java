@@ -186,9 +186,14 @@ final class ChangeSetExecutor {
             throws SQLException {
         String catalog = dialect.metadataCatalog(conn, options.schema());
         String schema = dialect.metadataSchemaPattern(options.schema());
-        try (ResultSet tables = conn.getMetaData().getTables(
-                catalog, schema, dialect.metadataObjectName(options.historyTable()), new String[]{"TABLE"})) {
-            return tables.next();
+        String table = dialect.metadataObjectName(options.historyTable());
+        try (ResultSet tables = conn.getMetaData().getTables(catalog, schema, table, new String[]{"TABLE"})) {
+            while (tables.next()) {
+                if (DatabaseDialect.isRequestedObject(tables, schema, table)) {
+                    return true;
+                }
+            }
+            return false;
         }
     }
 
