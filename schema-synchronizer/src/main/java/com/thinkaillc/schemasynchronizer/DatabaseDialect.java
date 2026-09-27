@@ -5,6 +5,7 @@ package com.thinkaillc.schemasynchronizer;
 
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
+import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.Locale;
 
@@ -106,13 +107,13 @@ public enum DatabaseDialect {
 
     /**
      * JDBC catalog argument for {@link DatabaseMetaData} lookups.
-     * PostgreSQL: {@code null}. MySQL family: connected catalog. SQL Server: connected
-     * database. Oracle: {@code null} (schema pattern selects the user).
+     * PostgreSQL: {@code null}. MySQL family: the configured database, which the caller has
+     * verified equals {@code DATABASE()} (Connector/J caches the URL database across {@code USE}).
+     * SQL Server: connected database. Oracle: {@code null} (schema pattern selects the user).
      */
     public String metadataCatalog(Connection connection, String configuredNamespace) throws SQLException {
         if (usesCatalogNamespace()) {
-            String catalog = connection.getCatalog();
-            return catalog != null ? catalog : configuredNamespace;
+            return configuredNamespace;
         }
         if (this == SQLSERVER) {
             return connection.getCatalog();
@@ -120,12 +121,57 @@ public enum DatabaseDialect {
         return null;
     }
 
-    /** JDBC schema-pattern argument for metadata lookups. */
+    /**
+     * JDBC schema argument for metadata lookups; filter the rows through
+     * {@link #isRequestedObject}, since drivers treat it as a pattern. The MySQL family passes the database
+     * too: Connector/J {@code databaseTerm=SCHEMA} and MariaDB {@code useCatalogTerm=Schema}
+     * ignore the catalog argument and would otherwise list every database.
+     */
     public String metadataSchemaPattern(String configuredNamespace) {
+        if (usesCatalogNamespace()) {
+            return configuredNamespace;
+        }
         if (usesSchemaNamespace() || usesUserSchemaNamespace()) {
             return metadataObjectName(configuredNamespace);
         }
         return null;
+    }
+
+    /**
+     * Whether a {@link DatabaseMetaData} row ({@code getTables}, {@code getColumns},
+     * {@code getPrimaryKeys}) names the requested schema and table rather than a sibling. Drivers
+     * match these arguments with LIKE, so {@code app_db} also returns {@code app1db} (Oracle does so
+     * for the {@code getPrimaryKeys} schema too). Escaping is not an option: under
+     * {@code NO_BACKSLASH_ESCAPES} Connector/J finds nothing for an escaped name. Arguments are
+     * passed unescaped and every row is filtered; a {@code null} request matches any row. The
+     * schema is {@code TABLE_SCHEM}, or {@code TABLE_CAT} when a MySQL-family driver reports none.
+     */
+    public static boolean isRequestedObject(ResultSet row, String schema, String table) throws SQLException {
+        if (schema != null) {
+            String reported = row.getString("TABLE_SCHEM");
+            if (!matchesLiterally(schema, reported != null ? reported : row.getString("TABLE_CAT"))) {
+                return false;
+            }
+        }
+        return table == null || matchesLiterally(table, row.getString("TABLE_NAME"));
+    }
+
+    /**
+     * Whether {@code reported}, returned by a LIKE match against {@code requested}, is not a
+     * sibling that matched a {@code _} or {@code %} wildcard. Other characters are left to the
+     * server's comparison, which decides case sensitivity.
+     */
+    static boolean matchesLiterally(String requested, String reported) {
+        if (reported == null || reported.length() != requested.length()) {
+            return false;
+        }
+        for (int i = 0; i < requested.length(); i++) {
+            char c = requested.charAt(i);
+            if ((c == '_' || c == '%') && reported.charAt(i) != c) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**

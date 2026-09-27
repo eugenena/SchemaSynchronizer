@@ -30,7 +30,113 @@ class SchemaSynchronizerMySqlIntegrationTest {
             statement.execute("DROP TABLE IF EXISTS mysql_items");
             statement.execute("DROP TABLE IF EXISTS mysql_flag");
             statement.execute("DROP TABLE IF EXISTS mysql_strict");
+            statement.execute("DROP TABLE IF EXISTS mysqlxstrict");
             statement.execute("DROP TABLE IF EXISTS schema_synchronizer_history");
+        }
+    }
+
+    @Test
+    void namesAreNotPatternsAndDecimalPrecisionIsCompared(@TempDir Path tempDir) throws Exception {
+        try (Connection connection = connection(); var statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE mysql_strict (id BIGINT NOT NULL PRIMARY KEY, "
+                    + "amount DECIMAL(10,4) UNSIGNED NOT NULL, plain DECIMAL, wide DECIMAL(12,4), uns INT UNSIGNED DEFAULT 1)");
+            // `_` is a metadata wildcard: this table must not lend its columns to mysql_strict.
+            statement.execute("CREATE TABLE mysqlxstrict (id BIGINT NOT NULL PRIMARY KEY, extra INT)");
+        }
+        SchemaDefinition.TableDef sibling = new SchemaDefinition.TableDef(
+                "CREATE TABLE IF NOT EXISTS mysqlxstrict (id BIGINT NOT NULL PRIMARY KEY, extra INT)",
+                List.of(new SchemaDefinition.ColumnDef("id", "BIGINT NOT NULL"),
+                        new SchemaDefinition.ColumnDef("extra", "INT")), List.of());
+        SchemaDefinition declared = new SchemaDefinition(2, "mysql", Map.of("mysql_strict",
+                new SchemaDefinition.TableDef("CREATE TABLE IF NOT EXISTS mysql_strict (id BIGINT NOT NULL PRIMARY KEY)",
+                        List.of(new SchemaDefinition.ColumnDef("id", "BIGINT NOT NULL"),
+                                new SchemaDefinition.ColumnDef("amount", "DECIMAL(10,2) UNSIGNED"),
+                                new SchemaDefinition.ColumnDef("plain", "DECIMAL"),
+                                new SchemaDefinition.ColumnDef("wide", "DECIMAL"),
+                                new SchemaDefinition.ColumnDef("uns", "INT UNSIGNED DEFAULT 5"),
+                                new SchemaDefinition.ColumnDef("extra", "INT")), List.of()),
+                "mysqlxstrict", sibling), List.of());
+        try (Connection connection = connection()) {
+            SchemaSynchronizationResult result = synchronizer().synchronizeWithResult(connection, declared);
+            assertThat(result.columnsAdded()).isEqualTo(1);
+            // Only the UNSIGNED default is applied; a narrower DECIMAL must not be reached through DROP NOT NULL.
+            assertThat(result.columnsAltered()).isEqualTo(1);
+            assertThat(result.pendingSql()).anyMatch(line -> line.contains("amount"))
+                    .anyMatch(line -> line.contains("wide"))
+                    .noneMatch(line -> line.matches("(?s).*\\b(?:plain|uns|extra)\\b.*"));
+        }
+        try (Connection connection = connection(); var statement = connection.createStatement();
+             var rows = statement.executeQuery("SELECT column_name, column_type, is_nullable, column_default "
+                     + "FROM information_schema.columns WHERE table_schema = DATABASE() "
+                     + "AND table_name = 'mysql_strict' ORDER BY ordinal_position")) {
+            Map<String, String> columns = new java.util.HashMap<>();
+            while (rows.next()) {
+                columns.put(rows.getString(1), rows.getString(2) + " " + rows.getString(3) + " " + rows.getString(4));
+            }
+            assertThat(columns).containsEntry("amount", "decimal(10,4) unsigned NO null")
+                    .containsEntry("plain", "decimal(10,0) YES null")
+                    .containsEntry("wide", "decimal(12,4) YES null")
+                    .containsEntry("uns", "int unsigned YES 5")
+                    .containsEntry("extra", "int YES null");
+        }
+        SchemaDefinition converged = new SchemaDefinition(2, "mysql", Map.of("mysql_strict",
+                new SchemaDefinition.TableDef("CREATE TABLE IF NOT EXISTS mysql_strict (id BIGINT NOT NULL PRIMARY KEY)",
+                        List.of(new SchemaDefinition.ColumnDef("id", "BIGINT NOT NULL"),
+                                new SchemaDefinition.ColumnDef("amount", "DECIMAL(10,4) UNSIGNED NOT NULL"),
+                                new SchemaDefinition.ColumnDef("plain", "DECIMAL"),
+                                new SchemaDefinition.ColumnDef("wide", "DECIMAL(12,4)"),
+                                new SchemaDefinition.ColumnDef("uns", "INT UNSIGNED DEFAULT 5"),
+                                new SchemaDefinition.ColumnDef("extra", "INT")), List.of()),
+                "mysqlxstrict", sibling), List.of());
+        try (Connection connection = connection()) {
+            SchemaSynchronizationResult strict = synchronizer(true).synchronizeWithResult(connection, converged);
+            assertThat(strict.pendingSql()).isEmpty();
+            assertThat(strict.changed()).isFalse();
+        }
+        // Connector/J finds nothing for an escaped metadata name under NO_BACKSLASH_ESCAPES.
+        Path snapshot = tempDir.resolve("no-backslash-escapes.json");
+        try (Connection connection = connection(); var statement = connection.createStatement()) {
+            statement.execute("SET SESSION sql_mode = CONCAT(@@sql_mode, ',NO_BACKSLASH_ESCAPES')");
+            SchemaSynchronizationResult strict = synchronizer(true).synchronizeWithResult(connection, converged);
+            assertThat(strict.pendingSql()).isEmpty();
+            assertThat(strict.changed()).isFalse();
+            SchemaSnapshotWriter.writeSnapshot(connection, catalog(), snapshot);
+        }
+        SchemaDefinition serialized = new ObjectMapper().readValue(snapshot.toFile(), SchemaDefinition.class);
+        assertThat(serialized.tables().get("mysql_strict").columns())
+                .extracting(SchemaDefinition.ColumnDef::name)
+                .containsExactly("id", "amount", "plain", "wide", "uns", "extra");
+    }
+
+    @Test
+    void zerofillDisplayWidthIsNeitherResetNorSnapshotted(@TempDir Path tempDir) throws Exception {
+        try (Connection connection = connection(); var statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE mysql_strict (id BIGINT NOT NULL PRIMARY KEY, "
+                    + "narrow INT(5) ZEROFILL NOT NULL, standard INT ZEROFILL NOT NULL)");
+        }
+        SchemaDefinition relaxed = new SchemaDefinition(2, "mysql", Map.of("mysql_strict",
+                new SchemaDefinition.TableDef("CREATE TABLE IF NOT EXISTS mysql_strict (id BIGINT NOT NULL PRIMARY KEY)",
+                        List.of(new SchemaDefinition.ColumnDef("id", "BIGINT NOT NULL"),
+                                new SchemaDefinition.ColumnDef("narrow", "INT UNSIGNED ZEROFILL"),
+                                new SchemaDefinition.ColumnDef("standard", "INT ZEROFILL")), List.of())), List.of());
+        try (Connection connection = connection()) {
+            SchemaSynchronizationResult result = synchronizer().synchronizeWithResult(connection, relaxed);
+            assertThat(result.columnsAltered()).isEqualTo(1);
+            assertThat(result.pendingSql()).singleElement().asString().contains("narrow").contains("display width (5)");
+        }
+        try (Connection connection = connection(); var statement = connection.createStatement();
+             var rows = statement.executeQuery("SELECT column_name, column_type, is_nullable FROM information_schema.columns "
+                     + "WHERE table_schema = DATABASE() AND table_name = 'mysql_strict' AND column_name <> 'id'")) {
+            Map<String, String> columns = new java.util.HashMap<>();
+            while (rows.next()) {
+                columns.put(rows.getString(1), rows.getString(2) + " " + rows.getString(3));
+            }
+            assertThat(columns).containsEntry("narrow", "int(5) unsigned zerofill NO")
+                    .containsEntry("standard", "int(10) unsigned zerofill YES");
+        }
+        try (Connection connection = connection()) {
+            assertThatThrownBy(() -> SchemaSnapshotWriter.writeSnapshot(connection, catalog(),
+                    tempDir.resolve("zerofill.json"))).hasMessageContaining("ZEROFILL display width (5)");
         }
     }
 
@@ -93,7 +199,14 @@ class SchemaSynchronizerMySqlIntegrationTest {
                 + "raw VARBINARY(10) DEFAULT 'ab', fixed BINARY(4) DEFAULT 'ab', "
                 + "zeros VARBINARY(8) DEFAULT 0x00275C0A, padded BINARY(4) DEFAULT 0x0041, "
                 + "required VARBINARY(8) NOT NULL DEFAULT 0x00FF, one BINARY(2) NOT NULL DEFAULT 'a', "
+                + "digits VARBINARY(4) DEFAULT 007, "
                 + "touched DATETIME(3) DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3), "
+                + "latin VARCHAR(10) CHARACTER SET latin1 COLLATE latin1_bin DEFAULT 'x' COMMENT 'it''s', "
+                + "hidden INT INVISIBLE, yes_no TINYINT(1) DEFAULT 0, "
+                + "due DATETIME DEFAULT (CURRENT_TIMESTAMP + INTERVAL 1 DAY), "
+                + "flags TINYINT(1) UNSIGNED DEFAULT 1, huge DOUBLE DEFAULT 10E299, uns INT UNSIGNED DEFAULT 1.0, "
+                + "amount DECIMAL(5,2) UNSIGNED DEFAULT 1.50, "
+                + "zfill DECIMAL(8,2) UNSIGNED ZEROFILL DEFAULT 1.5, zint INT UNSIGNED ZEROFILL, "
                 + "PRIMARY KEY (id))";
         SchemaDefinition initial = new SchemaDefinition(2, "mysql", Map.of("mysql_strict",
                 new SchemaDefinition.TableDef(create, List.of(
@@ -127,8 +240,19 @@ class SchemaSynchronizerMySqlIntegrationTest {
                         new SchemaDefinition.ColumnDef("padded", "BINARY(4) DEFAULT 0x0041"),
                         new SchemaDefinition.ColumnDef("required", "VARBINARY(8) NOT NULL DEFAULT 0x00FF"),
                         new SchemaDefinition.ColumnDef("one", "BINARY(2) NOT NULL DEFAULT 'a'"),
+                        new SchemaDefinition.ColumnDef("digits", "VARBINARY(4) DEFAULT 007"),
                         new SchemaDefinition.ColumnDef("touched",
-                                "DATETIME(3) DEFAULT NOW(3) ON UPDATE CURRENT_TIMESTAMP(3)")),
+                                "DATETIME(3) DEFAULT NOW(3) ON UPDATE CURRENT_TIMESTAMP(3)"),
+                        new SchemaDefinition.ColumnDef("latin", "VARCHAR(10) DEFAULT 'x'"),
+                        new SchemaDefinition.ColumnDef("hidden", "INT"),
+                        new SchemaDefinition.ColumnDef("yes_no", "TINYINT(1) DEFAULT 0"),
+                        new SchemaDefinition.ColumnDef("due", "DATETIME DEFAULT (now() + interval 1 day)"),
+                        new SchemaDefinition.ColumnDef("flags", "TINYINT(1) UNSIGNED DEFAULT 1"),
+                        new SchemaDefinition.ColumnDef("huge", "DOUBLE DEFAULT 10E299"),
+                        new SchemaDefinition.ColumnDef("uns", "INT UNSIGNED DEFAULT 1.0"),
+                        new SchemaDefinition.ColumnDef("amount", "DECIMAL(5,2) UNSIGNED DEFAULT 1.5"),
+                        new SchemaDefinition.ColumnDef("zfill", "DECIMAL(8,2) UNSIGNED ZEROFILL DEFAULT 1.5"),
+                        new SchemaDefinition.ColumnDef("zint", "INT UNSIGNED ZEROFILL")),
                         List.of("CREATE INDEX idx_mysql_strict_label ON mysql_strict (label, code DESC)"))),
                 List.of());
 
@@ -146,7 +270,12 @@ class SchemaSynchronizerMySqlIntegrationTest {
             SchemaSnapshotWriter.writeSnapshot(connection, catalog(), snapshot);
         }
         assertThat(java.nio.file.Files.readString(snapshot)).contains("DEFAULT 0x00275C0A", "DEFAULT 0x00410000",
-                "DEFAULT 0x00FF", "DEFAULT 0x6100", "ON UPDATE CURRENT_TIMESTAMP(3)");
+                "DEFAULT 0x00FF", "DEFAULT 0x6100", "ON UPDATE CURRENT_TIMESTAMP(3)",
+                "CHARACTER SET latin1 COLLATE latin1_bin", "COMMENT 'it''s'", "INT INVISIBLE",
+                // MySQL 8.0.19+ keeps the TINYINT(1) display width only when signed (MariaDB also when unsigned).
+                "flags TINYINT UNSIGNED DEFAULT 1", "amount NUMERIC(5,2) UNSIGNED DEFAULT 1.50",
+                // Connector/J omits ZEROFILL from TYPE_NAME; the snapshot restores it from COLUMN_TYPE.
+                "zfill NUMERIC(8,2) UNSIGNED ZEROFILL", "zint INT UNSIGNED ZEROFILL");
         SchemaDefinition serialized = new ObjectMapper().readValue(snapshot.toFile(), SchemaDefinition.class);
         try (Connection connection = connection(); var statement = connection.createStatement()) {
             statement.execute("DROP TABLE mysql_strict");
@@ -158,6 +287,58 @@ class SchemaSynchronizerMySqlIntegrationTest {
             SchemaSynchronizationResult replayed = synchronizer(true).synchronizeWithResult(connection, serialized);
             assertThat(replayed.pendingSql()).isEmpty();
             assertThat(replayed.changed()).isFalse();
+        }
+        try (Connection connection = connection(); var statement = connection.createStatement();
+             var rows = statement.executeQuery("SELECT column_name, column_type, collation_name, column_comment, "
+                     + "extra FROM information_schema.columns WHERE table_schema = DATABASE() "
+                     + "AND table_name = 'mysql_strict' AND column_name IN ('latin', 'hidden', 'yes_no', 'flags') "
+                     + "ORDER BY column_name")) {
+            List<String> replayedColumns = new java.util.ArrayList<>();
+            while (rows.next()) {
+                replayedColumns.add(rows.getString(1) + " " + rows.getString(2) + " " + rows.getString(3) + " "
+                        + rows.getString(4) + " " + rows.getString(5));
+            }
+            assertThat(replayedColumns).containsExactly("flags tinyint unsigned null  ", "hidden int null  INVISIBLE",
+                    "latin varchar(10) latin1_bin it's ", "yes_no tinyint(1) null  ");
+        }
+    }
+
+    @Test
+    void aModifyNeverResetsTinyint1DisplayWidth() throws Exception {
+        try (Connection connection = connection(); var statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE mysql_strict (id BIGINT NOT NULL PRIMARY KEY, "
+                    + "a TINYINT(1) NOT NULL, b TINYINT(1) NOT NULL, c TINYINT DEFAULT 0, d TINYINT(1) NOT NULL)");
+        }
+        SchemaDefinition relaxed = new SchemaDefinition(2, "mysql", Map.of("mysql_strict",
+                new SchemaDefinition.TableDef("CREATE TABLE IF NOT EXISTS mysql_strict (id BIGINT NOT NULL PRIMARY KEY)",
+                        List.of(new SchemaDefinition.ColumnDef("id", "BIGINT NOT NULL"),
+                                new SchemaDefinition.ColumnDef("a", "TINYINT"),
+                                new SchemaDefinition.ColumnDef("b", "BOOLEAN"),
+                                new SchemaDefinition.ColumnDef("c", "BOOLEAN DEFAULT 1"),
+                                // Another integer type is not a display-width change (BOOLEAN to SMALLINT is a type change).
+                                new SchemaDefinition.ColumnDef("d", "SMALLINT NOT NULL")),
+                        List.of())),
+                List.of());
+        try (Connection connection = connection()) {
+            SchemaSynchronizationResult result = synchronizer().synchronizeWithResult(connection, relaxed);
+            assertThat(result.columnsAltered()).isEqualTo(1);
+            assertThat(result.pendingSql()).hasSize(3);
+            assertThat(result.pendingSql()).anyMatch(sql -> sql.contains("MODIFY COLUMN d SMALLINT")
+                    && !sql.contains("display width"));
+            assertThat(result.pendingSql()).anyMatch(sql -> sql.contains("MODIFY COLUMN a")
+                    && sql.contains("TINYINT(1) display width"));
+            assertThat(result.pendingSql()).anyMatch(sql -> sql.contains("c BOOLEAN DEFAULT 1")
+                    && sql.contains("display width to (1)"));
+        }
+        try (Connection connection = connection(); var statement = connection.createStatement();
+             var rows = statement.executeQuery("SELECT column_name, column_type, is_nullable "
+                     + "FROM information_schema.columns WHERE table_schema = DATABASE() "
+                     + "AND table_name = 'mysql_strict' AND column_name IN ('a', 'b', 'c', 'd') ORDER BY column_name")) {
+            List<String> columns = new java.util.ArrayList<>();
+            while (rows.next()) {
+                columns.add(rows.getString(1) + " " + rows.getString(2) + " " + rows.getString(3));
+            }
+            assertThat(columns).containsExactly("a tinyint(1) NO", "b tinyint(1) YES", "c tinyint YES", "d tinyint(1) NO");
         }
     }
 
@@ -392,6 +573,73 @@ class SchemaSynchronizerMySqlIntegrationTest {
             assertThat(rows.next()).isTrue();
             // Rendered through the UTF-8 session: still the two bytes C3 A9 and still VARBINARY(4).
             assertThat(rows.getString(2)).contains("varbinary(4) NOT NULL DEFAULT 'é'");
+        }
+    }
+
+    @Test
+    void metadataIsReadFromTheConfiguredSchemaWhateverTheDriverCaches() throws Exception {
+        try (Connection connection = connection(); var statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE mysql_strict (id BIGINT NOT NULL PRIMARY KEY, label VARCHAR(40))");
+        }
+        String catalog = catalog();
+        SchemaDefinition narrower = new SchemaDefinition(2, "mysql", Map.of("mysql_strict",
+                new SchemaDefinition.TableDef("CREATE TABLE IF NOT EXISTS mysql_strict (id BIGINT NOT NULL PRIMARY KEY)",
+                        List.of(new SchemaDefinition.ColumnDef("id", "BIGINT NOT NULL"),
+                                new SchemaDefinition.ColumnDef("label", "VARCHAR(20)")), List.of())),
+                List.of());
+        String url = System.getProperty("schema.test.mysql.jdbc.url");
+        // Connector/J keeps the URL database as getCatalog() after USE.
+        String otherDatabase = url.replaceFirst("(//[^/]+/)[^?]*", "$1information_schema");
+        try (Connection switched = DriverManager.getConnection(otherDatabase,
+                System.getProperty("schema.test.mysql.jdbc.user"), System.getProperty("schema.test.mysql.jdbc.password"))) {
+            switched.createStatement().execute("USE `" + catalog + "`");
+            SchemaSynchronizationResult result = synchronizer().synchronizeWithResult(switched, narrower);
+            assertThat(result.tablesCreated()).isZero();
+            assertThat(result.columnsAltered()).isZero();
+            assertThat(result.pendingSql()).singleElement().asString().contains("MODIFY COLUMN label");
+        }
+        String schemaTerm = url + (url.contains("?") ? "&" : "?")
+                + (url.startsWith("jdbc:mariadb:") ? "useCatalogTerm=Schema" : "databaseTerm=SCHEMA");
+        SchemaDefinition same = new SchemaDefinition(2, "mysql", Map.of("mysql_strict",
+                new SchemaDefinition.TableDef("CREATE TABLE IF NOT EXISTS mysql_strict (id BIGINT NOT NULL PRIMARY KEY)",
+                        List.of(new SchemaDefinition.ColumnDef("id", "BIGINT NOT NULL"),
+                                new SchemaDefinition.ColumnDef("label", "VARCHAR(40)")), List.of())),
+                List.of());
+        // In schema-term mode the schema argument is a LIKE pattern: a sibling database whose name
+        // differs only where the schema has `_` must stay invisible.
+        String adminUser = System.getProperty("schema.test.mysql.jdbc.admin.user");
+        String decoy = catalog.contains("_") && adminUser != null && !adminUser.isBlank()
+                ? catalog.replaceFirst("_", "x") : null;
+        try {
+            if (decoy != null) {
+                try (Connection admin = adminConnection(adminUser); var statement = admin.createStatement()) {
+                    statement.execute("DROP DATABASE IF EXISTS `" + decoy + "`");
+                    statement.execute("CREATE DATABASE `" + decoy + "`");
+                    statement.execute("CREATE TABLE `" + decoy + "`.mysql_strict (id BIGINT NOT NULL PRIMARY KEY, "
+                            + "label VARCHAR(10), ghost INT NOT NULL)");
+                    statement.execute("CREATE TABLE `" + decoy + "`.ghost_table (id INT)");
+                    statement.execute("GRANT SELECT ON `" + decoy + "`.* TO "
+                            + System.getProperty("schema.test.mysql.jdbc.user"));
+                }
+            }
+            try (Connection schemaMode = DriverManager.getConnection(schemaTerm,
+                    System.getProperty("schema.test.mysql.jdbc.user"), System.getProperty("schema.test.mysql.jdbc.password"))) {
+                SchemaSynchronizationResult strict = synchronizer(true).synchronizeWithResult(schemaMode, same);
+                assertThat(strict.pendingSql()).isEmpty();
+                assertThat(strict.changed()).isFalse();
+            }
+        } finally {
+            if (decoy != null) {
+                try (Connection admin = adminConnection(adminUser); var statement = admin.createStatement()) {
+                    statement.execute("DROP DATABASE IF EXISTS `" + decoy + "`");
+                }
+            }
+        }
+        try (Connection connection = connection(); var statement = connection.createStatement();
+             var rows = statement.executeQuery("SELECT column_type FROM information_schema.columns WHERE "
+                     + "table_schema = DATABASE() AND table_name = 'mysql_strict' AND column_name = 'label'")) {
+            assertThat(rows.next()).isTrue();
+            assertThat(rows.getString(1)).isEqualTo("varchar(40)");
         }
     }
 

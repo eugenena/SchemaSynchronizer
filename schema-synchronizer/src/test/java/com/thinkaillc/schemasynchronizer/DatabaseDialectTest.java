@@ -78,6 +78,8 @@ class DatabaseDialectTest {
         Connection connection = mock(Connection.class);
         when(connection.getCatalog()).thenReturn("appdb");
 
+        assertThat(DatabaseDialect.MYSQL.metadataCatalog(connection, "App_db")).isEqualTo("App_db");
+        assertThat(DatabaseDialect.MARIADB.metadataSchemaPattern("App_db")).isEqualTo("App_db");
         assertThat(DatabaseDialect.SQLSERVER.metadataCatalog(connection, "dbo")).isEqualTo("appdb");
         assertThat(DatabaseDialect.SQLSERVER.metadataSchemaPattern("dbo")).isEqualTo("dbo");
         assertThat(DatabaseDialect.SQLSERVER.qualifyHistoryTable("dbo", "schema_synchronizer_history"))

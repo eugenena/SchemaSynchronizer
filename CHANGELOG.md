@@ -35,6 +35,50 @@ Review fixes that can change what an existing definition reports after upgrading
   add, or modify a `TIMESTAMP` column is refused before any DDL.
 - **MySQL Connector/J against MariaDB** is detected as `mariadb`; definitions declaring
   `"dialect": "mysql"` for a MariaDB server must switch to `mariadb` (or re-snapshot).
+- **MySQL/MariaDB validation** rejects defaults the server would reject at DDL time (odd-length
+  `X'…'`, out-of-range integers, `DECIMAL` overflow, over-long binary and string literals,
+  including trailing spaces, `FLOAT`/`DOUBLE` overflow, negatives on `UNSIGNED`, integer type
+  synonyms such as `MIDDLEINT`) before any DDL runs. MariaDB's bare `ON UPDATE CURRENT_TIMESTAMP`
+  on `DATETIME(n)` is accepted; an explicit `(0)` is not. A bare number on a binary column
+  compares as its decimal text. `TINYINT(1) UNSIGNED`, `INT(n) UNSIGNED` and
+  `DECIMAL(p,s) UNSIGNED` parse; `UNSIGNED` types normalize like their signed base, their
+  numeric defaults and large `DOUBLE` exponents compare by value, and their defaults are set
+  automatically like the signed forms. `DECIMAL(p,s) UNSIGNED` compares precision and scale.
+- **`DECIMAL` without precision** compares as the type the engine creates: `DECIMAL(10,0)` on
+  MySQL/MariaDB, `DECIMAL(18,0)` on SQL Server, `NUMBER(38,0)` for Oracle's ANSI spellings
+  (Oracle `NUMBER` and PostgreSQL `NUMERIC` stay unbounded). On MySQL/MariaDB it compared as
+  unbounded, which re-ran `MODIFY COLUMN` on every sync and would have rounded a wider live
+  column to `(10,0)`. A wider live column is now pending on MySQL/MariaDB, SQL Server, and
+  Oracle, and SQL Server's bare declaration no longer stays pending against a live
+  `DECIMAL(18,0)`. On Oracle, a bare `DECIMAL`/`NUMERIC` declared for a live unbounded
+  `NUMBER` column now reports a pending change; declare `NUMBER`.
+- **Metadata name matching:** JDBC drivers match schema and table names with `LIKE`, so
+  `user_role` read the columns of `user1role` (every engine), a MySQL-family schema matched a
+  sibling database under `databaseTerm=SCHEMA`, and Oracle primary-key lookups matched a
+  sibling schema. Rows are now filtered to the exact name.
+- **`DEC` and `FIXED`** compare as `DECIMAL`; they stayed pending against the live column.
+  `ZEROFILL` implies `UNSIGNED` in either order, and `DECIMAL(p,s) ZEROFILL` parses. `UNSIGNED`,
+  `ZEROFILL`, or `FIXED` declared for PostgreSQL, SQL Server, or Oracle, `NUMBER` declared for
+  any engine but Oracle, and an attribute before the length (`INT UNSIGNED(10)`), fail
+  validation instead of failing at DDL time. A PostgreSQL definition that declared
+  `NUMBER(p,s)` for an existing column must switch to `NUMERIC(p,s)`.
+- **MySQL/MariaDB schema binding:** the configured schema must equal `DATABASE()` exactly, also
+  when the driver reports no catalog; metadata reads are bound to it, including after a `USE`
+  (Connector/J caches the URL database) and with `databaseTerm=SCHEMA`/`useCatalogTerm=Schema`.
+  A session `TEMPORARY` table that shadows a declared table fails the sync before any DDL on it.
+- **MySQL/MariaDB `MODIFY COLUMN`** is pending when it would drop MariaDB `COMPRESSED` or
+  `ZEROFILL`, reset a non-default `ZEROFILL` display width (`INT(5) ZEROFILL`), or add or
+  remove the `TINYINT(1)` display width of a column kept as `TINYINT`. `COMPRESSED` and
+  `INVISIBLE` columns read their binary defaults correctly.
+- **MySQL/MariaDB snapshots** keep column character set/collation (when not the table's),
+  `INVISIBLE`, `COMMENT`, and MariaDB `COMPRESSED` in `createSql`, write MariaDB
+  `TINYINT(1) UNSIGNED` with its display width, keep the precision of `DECIMAL(p,s) UNSIGNED`
+  (also with `ZEROFILL`), and write `ZEROFILL` when taken through MySQL Connector/J. A
+  `ZEROFILL` column in an older Connector/J snapshot reports a pending change; re-snapshot.
+  A snapshot refuses a `ZEROFILL` integer with a non-default display width, which a
+  declaration cannot express. Primary-key text inside literals or comments of
+  `createSql` is no longer read as a key clause; a key that reads differently with and without
+  `ANSI_QUOTES` fails the sync.
 
 ## 1.4.0 — 2026-09-26
 

@@ -32,6 +32,20 @@ public final class ColumnDefinitionParser {
     private static final Pattern TYPE_LEN = Pattern.compile(
             "^([A-Za-z][A-Za-z0-9_\\s]*?)(?:\\((MAX|\\d+)(?:\\s+(?:CHAR|BYTE))?(?:\\s*,\\s*(\\d+))?\\))?$",
             Pattern.CASE_INSENSITIVE);
+    /**
+     * MySQL numeric width or precision before UNSIGNED: {@code TINYINT(1) UNSIGNED}, {@code DECIMAL(5,2) UNSIGNED}.
+     * ZEROFILL is accepted only on exact numerics, whose precision is compared; an integer display width
+     * with ZEROFILL is not.
+     */
+    private static final Pattern INTEGER_WIDTH_ATTRIBUTES = Pattern.compile(
+            "^(?:(TINYINT|SMALLINT|MEDIUMINT|INT|INTEGER|BIGINT|DECIMAL|NUMERIC|DEC|FIXED|FLOAT|DOUBLE|REAL)"
+                    + "\\s*\\(\\s*(\\d+\\s*(?:,\\s*\\d+\\s*)?)\\)\\s+(UNSIGNED)"
+                    + "|(DECIMAL|NUMERIC|DEC|FIXED)\\s*\\(\\s*(\\d+\\s*(?:,\\s*\\d+\\s*)?)\\)"
+                    + "\\s+(?:UNSIGNED\\s+ZEROFILL|ZEROFILL(?:\\s+UNSIGNED)?))$",
+            Pattern.CASE_INSENSITIVE);
+    /** MySQL numeric attributes in any order; ZEROFILL implies UNSIGNED. */
+    private static final Pattern UNSIGNED_SUFFIX = Pattern.compile("^(.+?)((?: (?:UNSIGNED|ZEROFILL))+)$");
+    private static final Pattern ATTRIBUTE_BEFORE_LENGTH = Pattern.compile("(?i).*\\s(?:UNSIGNED|ZEROFILL)$");
     /** PostgreSQL casts, including quoted type names ({@code '101'::"bit"}). */
     private static final Pattern PG_CAST = Pattern.compile("::(?:\"[^\"]+\"|[A-Za-z][A-Za-z0-9_\\s]*)$");
     private static final Pattern ON_UPDATE = Pattern.compile("\\s+ON\\s+UPDATE\\s+", Pattern.CASE_INSENSITIVE);
@@ -66,7 +80,7 @@ public final class ColumnDefinitionParser {
         }
         Matcher matcher = ON_UPDATE_CLAUSE.matcher(definition);
         while (matcher.find()) {
-            if (!isInsideSingleQuotes(definition, matcher.start())) {
+            if (isOutsideQuotesInEveryMode(definition, matcher.start())) {
                 return matcher.group(1).replaceAll("\\s+", "");
             }
         }
@@ -83,11 +97,19 @@ public final class ColumnDefinitionParser {
         String rest = definition.trim();
         rest = removeOutsideQuotes(AUTO_INCREMENT, rest);
         rest = removeOutsideQuotes(IDENTITY, rest);
-        rest = removeOutsideQuotes(ON_UPDATE_CLAUSE, rest);
+        Matcher onUpdateClause = ON_UPDATE_CLAUSE.matcher(rest);
+        while (onUpdateClause.find()) {
+            if (isOutsideQuotesInEveryMode(rest, onUpdateClause.start())) {
+                rest = (rest.substring(0, onUpdateClause.start()) + rest.substring(onUpdateClause.end())).trim();
+                break;
+            }
+        }
         Matcher unsupportedOnUpdate = ON_UPDATE.matcher(rest);
         while (unsupportedOnUpdate.find()) {
-            if (!isInsideSingleQuotes(rest, unsupportedOnUpdate.start())) {
-                throw new IllegalArgumentException("unsupported ON UPDATE clause: " + definition);
+            if (!isInsideSingleQuotes(rest, unsupportedOnUpdate.start(), false)
+                    || !isInsideSingleQuotes(rest, unsupportedOnUpdate.start(), true)) {
+                throw new IllegalArgumentException("unsupported or ambiguous ON UPDATE clause (a backslash before a"
+                        + " quote reads differently with and without NO_BACKSLASH_ESCAPES): " + definition);
             }
         }
         // Greedy DEFAULT …$ would swallow a trailing constraint NOT NULL
@@ -132,8 +154,17 @@ public final class ColumnDefinitionParser {
             Integer precision = tz.group(2) == null ? null : Integer.parseInt(tz.group(2));
             return new ColumnSpec(type, precision, null, notNull, defaultExpr);
         }
+        Matcher widthAttributes = INTEGER_WIDTH_ATTRIBUTES.matcher(rest);
+        boolean widthRewritten = widthAttributes.matches();
+        if (widthRewritten) {
+            boolean zerofill = widthAttributes.group(1) == null;
+            rest = (zerofill ? widthAttributes.group(4) + " UNSIGNED ZEROFILL(" : widthAttributes.group(1) + " UNSIGNED(")
+                    + widthAttributes.group(zerofill ? 5 : 2).replaceAll("\\s+", "") + ")";
+        }
         Matcher tm = TYPE_LEN.matcher(rest);
-        if (!tm.matches()) {
+        // MySQL rejects an attribute before the length: INT UNSIGNED(10).
+        if (!tm.matches() || (!widthRewritten && tm.group(2) != null
+                && ATTRIBUTE_BEFORE_LENGTH.matcher(tm.group(1).trim()).matches())) {
             throw new IllegalArgumentException("unparseable column type: " + definition);
         }
         String rawType = tm.group(1).trim();
@@ -160,7 +191,7 @@ public final class ColumnDefinitionParser {
         if (length == null && isFixedLength(normalized)) {
             length = 1; // CHAR, NCHAR, and BINARY without a length mean length 1 on every engine.
         }
-        if (scale != null && !"NUMERIC".equals(normalized)) {
+        if (scale != null && !isNumeric(normalized)) {
             throw new IllegalArgumentException("scale is supported only for NUMERIC: " + definition);
         }
         if (scale != null && scale > length) {
@@ -261,6 +292,11 @@ public final class ColumnDefinitionParser {
                 .replaceFirst(" IDENTITY$", "")
                 // Oracle reports TIMESTAMP precision in TYPE_NAME: TIMESTAMP(6) [WITH [LOCAL] TIME ZONE].
                 .replaceFirst("^TIMESTAMP\\s*\\(\\d+\\)", "TIMESTAMP");
+        Matcher unsigned = UNSIGNED_SUFFIX.matcher(t);
+        if (unsigned.matches()) {
+            return normalizeType(unsigned.group(1))
+                    + (unsigned.group(2).contains("ZEROFILL") ? " UNSIGNED ZEROFILL" : " UNSIGNED");
+        }
         return switch (t) {
             case "NVARCHAR", "NVARCHAR2", "NATIONAL CHARACTER VARYING", "NATIONAL CHAR VARYING",
                  "NATIONAL VARCHAR", "NCHAR VARYING", "NCHAR VARCHAR" -> "NVARCHAR";
@@ -273,7 +309,8 @@ public final class ColumnDefinitionParser {
             // BIT(n) is a bit field on MySQL/PostgreSQL, not BOOLEAN (MySQL BOOLEAN is TINYINT(1)).
             case "BOOL", "BOOLEAN" -> "BOOLEAN";
             case "BIT VARYING", "VARBIT" -> "VARBIT";
-            case "DECIMAL", "NUMERIC", "NUMBER" -> "NUMERIC";
+            // DEC (every engine) and FIXED (MySQL/MariaDB) are stored as DECIMAL.
+            case "DECIMAL", "NUMERIC", "NUMBER", "DEC", "FIXED" -> "NUMERIC";
             case "FLOAT4", "REAL" -> "REAL";
             case "FLOAT8", "DOUBLE PRECISION", "DOUBLE" -> "DOUBLE PRECISION";
             case "TIMESTAMP WITH TIME ZONE", "TIMESTAMPTZ" -> "TIMESTAMPTZ";
@@ -295,6 +332,12 @@ public final class ColumnDefinitionParser {
     public static boolean isVariableLength(String normalizedType) {
         return "VARCHAR".equals(normalizedType) || "NVARCHAR".equals(normalizedType)
                 || "VARBINARY".equals(normalizedType) || "VARBIT".equals(normalizedType);
+    }
+
+    /** Exact numerics whose precision and scale are read and compared, including MySQL {@code UNSIGNED}. */
+    public static boolean isNumeric(String normalizedType) {
+        return "NUMERIC".equals(normalizedType) || "NUMERIC UNSIGNED".equals(normalizedType)
+                || "NUMERIC UNSIGNED ZEROFILL".equals(normalizedType);
     }
 
     /** Fixed-length types whose declared length is significant. */
@@ -362,8 +405,24 @@ public final class ColumnDefinitionParser {
 
     /** True when {@code index} falls inside a single-quoted SQL literal. */
     static boolean isInsideSingleQuotes(String text, int index) {
+        return isInsideSingleQuotes(text, index, false);
+    }
+
+    /**
+     * Outside quotes both when a backslash escapes the next character (MySQL default) and when it
+     * does not (NO_BACKSLASH_ESCAPES, other engines): {@code 'a\' ON UPDATE …'} is either reading.
+     */
+    static boolean isOutsideQuotesInEveryMode(String text, int index) {
+        return !isInsideSingleQuotes(text, index, false) && !isInsideSingleQuotes(text, index, true);
+    }
+
+    private static boolean isInsideSingleQuotes(String text, int index, boolean backslashEscapes) {
         boolean inQuote = false;
         for (int i = 0; i < index; i++) {
+            if (inQuote && backslashEscapes && text.charAt(i) == '\\') {
+                i++;
+                continue;
+            }
             if (text.charAt(i) != '\'') {
                 continue;
             }

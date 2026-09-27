@@ -39,7 +39,7 @@ class SchemaSnapshotWriterTest {
         when(row.getString("collation")).thenReturn("A");
 
         assertThat(SchemaSnapshotWriter.readMySqlFamilyIndexes(
-                connection(row), "items", DatabaseDialect.MYSQL))
+                connection(row), "app", "items", DatabaseDialect.MYSQL))
                 .containsExactly("CREATE INDEX idx_items_label ON items (label)");
     }
 
@@ -51,7 +51,7 @@ class SchemaSnapshotWriterTest {
         when(row.getString("collation")).thenReturn("D");
 
         assertThat(SchemaSnapshotWriter.readMySqlFamilyIndexes(
-                connection(row), "items", DatabaseDialect.MARIADB))
+                connection(row), "app", "items", DatabaseDialect.MARIADB))
                 .containsExactly("CREATE INDEX IF NOT EXISTS idx_items_name ON items (name(12) DESC)");
     }
 
@@ -60,7 +60,7 @@ class SchemaSnapshotWriterTest {
         ResultSet row = indexRow("idx_items_expression", null);
 
         assertThatThrownBy(() -> SchemaSnapshotWriter.readMySqlFamilyIndexes(
-                connection(row), "items", DatabaseDialect.MARIADB))
+                connection(row), "app", "items", DatabaseDialect.MARIADB))
                 .hasMessageContaining("expression index cannot be serialized safely");
     }
 

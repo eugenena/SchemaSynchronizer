@@ -99,7 +99,7 @@ public final class NonDestructiveAlterPlanner {
                 if (targetL < liveL) return TypeChange.NARROW;
                 return TypeChange.SAME;
             }
-            if ("NUMERIC".equals(liveType)) {
+            if (ColumnDefinitionParser.isNumeric(liveType)) {
                 if (liveLen == null) return targetLen == null ? TypeChange.SAME : TypeChange.NARROW;
                 if (targetLen == null) return TypeChange.WIDEN;
                 int liveFraction = liveScale == null ? 0 : liveScale;
@@ -154,8 +154,9 @@ public final class NonDestructiveAlterPlanner {
     }
 
     static String formatType(String baseType, Integer length, Integer scale) {
-        if ("NUMERIC".equals(baseType) && length != null && length > 0) {
-            return scale == null ? "NUMERIC(" + length + ")" : "NUMERIC(" + length + "," + scale + ")";
+        if (ColumnDefinitionParser.isNumeric(baseType) && length != null && length > 0) {
+            return (scale == null ? "NUMERIC(" + length + ")" : "NUMERIC(" + length + "," + scale + ")")
+                    + baseType.substring("NUMERIC".length());
         }
         if (ColumnDefinitionParser.hasFractionalPrecision(baseType) && length != null && length >= 0) {
             return baseType + "(" + length + ")";

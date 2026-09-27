@@ -28,6 +28,91 @@ class DialectDeclarationContractTest {
                 schema, "schema_synchronizer_history", 1L, false, true, true));
     }
 
+    private static void fits(String definition, DatabaseDialect dialect) {
+        SchemaSynchronizer.requireMySqlDefaultFits(ColumnDefinitionParser.parse(definition), definition, dialect, "t.c");
+    }
+
+    @Test
+    void mysqlDefaultsTheServerRejectsFailValidation() {
+        // Rejected by MySQL 8.4 and MariaDB 10.3/11.4 with error 1064 or 1067 (verified live), except
+        // DOUBLE UNSIGNED DEFAULT '-1', which only MySQL rejects; it is rejected on both.
+        for (String rejected : List.of("VARBINARY(4) DEFAULT X'616'", "TINYINT DEFAULT 300", "TINYINT DEFAULT -129",
+                "TINYINT UNSIGNED DEFAULT 256", "TINYINT UNSIGNED DEFAULT -1", "SMALLINT DEFAULT 32768",
+                "MEDIUMINT DEFAULT 8388608", "INT DEFAULT 2147483648", "BIGINT DEFAULT -9223372036854775809",
+                "BIGINT UNSIGNED DEFAULT 18446744073709551616", "TINYINT DEFAULT '300'", "TINYINT DEFAULT 127.5",
+                "DECIMAL(5,2) DEFAULT 1234.5", "DECIMAL(5,2) DEFAULT 999.999", "DECIMAL(3) DEFAULT 1000",
+                "VARCHAR(3) DEFAULT 'abcd'", "CHAR(2) DEFAULT 'it''s'", "VARCHAR(3) DEFAULT 'abc   '",
+                "TINYINT DEFAULT 127.5E0", "BINARY(2) DEFAULT 12345", "VARBINARY(2) DEFAULT X'AABBCC'",
+                "VARBINARY(2) DEFAULT 0xAABBC", "VARBINARY(2) DEFAULT 'abc'", "BOOLEAN DEFAULT 300",
+                "DECIMAL DEFAULT 12345678901", "DECIMAL(3,1) DEFAULT 99.95E0", "INT DEFAULT 1E100000000",
+                "TINYINT UNSIGNED DEFAULT -0.4", "TINYINT UNSIGNED DEFAULT -0.5", "TINYINT UNSIGNED DEFAULT '-0.5'",
+                "TINYINT(1) UNSIGNED DEFAULT 256", "TINYINT UNSIGNED ZEROFILL DEFAULT 256",
+                "INT UNSIGNED ZEROFILL DEFAULT -1",
+                // Quoted E notation rounds half away from zero like any quoted number.
+                "TINYINT DEFAULT '-128.5e0'", "TINYINT UNSIGNED DEFAULT '-0.5e0'", "SMALLINT DEFAULT '-32768.5E0'",
+                "DECIMAL UNSIGNED DEFAULT -1", "DECIMAL UNSIGNED DEFAULT 12345678901",
+                "DECIMAL(5,2) UNSIGNED DEFAULT -0.001", "DECIMAL(5,2) UNSIGNED DEFAULT -0.004E0",
+                "DECIMAL(5,2) UNSIGNED DEFAULT '-0.004'", "FLOAT UNSIGNED DEFAULT -1", "FLOAT UNSIGNED DEFAULT -0.4E0",
+                "DOUBLE UNSIGNED DEFAULT '-1'", "TINYINT DEFAULT 0x80", "TINYINT UNSIGNED DEFAULT 0x100",
+                "MIDDLEINT DEFAULT 8388608", "INT1 DEFAULT 128", "TINYINT UNSIGNED DEFAULT - 1",
+                "TINYINT DEFAULT - 129", "DOUBLE DEFAULT 1E309", "FLOAT DEFAULT 1E39", "FLOAT DEFAULT -1E39",
+                "DOUBLE DEFAULT 1E100000000", "DECIMAL(5,2) UNSIGNED DEFAULT 1000", "DECIMAL(5,2) UNSIGNED DEFAULT 999.995",
+                // Exponents at and beyond int range (precision - scale overflows an int).
+                "INT DEFAULT 1E2147483647", "DECIMAL(5,2) DEFAULT 1E2147483647", "INT UNSIGNED DEFAULT -1E2147483647",
+                "INT DEFAULT 1E+2147483648", "DOUBLE DEFAULT 1E+2147483648", "INT DEFAULT '1E+2147483648'",
+                "FLOAT4 DEFAULT 1E39", "NVARCHAR(3) DEFAULT 'abcd'", "NCHAR(2) DEFAULT 'abc'")) {
+            // Each cell must parse, so it is rejected by the default check rather than by the parser.
+            assertThatCode(() -> ColumnDefinitionParser.parse(rejected)).as(rejected).doesNotThrowAnyException();
+            assertThatThrownBy(() -> fits(rejected, DatabaseDialect.MYSQL)).as(rejected)
+                    .isInstanceOf(IllegalArgumentException.class);
+            assertThatThrownBy(() -> fits(rejected, DatabaseDialect.MARIADB)).as(rejected)
+                    .isInstanceOf(IllegalArgumentException.class);
+        }
+        for (String accepted : List.of("VARBINARY(4) DEFAULT X'6162'", "VARBINARY(4) DEFAULT 0x616",
+                "VARBINARY(4) DEFAULT X''", "TINYINT DEFAULT 127", "TINYINT DEFAULT -128", "TINYINT DEFAULT TRUE",
+                "TINYINT UNSIGNED DEFAULT 255", "INT DEFAULT -2147483648", "BIGINT UNSIGNED DEFAULT 18446744073709551615",
+                "TINYINT DEFAULT b'1111111'", "DECIMAL(5,2) DEFAULT 999.99", "DECIMAL(5,2) DEFAULT -0.5",
+                "DECIMAL(3) DEFAULT 999", "DECIMAL(5,2) DEFAULT 999.994", "TINYINT DEFAULT 126.5",
+                "VARCHAR(3) DEFAULT 'abc'", "VARCHAR(3) DEFAULT 'éèê'", "INT DEFAULT (1 + 2)", "INT",
+                "TINYINT DEFAULT -128.5E0", "TINYINT DEFAULT 126.5E0", "BINARY(2) DEFAULT 12",
+                "VARBINARY(3) DEFAULT 'it'''", "BOOLEAN DEFAULT 127", "DECIMAL DEFAULT 1234567890",
+                "INT DEFAULT 1E-100", "INT DEFAULT 1E-100000000", "VARBINARY(1) DEFAULT 'é'",
+                "TINYINT UNSIGNED DEFAULT -0", "TINYINT UNSIGNED DEFAULT -0.0", "TINYINT UNSIGNED DEFAULT '-0.4'",
+                "TINYINT UNSIGNED DEFAULT -0.4E0", "TINYINT UNSIGNED DEFAULT -0.5E0", "TINYINT(1) UNSIGNED DEFAULT 1",
+                "TINYINT DEFAULT '126.5e0'", "TINYINT DEFAULT 0x7F", "TINYINT UNSIGNED DEFAULT 0xFF",
+                "MIDDLEINT DEFAULT 8388607", "TINYINT DEFAULT - 1", "DECIMAL(5,2) UNSIGNED DEFAULT -0.0",
+                "FLOAT UNSIGNED DEFAULT 1E30", "DOUBLE DEFAULT -1E300", "DOUBLE DEFAULT 1E308", "FLOAT DEFAULT 3E38",
+                "FLOAT(53) DEFAULT 1E300", "DOUBLE DEFAULT 1E-100000000", "DECIMAL(5,2) UNSIGNED DEFAULT 999.99",
+                "DECIMAL UNSIGNED DEFAULT 1234567890", "INT DEFAULT 1E-2147483649", "INT DEFAULT 0E+2147483648",
+                "REAL DEFAULT 1E39", "NVARCHAR(3) DEFAULT 'abc'",
+                // Escape-dependent length: left to the server.
+                "VARCHAR(3) DEFAULT 'a\\\\bc'")) {
+            assertThatCode(() -> fits(accepted, DatabaseDialect.MYSQL)).as(accepted).doesNotThrowAnyException();
+        }
+        // MySQL converts X'10' to 16 on an integer column; MariaDB rejects it (verified live on 10.3).
+        assertThatCode(() -> fits("TINYINT DEFAULT X'10'", DatabaseDialect.MYSQL)).doesNotThrowAnyException();
+        assertThatThrownBy(() -> fits("TINYINT DEFAULT X'10'", DatabaseDialect.MARIADB))
+                .hasMessageContaining("MariaDB");
+        assertThatCode(() -> fits("TINYINT DEFAULT 0x10", DatabaseDialect.MARIADB)).doesNotThrowAnyException();
+        assertThatThrownBy(() -> fits("TINYINT DEFAULT X'80'", DatabaseDialect.MYSQL))
+                .isInstanceOf(IllegalArgumentException.class);
+        // MySQL evaluates a parenthesized default on insert; MariaDB rejects (300) at DDL (verified live).
+        assertThatCode(() -> fits("TINYINT DEFAULT (300)", DatabaseDialect.MYSQL)).doesNotThrowAnyException();
+        assertThatCode(() -> fits("VARCHAR(3) DEFAULT ('abcd')", DatabaseDialect.MYSQL)).doesNotThrowAnyException();
+        assertThatThrownBy(() -> fits("TINYINT DEFAULT (300)", DatabaseDialect.MARIADB))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> fits("VARBINARY(4) DEFAULT (X'616')", DatabaseDialect.MYSQL))
+                .hasMessageContaining("even number");
+        // Other engines are not checked here.
+        assertThatCode(() -> fits("SMALLINT DEFAULT 99999", DatabaseDialect.POSTGRESQL)).doesNotThrowAnyException();
+        // Validation runs it for every declared column.
+        assertThatThrownBy(() -> validate(new SchemaDefinition(Map.of("items", new SchemaDefinition.TableDef(
+                "CREATE TABLE items (id INT NOT NULL, PRIMARY KEY (id))",
+                List.of(new SchemaDefinition.ColumnDef("id", "INT NOT NULL"),
+                        new SchemaDefinition.ColumnDef("flag", "TINYINT DEFAULT 300")), List.of()))),
+                DatabaseDialect.MYSQL, "app")).hasMessageContaining("items.flag");
+    }
+
     @Test
     void createTableIfNotExistsIsRejectedOnlyWhereUnsupported() {
         SchemaDefinition definition = table(
@@ -223,7 +308,7 @@ class DialectDeclarationContractTest {
                                                                   String charset, String extra, String comment,
                                                                   String generation, String charsetDefault) {
         return new SchemaSynchronizer.MySqlColumnFacts(true, collation, tableCollation, charset, extra, comment,
-                generation, charsetDefault);
+                generation, charsetDefault, "varchar(20)");
     }
 
     @Test
@@ -255,6 +340,72 @@ class DialectDeclarationContractTest {
                 "utf8mb3", "", "", "", "utf8mb3_general_ci"), "NVARCHAR(100)")).contains("utf8mb3_bin");
         assertThat(SchemaSynchronizer.mySqlBlockReason(mysqlFacts("utf8_bin", "utf8_general_ci",
                 "utf8", "", "", "", "utf8_general_ci"), "NCHAR(10)")).contains("utf8_bin");
+        assertThat(SchemaSynchronizer.mySqlBlockReason(new SchemaSynchronizer.MySqlColumnFacts(true, null, null, null,
+                "", "", "", null, "varbinary(10) /*M!100301 COMPRESSED*/"), "VARBINARY(20)")).contains("COMPRESSED");
+        var tinyint1 = new SchemaSynchronizer.MySqlColumnFacts(true, null, null, null, "", "", "", null, "tinyint(1)");
+        assertThat(SchemaSynchronizer.mySqlBlockReason(tinyint1, "TINYINT")).contains("display width");
+        assertThat(SchemaSynchronizer.mySqlBlockReason(tinyint1, "TINYINT(10)")).contains("display width");
+        // Not a TINYINT declaration: a widen to another integer type is not a display-width change.
+        assertThat(SchemaSynchronizer.mySqlBlockReason(tinyint1, "BOOLEANISH")).isNull();
+        assertThat(SchemaSynchronizer.mySqlBlockReason(tinyint1, "SMALLINT NOT NULL")).isNull();
+        assertThat(SchemaSynchronizer.mySqlBlockReason(tinyint1, "INT1")).contains("display width");
+        assertThat(SchemaSynchronizer.mySqlBlockReason(new SchemaSynchronizer.MySqlColumnFacts(true, null, null, null,
+                "", "", "", null, "tinyint(1) unsigned"), "SMALLINT UNSIGNED")).isNull();
+        SchemaSynchronizer.MySqlColumnFacts zerofill1 = new SchemaSynchronizer.MySqlColumnFacts(true, null, null, null,
+                "", "", "", null, "tinyint(1) unsigned zerofill");
+        assertThat(SchemaSynchronizer.mySqlBlockReason(zerofill1, "TINYINT UNSIGNED"))
+                .isEqualTo("ZEROFILL attribute would be dropped by MODIFY COLUMN");
+        assertThat(SchemaSynchronizer.mySqlBlockReason(zerofill1, "TINYINT UNSIGNED ZEROFILL"))
+                .isEqualTo("ZEROFILL display width (1) would be reset by MODIFY COLUMN");
+        // A non-default ZEROFILL width changes the padding; the default width is kept by MODIFY.
+        assertThat(SchemaSynchronizer.mySqlBlockReason(new SchemaSynchronizer.MySqlColumnFacts(true, null, null, null,
+                "", "", "", null, "int(5) unsigned zerofill"), "INT UNSIGNED ZEROFILL"))
+                .isEqualTo("ZEROFILL display width (5) would be reset by MODIFY COLUMN");
+        assertThat(SchemaSynchronizer.mySqlBlockReason(new SchemaSynchronizer.MySqlColumnFacts(true, null, null, null,
+                "", "", "", null, "int(10) unsigned zerofill"), "INT UNSIGNED ZEROFILL NOT NULL")).isNull();
+        assertThat(SchemaSynchronizer.mySqlBlockReason(new SchemaSynchronizer.MySqlColumnFacts(true, null, null, null,
+                "", "", "", null, "int unsigned"), "INT UNSIGNED DEFAULT 'zerofill'")).isNull();
+        assertThat(SchemaSynchronizer.mySqlBlockReason(new SchemaSynchronizer.MySqlColumnFacts(true, null, null, null,
+                "", "", "", null, "enum('zerofill','x')"), "ENUM('zerofill','x')")).isNull();
+        assertThat(SchemaSynchronizer.mySqlBlockReason(new SchemaSynchronizer.MySqlColumnFacts(true, null, null, null,
+                "", "", "", null, "set('a''s zerofill','x')"), "SET('a''s zerofill','x')")).isNull();
+        assertThat(SchemaSynchronizer.mySqlBlockReason(tinyint1, "BOOLEAN")).isNull();
+        assertThat(SchemaSynchronizer.mySqlBlockReason(tinyint1, "bool NOT NULL")).isNull();
+        assertThat(SchemaSynchronizer.mySqlBlockReason(tinyint1, "TINYINT( 1 ) DEFAULT 0")).isNull();
+        assertThat(SchemaSynchronizer.mySqlBlockReason(new SchemaSynchronizer.MySqlColumnFacts(true, null, null, null,
+                "", "", "", null, "tinyint(4)"), "TINYINT")).isNull();
+        assertThat(SchemaSynchronizer.mySqlBlockReason(new SchemaSynchronizer.MySqlColumnFacts(true, null, null, null,
+                "", "", "", null, "tinyint(10) unsigned"), "TINYINT UNSIGNED")).isNull();
+        for (String liveType : List.of("tinyint", "tinyint(4)", "tinyint(10)", "tinyint unsigned")) {
+            var facts = new SchemaSynchronizer.MySqlColumnFacts(true, null, null, null, "", "", "", null, liveType);
+            assertThat(SchemaSynchronizer.mySqlBlockReason(facts, "BOOLEAN DEFAULT 1")).as(liveType)
+                    .contains("display width to (1)");
+            assertThat(SchemaSynchronizer.mySqlBlockReason(facts, "TINYINT(1)")).as(liveType)
+                    .contains("display width to (1)");
+        }
+        assertThat(SchemaSynchronizer.mySqlBlockReason(new SchemaSynchronizer.MySqlColumnFacts(true, null, null, null,
+                "", "", "", null, "tinyint(1) unsigned"), "TINYINT UNSIGNED")).contains("would be reset")
+                .contains("declare TINYINT(1) UNSIGNED").doesNotContain("BOOLEAN or");
+        SchemaSynchronizer.MySqlColumnFacts unsigned1 = new SchemaSynchronizer.MySqlColumnFacts(true, null, null, null,
+                "", "", "", null, "tinyint(1) unsigned");
+        assertThat(SchemaSynchronizer.mySqlBlockReason(unsigned1, "TINYINT(1) UNSIGNED DEFAULT 0")).isNull();
+        assertThat(SchemaSynchronizer.mySqlBlockReason(new SchemaSynchronizer.MySqlColumnFacts(true, null, null, null,
+                "", "", "", null, "tinyint(4) unsigned"), "TINYINT(1) UNSIGNED"))
+                .contains("display width to (1)").endsWith("declare TINYINT UNSIGNED");
+        assertThat(SchemaSynchronizer.mySqlBlockReason(tinyint1, "TINYINT")).endsWith("declare BOOLEAN or TINYINT(1)");
+        // COMPRESSED is matched as MariaDB's versioned comment, not as text inside an ENUM.
+        assertThat(SchemaSynchronizer.mySqlBlockReason(new SchemaSynchronizer.MySqlColumnFacts(true, null, null, null,
+                "", "", "", null, "enum('COMPRESSED','PLAIN')"), "ENUM('COMPRESSED','PLAIN')")).isNull();
+
+        // Snapshot createSql keeps what a declaration cannot: charset/collation, COMPRESSED, INVISIBLE, COMMENT.
+        assertThat(SchemaSnapshotWriter.mysqlColumnClauses("latin1", "latin1_bin", "utf8mb4_bin", "it's \\ x",
+                "on update current_timestamp(), INVISIBLE", "varchar(10) /*!100301 COMPRESSED*/", true))
+                .containsExactly(" COMPRESSED CHARACTER SET latin1 COLLATE latin1_bin",
+                        " INVISIBLE COMMENT 'it''s \\\\ x'");
+        assertThat(SchemaSnapshotWriter.mysqlColumnClauses("utf8mb4", "utf8mb4_bin", "utf8mb4_bin", "",
+                "DEFAULT_GENERATED", "varchar(10)", false)).containsExactly("", "");
+        assertThat(SchemaSnapshotWriter.mysqlColumnClauses(null, null, "utf8mb4_bin", null,
+                "VISIBLE_ISH", "varbinary(4) /*M!100301 COMPRESSED*/", false)).containsExactly("", "");
         // Other attributes still block a national column before the charset check.
         assertThat(SchemaSynchronizer.mySqlBlockReason(mysqlFacts("utf8mb3_general_ci", "utf8mb4_0900_ai_ci",
                 "utf8mb3", "", "note", "", "utf8mb3_general_ci"), "NVARCHAR(100)")).contains("COMMENT");
@@ -403,6 +554,10 @@ class DialectDeclarationContractTest {
                 "CREATE TABLE t (id INT PRIMARY KEY, \"ts\" TIMESTAMP)")).isTrue();
         assertThat(SchemaSynchronizer.declaresTimestampColumn(
                 "CREATE TABLE t (id INT PRIMARY KEY /* , ts TIMESTAMP */)")).isFalse();
+        assertThat(SchemaSynchronizer.declaresTimestampColumn(
+                "CREATE TABLE t (id INT PRIMARY KEY, \"t\"\"s\" TIMESTAMP)")).isTrue();
+        assertThat(SchemaSynchronizer.declaresTimestampColumn(
+                "CREATE TABLE t (id INT PRIMARY KEY, \"t,s\" DATETIME, v VARCHAR(5) DEFAULT 'TIMESTAMP')")).isFalse();
         assertThatThrownBy(() -> SchemaSynchronizer.requireExplicitTimestampDefaults(false, "adding column t.ts"))
                 .isInstanceOf(IllegalStateException.class).hasMessageContaining("adding column t.ts");
         SchemaSynchronizer.requireExplicitTimestampDefaults(true, "adding column t.ts");
@@ -500,6 +655,16 @@ class DialectDeclarationContractTest {
                 .isEqualTo(new ColumnSpec("TIMESTAMP", null, null, false, "CURRENT_TIMESTAMP"));
         assertThat(ColumnDefinitionParser.parse("DATETIME ON\nUPDATE NOW() NOT NULL"))
                 .isEqualTo(new ColumnSpec("DATETIME", null, null, true, null));
+        // 'a\' ON UPDATE …' is one literal with backslash escapes and a literal plus a clause without.
+        String ambiguous = "VARCHAR(40) DEFAULT 'a\\' ON UPDATE CURRENT_TIMESTAMP'";
+        assertThat(ColumnDefinitionParser.onUpdateExpr(ambiguous)).isNull();
+        assertThatThrownBy(() -> ColumnDefinitionParser.parse(ambiguous))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("ambiguous ON UPDATE");
+        assertThatThrownBy(() -> ColumnDefinitionParser.parse("VARCHAR(40) DEFAULT 'a\\' ON UPDATE NOW()"))
+                .isInstanceOf(IllegalArgumentException.class);
+        String escapedBackslash = "DATETIME DEFAULT 'x\\\\' ON UPDATE CURRENT_TIMESTAMP";
+        assertThat(ColumnDefinitionParser.onUpdateExpr(escapedBackslash)).isEqualTo("CURRENT_TIMESTAMP");
+        assertThat(ColumnDefinitionParser.parse(escapedBackslash).defaultExpr()).isEqualTo("'x\\\\'");
 
         // Validation: MySQL family, temporal type, matching precision.
         SchemaSynchronizer.requireSupportedOnUpdate(ColumnDefinitionParser.parse("DATETIME(3) ON UPDATE NOW(3)"),
@@ -516,6 +681,35 @@ class DialectDeclarationContractTest {
                 ColumnDefinitionParser.parse("DATETIME(3) ON UPDATE CURRENT_TIMESTAMP"),
                 "DATETIME(3) ON UPDATE CURRENT_TIMESTAMP", DatabaseDialect.MYSQL, "t.c"))
                 .hasMessageContaining("precision");
+        // MariaDB accepts a bare ON UPDATE on DATETIME(n) and stores it with the column's precision.
+        SchemaSynchronizer.requireSupportedOnUpdate(ColumnDefinitionParser.parse("DATETIME(3) ON UPDATE CURRENT_TIMESTAMP"),
+                "DATETIME(3) ON UPDATE CURRENT_TIMESTAMP", DatabaseDialect.MARIADB, "t.c");
+        assertThatThrownBy(() -> SchemaSynchronizer.requireSupportedOnUpdate(
+                ColumnDefinitionParser.parse("DATETIME(3) ON UPDATE CURRENT_TIMESTAMP(6)"),
+                "DATETIME(3) ON UPDATE CURRENT_TIMESTAMP(6)", DatabaseDialect.MARIADB, "t.c"))
+                .hasMessageContaining("precision");
+        String bare = "DATETIME(3) ON UPDATE CURRENT_TIMESTAMP";
+        assertThat(SchemaSynchronizer.mySqlOnUpdateDrift(SchemaSynchronizer.effectiveOnUpdate(bare,
+                ColumnDefinitionParser.parse(bare), DatabaseDialect.MARIADB), "current_timestamp(3)")).isNull();
+        assertThat(SchemaSynchronizer.effectiveOnUpdate(bare, ColumnDefinitionParser.parse(bare), DatabaseDialect.MYSQL))
+                .isEqualTo("CURRENT_TIMESTAMP");
+        String zero = "DATETIME ON UPDATE CURRENT_TIMESTAMP";
+        assertThat(SchemaSynchronizer.effectiveOnUpdate(zero, ColumnDefinitionParser.parse(zero), DatabaseDialect.MARIADB))
+                .isEqualTo("CURRENT_TIMESTAMP");
+        // MariaDB 10.3/11.4 reject an explicit (0) on DATETIME(3) (error 1294); NOW() and LOCALTIMESTAMP are bare.
+        for (String explicitZero : List.of("DATETIME(3) ON UPDATE CURRENT_TIMESTAMP(0)", "DATETIME(3) ON UPDATE NOW( 0 )")) {
+            assertThatThrownBy(() -> SchemaSynchronizer.requireSupportedOnUpdate(ColumnDefinitionParser.parse(explicitZero),
+                    explicitZero, DatabaseDialect.MARIADB, "t.c")).as(explicitZero).hasMessageContaining("precision");
+            assertThat(SchemaSynchronizer.effectiveOnUpdate(explicitZero, ColumnDefinitionParser.parse(explicitZero),
+                    DatabaseDialect.MARIADB)).as(explicitZero).doesNotContain("(3)");
+        }
+        for (String bareSpelling : List.of("DATETIME(3) ON UPDATE NOW()", "DATETIME(3) ON UPDATE CURRENT_TIMESTAMP()",
+                "DATETIME(3) ON UPDATE LOCALTIMESTAMP")) {
+            SchemaSynchronizer.requireSupportedOnUpdate(ColumnDefinitionParser.parse(bareSpelling), bareSpelling,
+                    DatabaseDialect.MARIADB, "t.c");
+            assertThat(SchemaSynchronizer.effectiveOnUpdate(bareSpelling, ColumnDefinitionParser.parse(bareSpelling),
+                    DatabaseDialect.MARIADB)).as(bareSpelling).isEqualTo("CURRENT_TIMESTAMP(3)");
+        }
 
         // Declared and live agree (spelling-insensitive): no drift.
         assertThat(SchemaSynchronizer.mySqlOnUpdateDrift(null, null)).isNull();
@@ -576,6 +770,19 @@ class DialectDeclarationContractTest {
         assertThat(SchemaSnapshotWriter.binaryDefaultInCreateTable(bare, "raw")).isEqualTo("0x0A");
         byte[] odd = "CREATE TABLE t (\n  `raw` varbinary(4) DEFAULT (0x0A)\n)".getBytes(StandardCharsets.ISO_8859_1);
         assertThat(SchemaSnapshotWriter.binaryDefaultInCreateTable(odd, "raw")).isNull();
+
+        // MariaDB renders COMPRESSED as a versioned comment between the type and NOT NULL/DEFAULT.
+        byte[] compressed = ("CREATE TABLE `zz_c` (\n  `a` varbinary(10) /*M!100301 COMPRESSED*/ NOT NULL DEFAULT 'ab',\n"
+                + "  `b` varbinary(10) /*M!100301 COMPRESSED*/ DEFAULT '\\0\u00ff'\n)")
+                .getBytes(StandardCharsets.ISO_8859_1);
+        assertThat(SchemaSnapshotWriter.binaryDefaultInCreateTable(compressed, "a")).isEqualTo("0x6162");
+        assertThat(SchemaSnapshotWriter.binaryDefaultInCreateTable(compressed, "b")).isEqualTo("0x00FF");
+
+        byte[] temporary = "CREATE TEMPORARY TABLE `t` (\n  `raw` varbinary(4) DEFAULT 0x0A\n)"
+                .getBytes(StandardCharsets.ISO_8859_1);
+        assertThatThrownBy(() -> SchemaSnapshotWriter.requireBaseTable(temporary, "t"))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("TEMPORARY table named t");
+        assertThat(SchemaSnapshotWriter.requireBaseTable(bare, "t")).isSameAs(bare);
     }
 
     @Test
@@ -617,6 +824,16 @@ class DialectDeclarationContractTest {
         assertThat(mysqlDefaultPlan("VARBINARY(8) DEFAULT 'é'", "VARBINARY", 4, "0xC3A9")).isEqualTo("pending");
         assertThat(mysqlDefaultPlan("VARBINARY(8) DEFAULT X'C3A9'", "VARBINARY", 4, "0xC3A9")).isEqualTo("apply");
         assertThat(mysqlDefaultPlan("VARBINARY(4) DEFAULT X'C3A9'", "VARBINARY", 4, "0xC3A9")).isEqualTo("same");
+        assertThat(SchemaSynchronizer.mySqlUnpredictableDefaultReason("'é'", "0xE9")).contains("declare the bytes as X'");
+        assertThat(SchemaSynchronizer.mySqlUnpredictableDefaultReason("'a\\nb'", "0x610A62")).contains("sql_mode");
+        assertThat(SchemaSynchronizer.mySqlUnpredictableDefaultReason("'ab'", "0x616263"))
+                .contains("declare it as a snapshot writes it");
+        // A bare integer on a binary column is stored as its decimal text.
+        assertThat(mysqlDefaultPlan("VARBINARY(4) DEFAULT 5", "VARBINARY", 4, "0x35")).isEqualTo("same");
+        assertThat(mysqlDefaultPlan("VARBINARY(4) DEFAULT 007", "VARBINARY", 4, "0x37")).isEqualTo("same");
+        assertThat(mysqlDefaultPlan("VARBINARY(4) DEFAULT -12", "VARBINARY", 4, "'-12'")).isEqualTo("same");
+        assertThat(mysqlDefaultPlan("BINARY(2) DEFAULT 5", "BINARY", 2, "0x3500")).isEqualTo("same");
+        assertThat(mysqlDefaultPlan("VARBINARY(4) DEFAULT 5", "VARBINARY", 4, "0x05")).isEqualTo("pending");
     }
 
     /** How the MySQL family handles a declared column against a live default: same, apply, or pending. */
@@ -865,6 +1082,327 @@ class DialectDeclarationContractTest {
         assertThat(SchemaSynchronizer.primaryKeyColumns(
                 "CREATE TABLE t (id BIGINT NOT NULL PRIMARY KEY, label VARCHAR(10))", DatabaseDialect.SQLSERVER))
                 .containsExactly("id");
+    }
+
+    @Test
+    void primaryKeyTextInsideLiteralsIsNotAKeyClause() {
+        // Snapshot createSql carries column COMMENTs; their text must not be read as a key.
+        assertThat(SchemaSynchronizer.primaryKeyColumns("CREATE TABLE t (id BIGINT NOT NULL COMMENT "
+                + "'surrogate primary key (auto)', PRIMARY KEY (id))", DatabaseDialect.MYSQL)).containsExactly("id");
+        assertThat(SchemaSynchronizer.primaryKeyColumns("CREATE TABLE t (note VARCHAR(20) DEFAULT NULL COMMENT "
+                + "'not a primary key')", DatabaseDialect.MYSQL)).isEmpty();
+        assertThat(SchemaSynchronizer.primaryKeyColumns("CREATE TABLE t (id INT NOT NULL, note VARCHAR(20) COMMENT "
+                + "'primary key (see docs)')", DatabaseDialect.MARIADB)).isEmpty();
+        assertThat(SchemaSynchronizer.primaryKeyColumns("CREATE TABLE t (v VARCHAR(20) DEFAULT 'a PRIMARY KEY', "
+                + "id INT PRIMARY KEY)", DatabaseDialect.POSTGRESQL)).containsExactly("id");
+        assertThat(SchemaSynchronizer.primaryKeyColumns("CREATE TABLE t (id INT NOT NULL, -- primary key (x)\n"
+                + " PRIMARY KEY (id))", DatabaseDialect.ORACLE)).containsExactly("id");
+        // Without ANSI_QUOTES "…" is a string on MySQL; a key that reads differently either way is rejected.
+        assertThat(SchemaSynchronizer.primaryKeyColumns("CREATE TABLE t (id INT NOT NULL COMMENT \"a note\", "
+                + "PRIMARY KEY (id))", DatabaseDialect.MYSQL)).containsExactly("id");
+        assertThatThrownBy(() -> SchemaSynchronizer.primaryKeyColumns("CREATE TABLE t (id INT NOT NULL, note "
+                + "VARCHAR(20) COMMENT \"primary key (note)\")", DatabaseDialect.MYSQL))
+                .hasMessageContaining("ANSI_QUOTES");
+        assertThatThrownBy(() -> SchemaSynchronizer.primaryKeyColumns("CREATE TABLE t (id INT NOT NULL, "
+                + "PRIMARY KEY (\"id\"))", DatabaseDialect.MARIADB)).isInstanceOf(IllegalArgumentException.class);
+        assertThat(SchemaSynchronizer.primaryKeyColumns("CREATE TABLE t (id INT NOT NULL COMMENT 'primary key (x)', "
+                + "PRIMARY KEY (id))", DatabaseDialect.MARIADB)).containsExactly("id");
+        // Other engines read "…" only as an identifier, so double-quoted comment text is still a key clause there.
+        assertThat(SchemaSynchronizer.primaryKeyColumns("CREATE TABLE t (id INT NOT NULL, note VARCHAR(20) "
+                + "DEFAULT 'primary key (note)', PRIMARY KEY (id))", DatabaseDialect.POSTGRESQL)).containsExactly("id");
+    }
+
+    @Test
+    void unsignedDecimalComparesPrecisionAndScale() {
+        String unsigned = "NUMERIC UNSIGNED";
+        assertThat(NonDestructiveAlterPlanner.classifyTypeChange(unsigned, 10, 4, unsigned, 10, 2))
+                .isEqualTo(NonDestructiveAlterPlanner.TypeChange.NARROW);
+        assertThat(NonDestructiveAlterPlanner.classifyTypeChange(unsigned, 10, 2, unsigned, 5, 2))
+                .isEqualTo(NonDestructiveAlterPlanner.TypeChange.NARROW);
+        assertThat(NonDestructiveAlterPlanner.classifyTypeChange(unsigned, 5, 2, unsigned, 10, 2))
+                .isEqualTo(NonDestructiveAlterPlanner.TypeChange.WIDEN);
+        assertThat(NonDestructiveAlterPlanner.classifyTypeChange(unsigned, 5, 2, unsigned, 5, 2))
+                .isEqualTo(NonDestructiveAlterPlanner.TypeChange.SAME);
+        assertThat(NonDestructiveAlterPlanner.classifyTypeChange(unsigned, 5, 2, "NUMERIC", 5, 2))
+                .isEqualTo(NonDestructiveAlterPlanner.TypeChange.INCOMPATIBLE);
+        assertThat(NonDestructiveAlterPlanner.formatType(unsigned, 5, 2)).isEqualTo("NUMERIC(5,2) UNSIGNED");
+        assertThat(NonDestructiveAlterPlanner.formatType("NUMERIC", 5, 2)).isEqualTo("NUMERIC(5,2)");
+        // A narrowing type change is pending, so dropping NOT NULL cannot MODIFY the column to a smaller type.
+        NonDestructiveAlterPlanner.Plan plan = NonDestructiveAlterPlanner.plan("t", "amount",
+                new ColumnSpec(unsigned, 10, 2, false, null), new LiveColumn(unsigned, 10, 4, true, null));
+        assertThat(plan.pendingSql()).singleElement().asString().contains("NUMERIC(10,2) UNSIGNED");
+
+        // A bare exact numeric compares as the precision the engine creates.
+        for (DatabaseDialect dialect : List.of(DatabaseDialect.MYSQL, DatabaseDialect.MARIADB)) {
+            assertThat(bareNumeric("DECIMAL", dialect)).isEqualTo(new ColumnSpec("NUMERIC", 10, 0, false, null));
+            assertThat(bareNumeric("DECIMAL UNSIGNED DEFAULT 1", dialect))
+                    .isEqualTo(new ColumnSpec(unsigned, 10, 0, false, "1"));
+            assertThat(bareNumeric("fixed", dialect)).isEqualTo(new ColumnSpec("NUMERIC", 10, 0, false, null));
+        }
+        for (String bare : List.of("DECIMAL", "NUMERIC", "dec NOT NULL")) {
+            assertThat(bareNumeric(bare, DatabaseDialect.SQLSERVER).length()).as(bare).isEqualTo(18);
+            assertThat(bareNumeric(bare, DatabaseDialect.ORACLE).length()).as(bare).isEqualTo(38);
+            assertThat(bareNumeric(bare, DatabaseDialect.POSTGRESQL).length()).as(bare).isNull();
+        }
+        // Oracle NUMBER without precision is a floating decimal, not NUMBER(38,0); other engines
+        // have no NUMBER (validation rejects it) and FIXED only exists on MySQL/MariaDB.
+        for (DatabaseDialect dialect : DatabaseDialect.values()) {
+            assertThat(bareNumeric("NUMBER", dialect)).as(dialect.id())
+                    .isEqualTo(new ColumnSpec("NUMERIC", null, null, false, null));
+        }
+        assertThat(bareNumeric("FIXED", DatabaseDialect.SQLSERVER).length()).isNull();
+        assertThat(bareNumeric("DECIMALX", DatabaseDialect.ORACLE)).isEqualTo(ColumnDefinitionParser.parse("DECIMALX"));
+        for (DatabaseDialect dialect : DatabaseDialect.values()) {
+            assertThat(bareNumeric("DECIMAL(12,4)", dialect)).isEqualTo(new ColumnSpec("NUMERIC", 12, 4, false, null));
+            assertThat(bareNumeric("INT", dialect)).isEqualTo(ColumnDefinitionParser.parse("INT"));
+        }
+        // Against a wider live column the bare form is a narrowing, never an automatic widening.
+        assertThat(NonDestructiveAlterPlanner.plan("t", "c", bareNumeric("DEC", DatabaseDialect.SQLSERVER),
+                new LiveColumn("NUMERIC", 20, 4, false, null)).applySql()).isEmpty();
+        assertThat(NonDestructiveAlterPlanner.plan("t", "c", bareNumeric("DEC", DatabaseDialect.ORACLE),
+                new LiveColumn("NUMERIC", 20, 4, false, null)).applySql()).isEmpty();
+        // Oracle bare DECIMAL is NUMBER(38,0): against a live unbounded NUMBER it is pending, not applied.
+        NonDestructiveAlterPlanner.Plan unbounded = NonDestructiveAlterPlanner.plan("t", "c",
+                bareNumeric("DECIMAL", DatabaseDialect.ORACLE), new LiveColumn("NUMERIC", null, null, false, null));
+        assertThat(unbounded.applySql()).isEmpty();
+        assertThat(unbounded.pendingSql()).isNotEmpty();
+        assertThat(NonDestructiveAlterPlanner.plan("t", "c", bareNumeric("DEC", DatabaseDialect.SQLSERVER),
+                new LiveColumn("NUMERIC", 18, 0, false, null)).applySql()).isEmpty();
+        assertThat(NonDestructiveAlterPlanner.plan("t", "c", bareNumeric("DEC", DatabaseDialect.SQLSERVER),
+                new LiveColumn("NUMERIC", 18, 0, false, null)).pendingSql()).isEmpty();
+        assertThat(NonDestructiveAlterPlanner.classifyTypeChange("NUMERIC", 12, 4, "NUMERIC", 10, 0))
+                .isEqualTo(NonDestructiveAlterPlanner.TypeChange.NARROW);
+
+        // UNSIGNED defaults are stored exactly like the signed type's.
+        assertThat(SchemaSynchronizer.mySqlStoredAsDeclared(new ColumnSpec("INTEGER UNSIGNED", null, null, false, "5")))
+                .isTrue();
+        assertThat(SchemaSynchronizer.mySqlStoredAsDeclared(new ColumnSpec(unsigned, 5, 2, false, "1.5"))).isTrue();
+        assertThat(SchemaSynchronizer.mySqlStoredAsDeclared(new ColumnSpec(unsigned, 5, 2, false, "1.555"))).isFalse();
+        assertThat(SchemaSynchronizer.mySqlStoredAsDeclared(new ColumnSpec("INTEGER UNSIGNED", null, null, false, "1.5")))
+                .isFalse();
+        assertThat(SchemaSynchronizer.mySqlStoredAsDeclared(
+                new ColumnSpec("INTEGER UNSIGNED ZEROFILL", null, null, false, "5"))).isFalse();
+    }
+
+    @Test
+    void metadataPatternsMatchOnlyTheExactName() throws Exception {
+        assertThat(DatabaseDialect.matchesLiterally("app_db", "app_db")).isTrue();
+        assertThat(DatabaseDialect.matchesLiterally("app_db", "app1db")).isFalse();
+        assertThat(DatabaseDialect.matchesLiterally("app_db", "app_dbx")).isFalse();
+        assertThat(DatabaseDialect.matchesLiterally("a%b", "a%b")).isTrue();
+        assertThat(DatabaseDialect.matchesLiterally("a%b", "axxb")).isFalse();
+        assertThat(DatabaseDialect.matchesLiterally("a%b", "ab")).isFalse();
+        assertThat(DatabaseDialect.matchesLiterally("app_db", null)).isFalse();
+        // Characters other than wildcards are compared by the server (case-insensitive on some).
+        assertThat(DatabaseDialect.matchesLiterally("APP_DB", "app_db")).isTrue();
+
+        // Schema from TABLE_SCHEM; MySQL-family drivers in catalog mode report it in TABLE_CAT.
+        assertThat(DatabaseDialect.isRequestedObject(row("app_db", "def", "t_1"), "app_db", "t_1")).isTrue();
+        assertThat(DatabaseDialect.isRequestedObject(row("app1db", null, "t_1"), "app_db", "t_1")).isFalse();
+        assertThat(DatabaseDialect.isRequestedObject(row("app_db", null, "tx1"), "app_db", "t_1")).isFalse();
+        assertThat(DatabaseDialect.isRequestedObject(row(null, "app_db", "t_1"), "app_db", "t_1")).isTrue();
+        assertThat(DatabaseDialect.isRequestedObject(row(null, "app1db", "t_1"), "app_db", "t_1")).isFalse();
+        assertThat(DatabaseDialect.isRequestedObject(row("app1db", null, "t_1"), "app_db", null)).isFalse();
+        assertThat(DatabaseDialect.isRequestedObject(row("app1db", null, "tx1"), null, null)).isTrue();
+    }
+
+    private static ColumnSpec bareNumeric(String definition, DatabaseDialect dialect) {
+        return SchemaSynchronizer.withDefaultNumericPrecision(ColumnDefinitionParser.parse(definition), definition, dialect);
+    }
+
+    private static java.sql.ResultSet row(String schema, String catalog, String table) throws Exception {
+        java.sql.ResultSet row = org.mockito.Mockito.mock(java.sql.ResultSet.class);
+        org.mockito.Mockito.when(row.getString("TABLE_SCHEM")).thenReturn(schema);
+        org.mockito.Mockito.when(row.getString("TABLE_CAT")).thenReturn(catalog);
+        org.mockito.Mockito.when(row.getString("TABLE_NAME")).thenReturn(table);
+        return row;
+    }
+
+    @Test
+    void unsignedZerofillDecimalKeepsPrecision() {
+        assertThat(ColumnDefinitionParser.parse("DECIMAL(8, 2) UNSIGNED ZEROFILL DEFAULT 1.5"))
+                .isEqualTo(new ColumnSpec("NUMERIC UNSIGNED ZEROFILL", 8, 2, false, "1.5"));
+        assertThat(ColumnDefinitionParser.parse("fixed(8) unsigned zerofill"))
+                .isEqualTo(new ColumnSpec("NUMERIC UNSIGNED ZEROFILL", 8, null, false, null));
+        // An integer display width with ZEROFILL is not compared, so it cannot be declared.
+        assertThatThrownBy(() -> ColumnDefinitionParser.parse("INT(5) UNSIGNED ZEROFILL"))
+                .hasMessageContaining("unparseable");
+        assertThatThrownBy(() -> ColumnDefinitionParser.parse("DOUBLE(8,2) UNSIGNED ZEROFILL"))
+                .hasMessageContaining("unparseable");
+        for (DatabaseDialect dialect : List.of(DatabaseDialect.MYSQL, DatabaseDialect.MARIADB)) {
+            String written = SchemaSnapshotWriter.columnType("DECIMAL UNSIGNED ZEROFILL", 8, 2, dialect);
+            assertThat(written).isEqualTo("NUMERIC(8,2) UNSIGNED ZEROFILL");
+            assertThat(ColumnDefinitionParser.parse(written))
+                    .isEqualTo(new ColumnSpec("NUMERIC UNSIGNED ZEROFILL", 8, 2, false, null));
+            assertThat(SchemaSnapshotWriter.columnType("INT UNSIGNED ZEROFILL", 10, 0, dialect))
+                    .isEqualTo("INT UNSIGNED ZEROFILL");
+        }
+        assertThat(NonDestructiveAlterPlanner.classifyTypeChange("NUMERIC UNSIGNED ZEROFILL", 8, 2,
+                "NUMERIC UNSIGNED ZEROFILL", 6, 2)).isEqualTo(NonDestructiveAlterPlanner.TypeChange.NARROW);
+        assertThat(NonDestructiveAlterPlanner.formatType("NUMERIC UNSIGNED ZEROFILL", 8, 2))
+                .isEqualTo("NUMERIC(8,2) UNSIGNED ZEROFILL");
+
+        // MySQL Connector/J drops ZEROFILL from TYPE_NAME; COLUMN_TYPE restores it.
+        assertThat(SchemaSnapshotWriter.mysqlZerofill("DECIMAL UNSIGNED", "decimal(8,2) unsigned zerofill"))
+                .isEqualTo("DECIMAL UNSIGNED ZEROFILL");
+        assertThat(SchemaSnapshotWriter.mysqlZerofill("INT UNSIGNED", "int(5) unsigned zerofill"))
+                .isEqualTo("INT UNSIGNED ZEROFILL");
+        assertThat(SchemaSnapshotWriter.mysqlZerofill("int unsigned", "int unsigned zerofill"))
+                .isEqualTo("int unsigned ZEROFILL");
+        assertThat(SchemaSnapshotWriter.mysqlZerofill("DECIMAL UNSIGNED ZEROFILL", "decimal(8,2) unsigned zerofill"))
+                .isEqualTo("DECIMAL UNSIGNED ZEROFILL");
+        assertThat(SchemaSnapshotWriter.mysqlZerofill("DECIMAL UNSIGNED", "decimal(8,2) unsigned"))
+                .isEqualTo("DECIMAL UNSIGNED");
+        assertThat(SchemaSnapshotWriter.mysqlZerofill("ENUM", "enum('unsigned zerofill')")).isEqualTo("ENUM");
+        assertThat(SchemaSnapshotWriter.mysqlZerofill("DECIMAL UNSIGNED", null)).isEqualTo("DECIMAL UNSIGNED");
+    }
+
+    @Test
+    void decAndFixedAreDecimalSynonyms() {
+        assertThat(ColumnDefinitionParser.parse("DEC(8,2)")).isEqualTo(new ColumnSpec("NUMERIC", 8, 2, false, null));
+        assertThat(ColumnDefinitionParser.parse("fixed(8,2)")).isEqualTo(new ColumnSpec("NUMERIC", 8, 2, false, null));
+        assertThat(ColumnDefinitionParser.parse("DEC(8,2) UNSIGNED"))
+                .isEqualTo(new ColumnSpec("NUMERIC UNSIGNED", 8, 2, false, null));
+    }
+
+    @Test
+    void mySqlAttributeSpellingsNormalizeOrFailParsing() {
+        // ZEROFILL implies UNSIGNED, in either order (MySQL 8.4 and MariaDB 10.3 store both as UNSIGNED ZEROFILL).
+        for (String declaration : List.of("INT ZEROFILL", "int zerofill unsigned", "INT UNSIGNED ZEROFILL")) {
+            assertThat(ColumnDefinitionParser.parse(declaration).baseType()).as(declaration)
+                    .isEqualTo("INTEGER UNSIGNED ZEROFILL");
+        }
+        assertThat(ColumnDefinitionParser.normalizeType("INT ZEROFILL")).isEqualTo("INTEGER UNSIGNED ZEROFILL");
+        for (String declaration : List.of("DECIMAL(8,2) ZEROFILL", "decimal(8,2) zerofill unsigned")) {
+            assertThat(ColumnDefinitionParser.parse(declaration)).as(declaration)
+                    .isEqualTo(new ColumnSpec("NUMERIC UNSIGNED ZEROFILL", 8, 2, false, null));
+        }
+        // MySQL rejects an attribute before the length.
+        for (String declaration : List.of("INT UNSIGNED(10)", "DECIMAL UNSIGNED(5,2)", "INT ZEROFILL(5)",
+                "DECIMAL UNSIGNED ZEROFILL(5,2)")) {
+            assertThatThrownBy(() -> ColumnDefinitionParser.parse(declaration)).as(declaration)
+                    .hasMessageContaining("unparseable");
+        }
+    }
+
+    @Test
+    void mySqlZerofillDisplayWidthIsNotDeclarable() {
+        for (String columnType : List.of("tinyint(3) unsigned zerofill", "smallint(5) unsigned zerofill",
+                "mediumint(8) unsigned zerofill", "int(10) unsigned zerofill", "bigint(20) unsigned zerofill",
+                "decimal(8,2) unsigned zerofill", "int(5) unsigned", "int unsigned zerofill")) {
+            assertThat(SchemaSnapshotWriter.mysqlZerofillCustomWidth(columnType)).as(columnType).isNull();
+        }
+        assertThat(SchemaSnapshotWriter.mysqlZerofillCustomWidth("int(5) unsigned zerofill")).isEqualTo(5);
+        assertThat(SchemaSnapshotWriter.mysqlZerofillCustomWidth("tinyint(1) unsigned zerofill")).isEqualTo(1);
+        assertThat(SchemaSnapshotWriter.mysqlZerofillCustomWidth(null)).isNull();
+    }
+
+    @Test
+    void unsignedAndZerofillAreRejectedOutsideMySqlFamily() {
+        List<String> declarations = List.of("INT UNSIGNED", "DECIMAL(8,2) UNSIGNED", "DECIMAL(8,2) UNSIGNED ZEROFILL",
+                "INT UNSIGNED ZEROFILL", "INT ZEROFILL", "FIXED(8,2)", "fixed");
+        for (String declaration : declarations) {
+            ColumnSpec spec = ColumnDefinitionParser.parse(declaration);
+            for (DatabaseDialect dialect : DatabaseDialect.values()) {
+                if (dialect.isMySqlFamily()) {
+                    assertThatCode(() -> SchemaSynchronizer.requireMySqlOnlyAttributes(spec, declaration, dialect, "t.c"))
+                            .as(dialect + " " + declaration).doesNotThrowAnyException();
+                } else {
+                    assertThatThrownBy(() -> SchemaSynchronizer.requireMySqlOnlyAttributes(spec, declaration, dialect, "t.c"))
+                            .as(dialect + " " + declaration).hasMessageContaining("MySQL/MariaDB");
+                }
+            }
+        }
+        // NUMBER compares as NUMERIC, so outside Oracle it would reach ALTER COLUMN c NUMBER.
+        for (String declaration : List.of("NUMBER", "number(10,2) NOT NULL")) {
+            ColumnSpec spec = ColumnDefinitionParser.parse(declaration);
+            for (DatabaseDialect dialect : DatabaseDialect.values()) {
+                if (dialect == DatabaseDialect.ORACLE) {
+                    assertThatCode(() -> SchemaSynchronizer.requireMySqlOnlyAttributes(spec, declaration, dialect, "t.c"))
+                            .as(dialect + " " + declaration).doesNotThrowAnyException();
+                } else {
+                    assertThatThrownBy(() -> SchemaSynchronizer.requireMySqlOnlyAttributes(spec, declaration, dialect, "t.c"))
+                            .as(dialect + " " + declaration).hasMessageContaining("Oracle type");
+                }
+            }
+        }
+        // Validation runs it for every declared column.
+        for (DatabaseDialect dialect : List.of(DatabaseDialect.POSTGRESQL, DatabaseDialect.SQLSERVER)) {
+            String schema = dialect == DatabaseDialect.SQLSERVER ? "dbo" : "public";
+            for (String declaration : List.of("NUMBER", "INT UNSIGNED", "FIXED(8,2)")) {
+                assertThatThrownBy(() -> validate(new SchemaDefinition(Map.of("items", new SchemaDefinition.TableDef(
+                        "CREATE TABLE items (id INT NOT NULL, PRIMARY KEY (id))",
+                        List.of(new SchemaDefinition.ColumnDef("id", "INT NOT NULL"),
+                                new SchemaDefinition.ColumnDef("amount", declaration)), List.of()))), dialect, schema))
+                        .as(dialect + " " + declaration).hasMessageContaining("items.amount");
+            }
+        }
+        for (String declaration : List.of("INT", "NUMERIC(8,2)", "DEC(8,2)", "VARCHAR(10) DEFAULT 'unsigned'",
+                "FIXEDX(3)", "NUMBERS(3)")) {
+            ColumnSpec spec = ColumnDefinitionParser.parse(declaration);
+            for (DatabaseDialect dialect : DatabaseDialect.values()) {
+                assertThatCode(() -> SchemaSynchronizer.requireMySqlOnlyAttributes(spec, declaration, dialect, "t.c"))
+                        .as(dialect + " " + declaration).doesNotThrowAnyException();
+            }
+        }
+    }
+
+    @Test
+    void tinyint1UnsignedKeepsItsDisplayWidth() {
+        assertThat(ColumnDefinitionParser.parse("TINYINT(1) UNSIGNED DEFAULT 0"))
+                .extracting(ColumnSpec::baseType, ColumnSpec::length, ColumnSpec::defaultExpr)
+                .containsExactly("TINYINT UNSIGNED", 1, "0");
+        assertThat(ColumnDefinitionParser.parse("tinyint(1) unsigned").baseType()).isEqualTo("TINYINT UNSIGNED");
+        assertThatThrownBy(() -> ColumnDefinitionParser.parse("TINYINT(1) UNSIGNED ZEROFILL"))
+                .hasMessageContaining("unparseable");
+        assertThat(ColumnDefinitionParser.parse("INT(10) UNSIGNED NOT NULL"))
+                .extracting(ColumnSpec::baseType, ColumnSpec::length, ColumnSpec::notNull)
+                .containsExactly("INTEGER UNSIGNED", 10, true);
+        // The base of an UNSIGNED type normalizes like the signed type, on both the declared and live side.
+        assertThat(ColumnDefinitionParser.normalizeType("int unsigned")).isEqualTo("INTEGER UNSIGNED");
+        assertThat(ColumnDefinitionParser.normalizeType("DECIMAL UNSIGNED")).isEqualTo("NUMERIC UNSIGNED");
+        assertThat(ColumnDefinitionParser.normalizeType("INT UNSIGNED ZEROFILL")).isEqualTo("INTEGER UNSIGNED ZEROFILL");
+        assertThat(ColumnDefinitionParser.parse("DECIMAL(5, 2) UNSIGNED DEFAULT 1.5"))
+                .isEqualTo(new ColumnSpec("NUMERIC UNSIGNED", 5, 2, false, "1.5"));
+        assertThat(ColumnDefinitionParser.parse(SchemaSnapshotWriter.columnType("DECIMAL UNSIGNED", 5, 2,
+                DatabaseDialect.MYSQL))).isEqualTo(new ColumnSpec("NUMERIC UNSIGNED", 5, 2, false, null));
+        assertThat(SchemaSnapshotWriter.columnType("INT UNSIGNED", 10, 0, DatabaseDialect.MARIADB)).isEqualTo("INT UNSIGNED");
+        assertThat(SchemaSnapshotWriter.columnType("TINYINT(1) UNSIGNED", 3, 0, DatabaseDialect.MARIADB))
+                .isEqualTo("TINYINT(1) UNSIGNED");
+        assertThatThrownBy(() -> ColumnDefinitionParser.parse("DOUBLE(5,2) UNSIGNED"))
+                .hasMessageContaining("scale is supported only for NUMERIC");
+        assertThatThrownBy(() -> ColumnDefinitionParser.parse("VARCHAR(10) UNSIGNED"))
+                .hasMessageContaining("unparseable");
+
+        assertThat(SchemaSnapshotWriter.mysqlUnsignedTinyint1("TINYINT UNSIGNED", "tinyint(1) unsigned"))
+                .isEqualTo("TINYINT(1) UNSIGNED");
+        assertThat(SchemaSnapshotWriter.mysqlUnsignedTinyint1("TINYINT UNSIGNED", "tinyint(1) unsigned zerofill"))
+                .isEqualTo("TINYINT UNSIGNED");
+        assertThat(SchemaSnapshotWriter.mysqlUnsignedTinyint1("TINYINT UNSIGNED", "tinyint(3) unsigned"))
+                .isEqualTo("TINYINT UNSIGNED");
+        assertThat(SchemaSnapshotWriter.mysqlUnsignedTinyint1("BOOLEAN", "tinyint(1)")).isEqualTo("BOOLEAN");
+        assertThat(SchemaSnapshotWriter.mysqlUnsignedTinyint1("TINYINT UNSIGNED", "tinyint unsigned"))
+                .isEqualTo("TINYINT UNSIGNED");
+        assertThat(ColumnDefinitionParser.parse(SchemaSnapshotWriter.mysqlUnsignedTinyint1(
+                "TINYINT UNSIGNED", "tinyint(1) unsigned") + " DEFAULT 1").baseType()).isEqualTo("TINYINT UNSIGNED");
+    }
+
+    @Test
+    void outOfRangeDoubleExponentsCompareByValue() {
+        String dbl = ColumnDefinitionParser.normalizeType("DOUBLE");
+        // MySQL 8.4 and MariaDB 10.3/11.4 report DEFAULT 10E299 as 1e300 (verified live).
+        assertThat(SchemaSynchronizer.mySqlComparableDefault("10E299", dbl))
+                .isEqualTo(SchemaSynchronizer.mySqlComparableDefault("1e300", dbl));
+        assertThat(SchemaSynchronizer.mySqlComparableDefault("1.50E-300", dbl))
+                .isEqualTo(SchemaSynchronizer.mySqlComparableDefault("1.5e-300", dbl));
+        assertThat(SchemaSynchronizer.mySqlComparableDefault("1E300", dbl))
+                .isNotEqualTo(SchemaSynchronizer.mySqlComparableDefault("2e300", dbl));
+        assertThat(SchemaSynchronizer.mySqlComparableDefault("1.50", dbl)).isEqualTo("1.5");
+        for (String unsigned : List.of("TINYINT UNSIGNED", "INTEGER UNSIGNED", "BIGINT UNSIGNED ZEROFILL",
+                ColumnDefinitionParser.parse("INT UNSIGNED").baseType(), ColumnDefinitionParser.parse("DOUBLE UNSIGNED").baseType())) {
+            assertThat(SchemaSynchronizer.mySqlComparableDefault("1.0", unsigned)).as(unsigned).isEqualTo("1");
+            assertThat(SchemaSynchronizer.mySqlComparableDefault("'2'", unsigned)).as(unsigned).isEqualTo("2");
+        }
     }
 
     @Test

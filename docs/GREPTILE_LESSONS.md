@@ -1,5 +1,39 @@
 # Greptile lessons
 
+## 2026-09-27 — issue #13 — newly parseable types must reach every comparison
+
+- **Bug:** `DECIMAL(p,s) UNSIGNED` became parseable, but live precision was read and compared
+  only for the exact type name `NUMERIC`, so a nullability or default change could run
+  `MODIFY COLUMN` to a narrower `DECIMAL`. A bare `DECIMAL` compared as unbounded on
+  MySQL/MariaDB, although the server creates `DECIMAL(10,0)`, so every sync re-ran `MODIFY`
+  (and would round a wider live column). JDBC `getTables`/`getColumns` received schema and
+  table names as LIKE patterns, so `user_role` read `user1role`'s columns and a
+  `databaseTerm=SCHEMA` schema matched sibling databases. `precision() - scale()` overflowed
+  an `int` for `1E2147483647`, letting the default through validation. The first fix escaped
+  the metadata arguments with `getSearchStringEscape()`, which made Connector/J under
+  `NO_BACKSLASH_ESCAPES` find no tables at all (every change set would re-run, every column
+  would be re-added). Normalizing `DEC` to `NUMERIC` exposed that a bare `DECIMAL` compared as
+  unbounded on SQL Server and Oracle too, and filling SQL Server's `(18,0)` for every bare
+  `NUMERIC` spelling let an Oracle-only `NUMBER` reach an applied `ALTER COLUMN c NUMBER`.
+- **Missed because:** The parser change was tested for parsing and snapshots, not for
+  comparison with a live column of different precision, and the bare-form cell covered only
+  MySQL/MariaDB. Metadata arguments were assumed to be names; no fixture had a sibling name
+  that differs only where the real name has `_`, and the escaping fix was verified with the
+  default `sql_mode` only. Exponent arithmetic had no cells at the `int` boundary.
+- **Prevention:** `CONTRIBUTING.md` requires a live-vs-declared precision cell for every
+  newly parseable type, including the bare form on every engine, rejects normalized spellings
+  on engines that do not accept them (`#unsignedAndZerofillAreRejectedOutsideMySqlFamily`),
+  and filters metadata rows through `DatabaseDialect.isRequestedObject` instead of escaping.
+  Contracts:
+  `DialectDeclarationContractTest#unsignedDecimalComparesPrecisionAndScale`,
+  `#metadataPatternsMatchOnlyTheExactName`, the int-boundary exponent cells in
+  `#mysqlDefaultsTheServerRejectsFailValidation`, `#unsignedZerofillDecimalKeepsPrecision`,
+  and the `namesAreNotPatternsAndDecimalPrecisionIsCompared` (MySQL, MariaDB, which also
+  sync and snapshot under `NO_BACKSLASH_ESCAPES`), `schemaAndTableNamesAreNotMetadataPatterns`
+  (PostgreSQL), and `tableNamesAreNotMetadataPatterns` (SQL Server, Oracle, with bare `DEC`
+  cells) integration tests. A metadata workaround is verified against every driver and
+  under every session mode the code already supports, not per the JDBC javadoc.
+
 ## 2026-09-26 — PR #12 — identifier case folding and per-version DDL syntax
 
 - **Bug:** Scope binding lowercased every namespace comparison, so `appdb.*` / `appdb.t`
