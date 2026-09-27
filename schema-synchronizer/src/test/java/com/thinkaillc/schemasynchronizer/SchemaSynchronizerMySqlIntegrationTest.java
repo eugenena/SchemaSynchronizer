@@ -416,6 +416,138 @@ class SchemaSynchronizerMySqlIntegrationTest {
     }
 
     @Test
+    void timestampRefusalPrecedesCreatedTablesAndChangeSets() throws Exception {
+        // The createSql has no TIMESTAMP; the column list adds one right after CREATE TABLE.
+        SchemaDefinition.TableDef strict = new SchemaDefinition.TableDef(
+                "CREATE TABLE IF NOT EXISTS mysql_strict (id BIGINT NOT NULL PRIMARY KEY)",
+                List.of(new SchemaDefinition.ColumnDef("id", "BIGINT NOT NULL"),
+                        new SchemaDefinition.ColumnDef("ts", "TIMESTAMP NULL")), List.of());
+        try (Connection connection = connection(); var statement = connection.createStatement()) {
+            statement.execute("SET SESSION explicit_defaults_for_timestamp = 0");
+            assertThatThrownBy(() -> synchronizer().synchronizeWithResult(connection,
+                    new SchemaDefinition(2, "mysql", Map.of("mysql_strict", strict), List.of())))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("creating table mysql_strict");
+        }
+        assertThat(tableExists("mysql_strict")).isFalse();
+
+        try (Connection connection = connection(); var statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE mysql_strict (id BIGINT NOT NULL PRIMARY KEY, ts TIMESTAMP NULL)");
+        }
+        SchemaDefinition.TableDef indexed = new SchemaDefinition.TableDef(strict.createSql(), strict.columns(),
+                List.of("CREATE INDEX idx_strict_ts ON mysql_strict (ts)"));
+        SchemaDefinition.ChangeSet unrelated = new SchemaDefinition.ChangeSet("001-mysql-flag", "creates mysql_flag",
+                List.of("CREATE TABLE IF NOT EXISTS mysql_flag (id BIGINT PRIMARY KEY)"),
+                "SELECT COUNT(*) = 1 FROM information_schema.tables "
+                        + "WHERE table_schema = DATABASE() AND table_name = 'mysql_flag'");
+        SchemaDefinition.ChangeSet touching = new SchemaDefinition.ChangeSet("002-strict-index", "indexes ts",
+                List.of("CREATE INDEX idx_strict_ts ON mysql_strict (ts)"),
+                "SELECT COUNT(*) = 1 FROM information_schema.statistics WHERE table_schema = DATABASE() "
+                        + "AND table_name = 'mysql_strict' AND index_name = 'idx_strict_ts'");
+        // A change set that does not name a TIMESTAMP table leaves a matching TIMESTAMP column alone.
+        try (Connection connection = connection(); var statement = connection.createStatement()) {
+            statement.execute("SET SESSION explicit_defaults_for_timestamp = 0");
+            SchemaSynchronizationResult result = synchronizer().synchronizeWithResult(connection,
+                    new SchemaDefinition(2, "mysql", Map.of("mysql_strict", strict), List.of(unrelated)));
+            assertThat(result.changeSetsApplied()).isEqualTo(1);
+        }
+        SchemaDefinition withChange = new SchemaDefinition(2, "mysql", Map.of("mysql_strict", indexed),
+                List.of(unrelated, touching));
+        try (Connection connection = connection(); var statement = connection.createStatement()) {
+            statement.execute("SET SESSION explicit_defaults_for_timestamp = 0");
+            assertThatThrownBy(() -> synchronizer().synchronizeWithResult(connection, withChange))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("TIMESTAMP columns of mysql_strict after BEFORE_SCHEMA change set "
+                            + "002-strict-index");
+        }
+        try (Connection connection = connection(); var statement = connection.createStatement();
+             var rows = statement.executeQuery("SELECT COUNT(*) FROM information_schema.statistics "
+                     + "WHERE table_schema = DATABASE() AND index_name = 'idx_strict_ts'")) {
+            assertThat(rows.next()).isTrue();
+            assertThat(rows.getInt(1)).isZero();
+        }
+        try (Connection connection = connection()) {
+            SchemaSynchronizationResult applied = synchronizer().synchronizeWithResult(connection, withChange);
+            assertThat(applied.changeSetsApplied()).isEqualTo(1);
+        }
+        // Once the change set is recorded, the matching TIMESTAMP column needs no DDL.
+        try (Connection connection = connection(); var statement = connection.createStatement()) {
+            statement.execute("SET SESSION explicit_defaults_for_timestamp = 0");
+            SchemaSynchronizationResult again = synchronizer().synchronizeWithResult(connection, withChange);
+            assertThat(again.changeSetsApplied()).isZero();
+            assertThat(again.columnsAdded() + again.columnsAltered() + again.tablesCreated()).isZero();
+            assertThat(again.pendingSql()).containsExactly("DROP TABLE mysql_flag; -- pending: table absent from definition");
+        }
+    }
+
+    @Test
+    void defaultsTheCharsetCannotStoreArePendingInAnySqlMode() throws Exception {
+        try (Connection connection = connection(); var statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE mysql_strict (id BIGINT NOT NULL PRIMARY KEY, "
+                    + "label VARCHAR(10) DEFAULT 'a', cafe VARCHAR(10) DEFAULT 'a') DEFAULT CHARSET = latin1");
+        }
+        SchemaDefinition declared = new SchemaDefinition(2, "mysql", Map.of("mysql_strict",
+                new SchemaDefinition.TableDef(null, List.of(
+                        new SchemaDefinition.ColumnDef("id", "BIGINT NOT NULL"),
+                        new SchemaDefinition.ColumnDef("label", "VARCHAR(10) DEFAULT '日本'"),
+                        new SchemaDefinition.ColumnDef("cafe", "VARCHAR(10) DEFAULT 'café'"),
+                        new SchemaDefinition.ColumnDef("note", "VARCHAR(10) DEFAULT '日本'")),
+                        List.of("CREATE INDEX idx_strict_note ON mysql_strict (note)")),
+                // A legacy character set that stores the default does not block an unrelated widening.
+                "mysqlxstrict", new SchemaDefinition.TableDef(null, List.of(
+                        new SchemaDefinition.ColumnDef("id", "BIGINT NOT NULL"),
+                        new SchemaDefinition.ColumnDef("label", "VARCHAR(20) DEFAULT '中文'")), List.of())),
+                List.of());
+        try (Connection connection = connection(); var statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE mysqlxstrict (id BIGINT NOT NULL PRIMARY KEY, "
+                    + "label VARCHAR(10) DEFAULT '中文') DEFAULT CHARSET = gbk");
+        }
+        for (String sqlMode : List.of("''", "'STRICT_TRANS_TABLES'")) {
+            try (Connection connection = connection(); var statement = connection.createStatement()) {
+                statement.execute("SET SESSION sql_mode = " + sqlMode);
+                SchemaSynchronizationResult result = synchronizer().synchronizeWithResult(connection, declared);
+                assertThat(result.pendingSql()).hasSize(3);
+                assertThat(result.pendingSql()).anySatisfy(line -> assertThat(line)
+                        .contains("MODIFY COLUMN label").contains("latin1 character set"));
+                assertThat(result.pendingSql()).anySatisfy(line -> assertThat(line)
+                        .contains("ADD COLUMN note").contains("latin1 character set"));
+                assertThat(result.pendingSql()).anySatisfy(line -> assertThat(line)
+                        .contains("CREATE INDEX idx_strict_note").contains("mysql_strict.note was not added"));
+            }
+        }
+        try (Connection connection = connection(); var statement = connection.createStatement();
+             var rows = statement.executeQuery("SELECT CHARACTER_MAXIMUM_LENGTH, COLUMN_DEFAULT "
+                     + "FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() "
+                     + "AND TABLE_NAME = 'mysqlxstrict' AND COLUMN_NAME = 'label'")) {
+            assertThat(rows.next()).isTrue();
+            assertThat(rows.getInt(1)).isEqualTo(20);
+            assertThat(rows.getString(2)).isEqualTo("中文");
+        }
+        try (Connection connection = connection(); var statement = connection.createStatement();
+             var rows = statement.executeQuery("SELECT COLUMN_NAME, COLUMN_DEFAULT FROM information_schema.COLUMNS "
+                     + "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'mysql_strict' ORDER BY COLUMN_NAME")) {
+            Map<String, String> defaults = new java.util.HashMap<>();
+            while (rows.next()) {
+                defaults.put(rows.getString(1), rows.getString(2));
+            }
+            assertThat(defaults).doesNotContainKey("note");
+            assertThat(defaults.get("label")).isEqualTo("a");
+            assertThat(defaults.get("cafe")).isEqualTo("café");
+        }
+    }
+
+    private boolean tableExists(String table) throws Exception {
+        try (Connection connection = connection();
+             var statement = connection.prepareStatement("SELECT COUNT(*) FROM information_schema.tables "
+                     + "WHERE table_schema = DATABASE() AND table_name = ?")) {
+            statement.setString(1, table);
+            try (var rows = statement.executeQuery()) {
+                return rows.next() && rows.getInt(1) == 1;
+            }
+        }
+    }
+
+    @Test
     void nationalCharsetCollationAndPrecisionDriftArePending() throws Exception {
         try (Connection connection = connection(); var statement = connection.createStatement()) {
             statement.execute("CREATE TABLE mysql_strict (id BIGINT NOT NULL PRIMARY KEY, "

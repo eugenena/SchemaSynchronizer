@@ -1,5 +1,28 @@
 # Greptile lessons
 
+## 2026-09-27 — issue #13 — fail-closed checks must not block converged schemas
+
+- **Bug:** The `explicit_defaults_for_timestamp` refusal was checked in the preflight, but a
+  missing table's column list (added right after `CREATE TABLE`) and `BEFORE_SCHEMA` change
+  sets ran before the apply pass, so DDL could commit before the refusal. The first fix
+  refused whenever any change set was unrecorded, which blocked MariaDB 10.3 users whose
+  `TIMESTAMP` columns already matched, and adopting a database whose change sets already
+  verify. A non-ASCII default the column character set cannot hold failed in strict
+  `sql_mode` or was stored as `'??'` and re-applied on every sync. The first fix judged
+  character sets in Java (so a `gbk` column that already stored its default blocked every
+  widening) and read the table character set through a `COLLATIONS` join that finds nothing
+  for MariaDB 11's default `utf8mb4_uca1400_ai_ci`.
+- **Missed because:** The refusal was placed where DDL was planned, not where the first DDL
+  could run. The follow-up fixes were tested only for the case they refuse, not for a schema
+  that already converged, and only on MySQL.
+- **Prevention:** `CONTRIBUTING.md` requires a converged-case cell for every new pending or
+  refusal check, asking the server for character-set verdicts, MariaDB 10.3 and 11.x runs,
+  and covering what runs between the preflight and the apply pass. Contracts:
+  `SchemaSynchronizerMySqlIntegrationTest#timestampRefusalPrecedesCreatedTablesAndChangeSets`,
+  `#defaultsTheCharsetCannotStoreArePendingInAnySqlMode`,
+  `SchemaSynchronizerMariaDbIntegrationTest#addedDefaultsFollowTheTableCharsetAndUnrelatedChangeSetsSkipTheTimestampRefusal`,
+  `DialectDeclarationContractTest#changeSetsReferenceTimestampTablesByTokenOutsideLiterals`.
+
 ## 2026-09-27 — issue #13 — newly parseable types must reach every comparison
 
 - **Bug:** `DECIMAL(p,s) UNSIGNED` became parseable, but live precision was read and compared

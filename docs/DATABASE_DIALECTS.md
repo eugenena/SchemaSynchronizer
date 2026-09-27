@@ -100,7 +100,11 @@ ascending indexes there or the live index will not match the declaration.
 - `TIMESTAMP` columns: when `explicit_defaults_for_timestamp` is OFF (the MariaDB default before
   10.10), `CREATE`, `ADD`, and `MODIFY` give a `TIMESTAMP` an undeclared `NOT NULL` and
   `DEFAULT`/`ON UPDATE CURRENT_TIMESTAMP`. A sync that would create, add, or modify a
-  `TIMESTAMP` column is refused before any DDL. Enable the setting in the server configuration,
+  `TIMESTAMP` column is refused before any DDL. A missing table counts its column list as well
+  as its `createSql`. An unapplied, unverified `BEFORE_SCHEMA` change set that names a table
+  declaring a `TIMESTAMP` column is also refused before it runs, because it may change what the
+  sync then does to that table.
+  Enable the setting in the server configuration,
   or with `sessionVariables=explicit_defaults_for_timestamp=1` where the server accepts a session
   value (MySQL 8, MariaDB 10.5.17+/10.6.9+). Reviewed change sets are not checked. A MySQL string
   default `'NULL'` is kept as a string, distinct from no default. MySQL Connector/J connected
@@ -111,7 +115,11 @@ ascending indexes there or the live index will not match the declaration.
   silently reset something the declaration does not repeat, the change is reported as
   pending instead: a collation that differs from the table default, `ON UPDATE`,
   `AUTO_INCREMENT`, `INVISIBLE`, MariaDB `COMPRESSED`, `ZEROFILL`, a column `COMMENT`, or a
-  generated column. A `MODIFY` to another `TINYINT` spelling never adds or removes the
+  generated column. A non-ASCII default of a character column that the column character set
+  cannot store is pending for `MODIFY` and `ADD COLUMN`, and so is an index on a column whose
+  `ADD` is pending (strict `sql_mode` rejects such a default; otherwise it is stored with `'?'`).
+  The server decides by converting the text to the column's character set (for `ADD`, the
+  table's; `utf8mb3` for `NVARCHAR`/`NCHAR`). A `MODIFY` to another `TINYINT` spelling never adds or removes the
   `TINYINT(1)` display width that Connector/J reads as `BOOLEAN`/`BIT`: a live `TINYINT(1)` kept
   as a `TINYINT` must be declared `BOOLEAN`, `BOOL`, or `TINYINT(1)`, and a live plain `TINYINT`
   must not be. A live `TINYINT(1) UNSIGNED` (MariaDB; MySQL 8.0.19+ stores it as
