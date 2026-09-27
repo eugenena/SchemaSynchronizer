@@ -74,13 +74,14 @@ Changes that can alter what an existing definition reports after upgrading:
 - **`explicit_defaults_for_timestamp` OFF** (MariaDB before 10.10): a sync that would create,
   add, or modify a `TIMESTAMP` column is refused before any DDL, including a column that a
   missing table's column list adds after `CREATE TABLE`, and before an unapplied
-  `BEFORE_SCHEMA` change set that names a table declaring a `TIMESTAMP` column.
+  `BEFORE_SCHEMA` change set whose table DDL names a table declaring a `TIMESTAMP` column.
 - **MySQL/MariaDB character defaults** the column character set cannot store (for example
   `'日本'` on a `latin1` table) are pending for `MODIFY COLUMN` and `ADD COLUMN`, as is an index
   on such a column, instead of failing in strict `sql_mode` or being stored as `'??'` and
   re-applied on every sync. An index on a missing column with no definition is pending too.
-  `COLLATE`, `CHARACTER SET`, and `COMMENT` in a MySQL/MariaDB column definition fail
-  validation (they were read as part of the default); declare them in `createSql`.
+  Character set, collation, `BINARY`, `SIGNED`, and `COMMENT` attributes in a MySQL/MariaDB
+  column definition fail validation (they were read as part of the type or default); declare
+  them in `createSql`.
 - **MySQL Connector/J against MariaDB** is detected as `mariadb`; definitions declaring
   `"dialect": "mysql"` for a MariaDB server must switch to `mariadb` (or re-snapshot).
 - **MySQL/MariaDB validation** rejects defaults the server would reject at DDL time (odd-length

@@ -328,9 +328,15 @@ class ChangeSetSchemaScopeTest {
         String hashed = DialectSupport.mysqlLockResource(longSchema);
         assertThat(hashed).startsWith("ss_");
         assertThat(hashed.length()).isLessThanOrEqualTo(DialectSupport.MYSQL_LOCK_NAME_MAX);
-        String legacy = DialectSupport.mysqlLockResourceLegacy(longSchema);
-        assertThat(legacy).startsWith("ss_");
-        assertThat(legacy).isNotEqualTo(hashed);
+        // 1.2.0 locked "schema_synchronizer_" + schema with its case; MySQL rejects names over 64 chars.
+        assertThat(DialectSupport.mysqlLockResourceLegacy(DatabaseDialect.MYSQL, longSchema)).isEqualTo(hashed);
+        assertThat(DialectSupport.mysqlLockResourceLegacy(DatabaseDialect.MARIADB, longSchema))
+                .isEqualTo("schema_synchronizer_" + longSchema);
+        assertThat(DialectSupport.mysqlLockResourceLegacy(DatabaseDialect.MYSQL, "AppDb"))
+                .isEqualTo("schema_synchronizer_AppDb");
+        assertThat(DialectSupport.mysqlLockResourceLegacy(DatabaseDialect.MARIADB, "AppDb"))
+                .isEqualTo("schema_synchronizer_AppDb");
+        assertThat(DialectSupport.mysqlLockResource("AppDb")).isEqualTo("schema_synchronizer_appdb");
         assertThat(DialectSupport.namespaceLockKey("payments"))
                 .isNotEqualTo(DialectSupport.namespaceLockKey("ledger"));
     }

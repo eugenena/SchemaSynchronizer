@@ -101,9 +101,11 @@ ascending indexes there or the live index will not match the declaration.
   10.10), `CREATE`, `ADD`, and `MODIFY` give a `TIMESTAMP` an undeclared `NOT NULL` and
   `DEFAULT`/`ON UPDATE CURRENT_TIMESTAMP`. A sync that would create, add, or modify a
   `TIMESTAMP` column is refused before any DDL. A missing table counts its column list as well
-  as its `createSql`. An unapplied, unverified `BEFORE_SCHEMA` change set that names a table
-  declaring a `TIMESTAMP` column is also refused before it runs, because it may change what the
-  sync then does to that table.
+  as its `createSql`. An unapplied, unverified `BEFORE_SCHEMA` change set whose table DDL
+  (`CREATE`, `ALTER`, `DROP`, or `RENAME TABLE`) names a table declaring a `TIMESTAMP` column is
+  also refused before it runs. The check reads the statement text; DDL run indirectly (`CALL`,
+  `EXECUTE IMMEDIATE`) is not seen. Dry-run does not run `verificationSql`, so it treats every unrecorded
+  change set as unverified and may refuse one that a real sync would skip.
   Enable the setting in the server configuration,
   or with `sessionVariables=explicit_defaults_for_timestamp=1` where the server accepts a session
   value (MySQL 8, MariaDB 10.5.17+/10.6.9+). Reviewed change sets are not checked. A MySQL string

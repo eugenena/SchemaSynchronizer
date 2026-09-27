@@ -113,6 +113,15 @@ class ChangeSetExecutorTest {
         assertThat(result.plannedSql()).containsExactly("ALTER TABLE items ADD COLUMN note TEXT");
         assertThat(verificationCalls.get()).isZero();
         verify(statement, never()).execute(anyString());
+
+        // The pre-DDL checks treat an unrecorded change set as unverified instead of querying.
+        SchemaDefinition.ChangeSet twoStatements = new SchemaDefinition.ChangeSet("two", "preview",
+                List.of("ALTER TABLE items ADD COLUMN a INT", "ALTER TABLE items ADD COLUMN b INT"),
+                "SELECT count(*) > 0 FROM items");
+        assertThat(new ChangeSetExecutor().unappliedUnverified(connection, List.of(change, twoStatements), dryRun,
+                DatabaseDialect.MARIADB)).containsExactly(change, twoStatements);
+        new ChangeSetExecutor().validateHistory(connection, List.of(twoStatements), dryRun, DatabaseDialect.MARIADB);
+        assertThat(verificationCalls.get()).isZero();
     }
 
     private Connection connectionWithoutHistory() throws Exception {
