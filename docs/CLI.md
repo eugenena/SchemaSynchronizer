@@ -49,6 +49,13 @@ java -jar schema-synchronizer-cli-1.3.0-standalone.jar validate schema-definitio
 No database connection is required. The command checks format, dialect, declarative
 targets, SQL safety policy, and change-set structure.
 
+Without a connection there is no history table, so `validate` applies the SQL safety policy
+to every change set. `sync` and `dry-run` apply it only to change sets not yet recorded in
+history. A change set applied under an earlier release can therefore fail `validate` while
+`sync` accepts it. Leave it unchanged (editing it breaks its checksum) and check the rest
+with `dry-run` against a database that records it. See
+[SCHEMA_DEFINITION.md](SCHEMA_DEFINITION.md#change-sets).
+
 ## Dry-run against a target
 
 ```text

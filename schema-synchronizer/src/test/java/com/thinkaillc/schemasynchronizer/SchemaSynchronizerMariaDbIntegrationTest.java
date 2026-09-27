@@ -28,6 +28,10 @@ class SchemaSynchronizerMariaDbIntegrationTest {
         try (Connection connection = connection(); var statement = connection.createStatement()) {
             statement.execute("DROP TABLE IF EXISTS maria_items");
             statement.execute("DROP TABLE IF EXISTS mariaxitems");
+            statement.execute("DROP TABLE IF EXISTS maria_case_items");
+            statement.execute("DROP FUNCTION IF EXISTS maria_case_tier");
+            statement.execute("DROP TABLE IF EXISTS maria_staged");
+            statement.execute("DROP TABLE IF EXISTS maria_tags");
             statement.execute("DROP TABLE IF EXISTS schema_synchronizer_history");
         }
     }
@@ -511,12 +515,162 @@ class SchemaSynchronizerMariaDbIntegrationTest {
         }
     }
 
+    @Test
+    void nationalColumnsCompareTheCollationEvenWhenTheTypeMatches() throws Exception {
+        // `utf8` is utf8mb3 on every supported MariaDB; 10.6+ reports it as utf8mb3.
+        try (Connection connection = connection(); var statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE maria_items (id BIGINT NOT NULL PRIMARY KEY, nick NVARCHAR(20), "
+                    + "binned VARCHAR(20) CHARACTER SET utf8 COLLATE utf8_bin, "
+                    + "wide VARCHAR(20) CHARACTER SET utf8mb4) DEFAULT CHARSET = utf8mb4");
+        }
+        SchemaDefinition declared = new SchemaDefinition(2, "mariadb", Map.of("maria_items",
+                new SchemaDefinition.TableDef(null, List.of(
+                        new SchemaDefinition.ColumnDef("id", "BIGINT NOT NULL"),
+                        new SchemaDefinition.ColumnDef("nick", "NVARCHAR(20)"),
+                        new SchemaDefinition.ColumnDef("binned", "NVARCHAR(20)"),
+                        new SchemaDefinition.ColumnDef("wide", "NCHAR VARYING(20)")), List.of())),
+                List.of());
+        try (Connection connection = connection()) {
+            SchemaSynchronizationResult result = synchronizer().synchronizeWithResult(connection, declared);
+            assertThat(result.columnsAltered()).isZero();
+            assertThat(result.pendingSql()).hasSize(2)
+                    .anyMatch(sql -> sql.contains("MODIFY COLUMN binned") && sql.contains("utf8_bin"))
+                    .anyMatch(sql -> sql.contains("MODIFY COLUMN wide") && sql.contains("utf8mb4"))
+                    .noneMatch(sql -> sql.contains("nick"));
+        }
+    }
+
     private SchemaDefinition labelDefinition(String label) {
         return new SchemaDefinition(2, "mariadb", Map.of("maria_items",
                 new SchemaDefinition.TableDef("CREATE TABLE IF NOT EXISTS maria_items (id BIGINT NOT NULL PRIMARY KEY)",
                         List.of(new SchemaDefinition.ColumnDef("id", "BIGINT NOT NULL"),
                                 new SchemaDefinition.ColumnDef("label", label)), List.of())),
                 List.of());
+    }
+
+    @Test
+    void aliasQualifiedColumnsApply() throws Exception {
+        try (Connection connection = connection(); var statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE maria_items (id BIGINT PRIMARY KEY, note VARCHAR(40), qty INT)");
+            statement.execute("INSERT INTO maria_items (id, note, qty) VALUES (1, 'a', 1), (2, 'b', 2)");
+        }
+        SchemaDefinition definition = new SchemaDefinition(2, "mariadb", Map.of(), List.of(
+                new SchemaDefinition.ChangeSet("001-maria-alias-join", "multi-table UPDATE with aliases",
+                        List.of("UPDATE maria_items i JOIN maria_items t ON t.id = i.id + 1 SET i.note = t.note"),
+                        "SELECT COUNT(*) = 1 FROM maria_items WHERE id = 1 AND note = 'b'"),
+                new SchemaDefinition.ChangeSet("002-maria-table-qualified", "table-qualified SET",
+                        List.of("UPDATE maria_items SET maria_items.qty = maria_items.qty + 10 "
+                                + "WHERE maria_items.id = 1"),
+                        "SELECT COUNT(*) = 1 FROM maria_items WHERE id = 1 AND qty = 11"),
+                new SchemaDefinition.ChangeSet("003-maria-duplicate-key", "table-qualified ON DUPLICATE KEY UPDATE",
+                        List.of("INSERT INTO maria_items (id, note, qty) VALUES (2, 'z', 0) "
+                                + "ON DUPLICATE KEY UPDATE maria_items.note = 'dup'"),
+                        "SELECT COUNT(*) = 1 FROM maria_items WHERE id = 2 AND note = 'dup'")));
+        try (Connection connection = connection()) {
+            assertThat(synchronizer().synchronizeWithResult(connection, definition).changeSetsApplied())
+                    .isEqualTo(3);
+        }
+    }
+
+    @Test
+    void setBranchesAndExpressionKeywordsApply() throws Exception {
+        try (Connection connection = connection(); var statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE maria_items (id BIGINT PRIMARY KEY, note VARCHAR(40), qty INT, "
+                    + "created_at DATETIME)");
+            statement.execute("CREATE TABLE maria_staged (id BIGINT, note VARCHAR(40))");
+            statement.execute("CREATE TABLE maria_tags (id BIGINT, name VARCHAR(40))");
+            statement.execute("INSERT INTO maria_staged VALUES (1, ' a ')");
+            statement.execute("INSERT INTO maria_tags VALUES (2, 'b')");
+        }
+        SchemaDefinition definition = new SchemaDefinition(2, "mariadb", Map.of(), List.of(
+                new SchemaDefinition.ChangeSet("001-maria-union", "correlations per set-operation branch",
+                        List.of("INSERT INTO maria_items (id, note) SELECT s.id, s.note FROM maria_staged s "
+                                + "UNION ALL SELECT t.id, t.name FROM maria_tags t"),
+                        "SELECT COUNT(*) = 1 FROM maria_items WHERE id = 2 AND note = 'b'"),
+                new SchemaDefinition.ChangeSet("002-maria-trim", "TRIM ... FROM takes an operand",
+                        List.of("UPDATE maria_items i SET i.note = TRIM(BOTH ' ' FROM i.note), "
+                                + "i.created_at = '2020-01-02' WHERE i.id = 1"),
+                        "SELECT COUNT(*) = 1 FROM maria_items WHERE id = 1 AND note = 'a'"),
+                new SchemaDefinition.ChangeSet("003-maria-extract", "EXTRACT ... FROM takes an operand",
+                        List.of("UPDATE maria_items i SET i.qty = EXTRACT(YEAR FROM i.created_at) WHERE i.id = 1"),
+                        "SELECT COUNT(*) = 1 FROM maria_items WHERE id = 1 AND qty = 2020"),
+                new SchemaDefinition.ChangeSet("004-maria-substring", "SUBSTRING ... FROM ... FOR takes operands",
+                        List.of("UPDATE maria_items i SET i.note = CONCAT(i.note, SUBSTRING('xyz' FROM 2 FOR 1)) "
+                                + "WHERE i.id = 1"),
+                        "SELECT COUNT(*) = 1 FROM maria_items WHERE id = 1 AND note = 'ay'")));
+        try (Connection connection = connection()) {
+            assertThat(synchronizer().synchronizeWithResult(connection, definition).changeSetsApplied())
+                    .isEqualTo(4);
+        }
+    }
+
+    @Test
+    void multiStatementTriggerBodyIsOneChangeSetStatement() throws Exception {
+        SchemaDefinition withTrigger = new SchemaDefinition(2, "mariadb", Map.of(), List.of(
+                new SchemaDefinition.ChangeSet("001-maria-items", "table",
+                        List.of("CREATE TABLE maria_items (id BIGINT PRIMARY KEY, note VARCHAR(40), qty INT)"),
+                        "SELECT COUNT(*) = 1 FROM information_schema.tables "
+                                + "WHERE table_schema = DATABASE() AND table_name = 'maria_items'"),
+                new SchemaDefinition.ChangeSet("002-maria-trigger", "trigger with a compound body",
+                        List.of("CREATE TRIGGER maria_items_fill BEFORE INSERT ON maria_items FOR EACH ROW BEGIN "
+                                + "IF NEW.note IS NULL THEN SET NEW.note = 'a;b'; END IF; "
+                                + "WHILE NEW.qty IS NULL OR NEW.qty < 3 DO SET NEW.qty = COALESCE(NEW.qty, 0) + 1; "
+                                + "END WHILE; END"),
+                        "SELECT COUNT(*) = 1 FROM information_schema.triggers "
+                                + "WHERE trigger_schema = DATABASE() AND trigger_name = 'maria_items_fill'")));
+        try (Connection connection = connection()) {
+            assertThat(synchronizer().synchronizeWithResult(connection, withTrigger).changeSetsApplied())
+                    .isEqualTo(2);
+        }
+        try (Connection connection = connection(); var statement = connection.createStatement()) {
+            statement.execute("INSERT INTO maria_items (id) VALUES (1)");
+            try (var rows = statement.executeQuery("SELECT note, qty FROM maria_items WHERE id = 1")) {
+                assertThat(rows.next()).isTrue();
+                assertThat(rows.getString(1)).isEqualTo("a;b");
+                assertThat(rows.getInt(2)).isEqualTo(3);
+            }
+        }
+    }
+
+    @Test
+    void caseExpressionsWithIfAndRepeatCallsRunInRoutines() throws Exception {
+        SchemaDefinition withRoutines = new SchemaDefinition(2, "mariadb", Map.of(), List.of(
+                new SchemaDefinition.ChangeSet("001-maria-case-items", "table",
+                        List.of("CREATE TABLE maria_case_items (id BIGINT PRIMARY KEY, note VARCHAR(40), qty INT, "
+                                + "tier INT)"),
+                        "SELECT COUNT(*) = 1 FROM information_schema.tables "
+                                + "WHERE table_schema = DATABASE() AND table_name = 'maria_case_items'"),
+                new SchemaDefinition.ChangeSet("002-maria-case-function", "CASE expression calling IF",
+                        List.of("CREATE FUNCTION maria_case_tier(a INT) RETURNS INT DETERMINISTIC "
+                                + "RETURN CASE WHEN a > 0 THEN IF(a > 10, 2, 1) ELSE 0 END"),
+                        "SELECT COUNT(*) = 1 FROM information_schema.routines "
+                                + "WHERE routine_schema = DATABASE() AND routine_name = 'maria_case_tier'"),
+                new SchemaDefinition.ChangeSet("003-maria-case-note", "CASE expression calling REPEAT",
+                        List.of("CREATE TRIGGER maria_case_note BEFORE INSERT ON maria_case_items FOR EACH ROW "
+                                + "SET NEW.note = CASE WHEN NEW.qty > 0 THEN REPEAT('x', 2) ELSE '' END"),
+                        "SELECT COUNT(*) = 1 FROM information_schema.triggers "
+                                + "WHERE trigger_schema = DATABASE() AND trigger_name = 'maria_case_note'"),
+                new SchemaDefinition.ChangeSet("004-maria-case-tier", "CASE expression calling IF in a block",
+                        List.of("CREATE TRIGGER maria_case_tier_fill BEFORE INSERT ON maria_case_items FOR EACH ROW "
+                                + "FOLLOWS maria_case_note BEGIN SET NEW.tier = CASE WHEN NEW.qty > 0 "
+                                + "THEN IF(NEW.qty > 1, 1, 2) ELSE 0 END; END"),
+                        "SELECT COUNT(*) = 1 FROM information_schema.triggers "
+                                + "WHERE trigger_schema = DATABASE() AND trigger_name = 'maria_case_tier_fill'")));
+        try (Connection connection = connection()) {
+            assertThat(synchronizer().synchronizeWithResult(connection, withRoutines).changeSetsApplied())
+                    .isEqualTo(4);
+        }
+        try (Connection connection = connection(); var statement = connection.createStatement()) {
+            statement.execute("INSERT INTO maria_case_items (id, qty) VALUES (1, 5)");
+            try (var rows = statement.executeQuery(
+                    "SELECT note, tier, maria_case_tier(qty), maria_case_tier(20) FROM maria_case_items")) {
+                assertThat(rows.next()).isTrue();
+                assertThat(rows.getString(1)).isEqualTo("xx");
+                assertThat(rows.getInt(2)).isEqualTo(1);
+                assertThat(rows.getInt(3)).isEqualTo(1);
+                assertThat(rows.getInt(4)).isEqualTo(2);
+            }
+        }
     }
 
     private SchemaSynchronizer synchronizer() throws Exception {

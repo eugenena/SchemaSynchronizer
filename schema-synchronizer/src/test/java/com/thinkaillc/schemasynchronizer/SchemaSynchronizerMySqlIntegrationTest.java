@@ -31,6 +31,9 @@ class SchemaSynchronizerMySqlIntegrationTest {
             statement.execute("DROP TABLE IF EXISTS mysql_flag");
             statement.execute("DROP TABLE IF EXISTS mysql_strict");
             statement.execute("DROP TABLE IF EXISTS mysqlxstrict");
+            statement.execute("DROP TABLE IF EXISTS mysql_case_items");
+            statement.execute("DROP TABLE IF EXISTS mysql_staged");
+            statement.execute("DROP TABLE IF EXISTS mysql_tags");
             statement.execute("DROP TABLE IF EXISTS schema_synchronizer_history");
         }
     }
@@ -548,6 +551,31 @@ class SchemaSynchronizerMySqlIntegrationTest {
     }
 
     @Test
+    void nationalColumnsCompareTheCollationEvenWhenTheTypeMatches() throws Exception {
+        try (Connection connection = connection(); var statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE mysql_strict (id BIGINT NOT NULL PRIMARY KEY, nick NVARCHAR(20), "
+                    + "binned VARCHAR(20) CHARACTER SET utf8mb3 COLLATE utf8mb3_bin, "
+                    + "wide VARCHAR(20) CHARACTER SET utf8mb4) "
+                    + "DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci");
+        }
+        SchemaDefinition declared = new SchemaDefinition(2, "mysql", Map.of("mysql_strict",
+                new SchemaDefinition.TableDef(null, List.of(
+                        new SchemaDefinition.ColumnDef("id", "BIGINT NOT NULL"),
+                        new SchemaDefinition.ColumnDef("nick", "NVARCHAR(20)"),
+                        new SchemaDefinition.ColumnDef("binned", "NVARCHAR(20)"),
+                        new SchemaDefinition.ColumnDef("wide", "NCHAR VARYING(20)")), List.of())),
+                List.of());
+        try (Connection connection = connection()) {
+            SchemaSynchronizationResult result = synchronizer().synchronizeWithResult(connection, declared);
+            assertThat(result.columnsAltered()).isZero();
+            assertThat(result.pendingSql()).hasSize(2)
+                    .anyMatch(sql -> sql.contains("MODIFY COLUMN binned") && sql.contains("utf8mb3_bin"))
+                    .anyMatch(sql -> sql.contains("MODIFY COLUMN wide") && sql.contains("utf8mb4"))
+                    .noneMatch(sql -> sql.contains("nick"));
+        }
+    }
+
+    @Test
     void nationalCharsetCollationAndPrecisionDriftArePending() throws Exception {
         try (Connection connection = connection(); var statement = connection.createStatement()) {
             statement.execute("CREATE TABLE mysql_strict (id BIGINT NOT NULL PRIMARY KEY, "
@@ -821,6 +849,202 @@ class SchemaSynchronizerMySqlIntegrationTest {
         try (Connection connection = connection()) {
             assertThat(synchronizer.synchronizeWithResult(connection, withChange).changeSetsApplied())
                     .isZero();
+        }
+    }
+
+    @Test
+    void sqlPolicyGatesOnlyChangeSetsMissingFromHistory() throws Exception {
+        SchemaDefinition.ChangeSet legacy = new SchemaDefinition.ChangeSet("000-legacy",
+                "applied before the policy", List.of("DROP TABLE mysql_items"));
+        SchemaDefinition.ChangeSet flag = new SchemaDefinition.ChangeSet("001-mysql-flag", "safe",
+                List.of("CREATE TABLE mysql_flag (id BIGINT PRIMARY KEY)"),
+                "SELECT COUNT(*) = 1 FROM information_schema.tables "
+                        + "WHERE table_schema = DATABASE() AND table_name = 'mysql_flag'");
+        SchemaDefinition.ChangeSet strict = new SchemaDefinition.ChangeSet("002-mysql-strict", "safe",
+                List.of("CREATE TABLE mysql_strict (id BIGINT PRIMARY KEY)"),
+                "SELECT COUNT(*) = 1 FROM information_schema.tables "
+                        + "WHERE table_schema = DATABASE() AND table_name = 'mysql_strict'");
+        SchemaDefinition.ChangeSet forbidden = new SchemaDefinition.ChangeSet("003-forbidden", "destructive",
+                List.of("DROP TABLE mysql_items"), "SELECT COUNT(*) = 0 FROM information_schema.tables "
+                + "WHERE table_schema = DATABASE() AND table_name = 'mysql_items'");
+        try (Connection connection = connection(); var statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE mysql_items (id BIGINT PRIMARY KEY)");
+        }
+        // No history table: every change set is checked, and nothing runs.
+        try (Connection connection = connection()) {
+            assertThatThrownBy(() -> synchronizer().synchronizeWithResult(connection,
+                    new SchemaDefinition(2, "mysql", Map.of(), List.of(flag, legacy))))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("not allowed");
+        }
+        assertThat(tableExists("mysql_flag")).isFalse();
+        assertThat(tableExists("schema_synchronizer_history")).isFalse();
+
+        try (Connection connection = connection()) {
+            assertThat(synchronizer().synchronizeWithResult(connection,
+                    new SchemaDefinition(2, "mysql", Map.of(), List.of(flag))).changeSetsApplied()).isEqualTo(1);
+        }
+        try (Connection connection = connection(); var statement = connection.createStatement()) {
+            statement.execute("INSERT INTO schema_synchronizer_history (change_id, checksum, description, "
+                    + "execution_ms) VALUES ('000-legacy', '" + ChangeSetExecutor.checksum(legacy)
+                    + "', 'applied before the policy', 0)");
+        }
+        // Applied with a matching checksum: accepted and not run again.
+        try (Connection connection = connection()) {
+            assertThat(synchronizer().synchronizeWithResult(connection,
+                    new SchemaDefinition(2, "mysql", Map.of(), List.of(legacy, flag))).changeSetsApplied()).isZero();
+        }
+        assertThat(tableExists("mysql_items")).isTrue();
+        // An unapplied forbidden change set is rejected before an earlier unapplied safe one runs.
+        try (Connection connection = connection()) {
+            assertThatThrownBy(() -> synchronizer().synchronizeWithResult(connection,
+                    new SchemaDefinition(2, "mysql", Map.of(), List.of(legacy, flag, strict, forbidden))))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("not allowed");
+        }
+        assertThat(tableExists("mysql_strict")).isFalse();
+        assertThat(tableExists("mysql_items")).isTrue();
+    }
+
+    @Test
+    void aliasQualifiedColumnsApply() throws Exception {
+        try (Connection connection = connection(); var statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE mysql_items (id BIGINT PRIMARY KEY, note VARCHAR(40), qty INT)");
+            statement.execute("INSERT INTO mysql_items (id, note, qty) VALUES (1, 'a', 1), (2, 'b', 2)");
+        }
+        SchemaDefinition definition = new SchemaDefinition(2, "mysql", Map.of(), List.of(
+                new SchemaDefinition.ChangeSet("001-mysql-alias-join", "multi-table UPDATE with aliases",
+                        List.of("UPDATE mysql_items i JOIN mysql_items t ON t.id = i.id + 1 SET i.note = t.note"),
+                        "SELECT COUNT(*) = 1 FROM mysql_items WHERE id = 1 AND note = 'b'"),
+                new SchemaDefinition.ChangeSet("002-mysql-table-qualified", "table-qualified SET",
+                        List.of("UPDATE mysql_items SET mysql_items.qty = mysql_items.qty + 10 "
+                                + "WHERE mysql_items.id = 1"),
+                        "SELECT COUNT(*) = 1 FROM mysql_items WHERE id = 1 AND qty = 11"),
+                new SchemaDefinition.ChangeSet("003-mysql-duplicate-key", "table-qualified ON DUPLICATE KEY UPDATE",
+                        List.of("INSERT INTO mysql_items (id, note, qty) VALUES (2, 'z', 0) "
+                                + "ON DUPLICATE KEY UPDATE mysql_items.note = 'dup'"),
+                        "SELECT COUNT(*) = 1 FROM mysql_items WHERE id = 2 AND note = 'dup'")));
+        try (Connection connection = connection()) {
+            assertThat(synchronizer().synchronizeWithResult(connection, definition).changeSetsApplied())
+                    .isEqualTo(3);
+        }
+    }
+
+    @Test
+    void setBranchesExpressionKeywordsRowAliasesAndCteUpdatesApply() throws Exception {
+        try (Connection connection = connection(); var statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE mysql_items (id BIGINT PRIMARY KEY, note VARCHAR(40), qty INT, "
+                    + "created_at DATETIME)");
+            statement.execute("CREATE TABLE mysql_staged (id BIGINT, note VARCHAR(40))");
+            statement.execute("CREATE TABLE mysql_tags (id BIGINT, name VARCHAR(40))");
+            statement.execute("INSERT INTO mysql_staged VALUES (1, ' a ')");
+            statement.execute("INSERT INTO mysql_tags VALUES (2, 'b')");
+        }
+        SchemaDefinition definition = new SchemaDefinition(2, "mysql", Map.of(), List.of(
+                new SchemaDefinition.ChangeSet("001-mysql-union", "correlations per set-operation branch",
+                        List.of("INSERT INTO mysql_items (id, note) SELECT s.id, s.note FROM mysql_staged s "
+                                + "UNION ALL SELECT t.id, t.name FROM mysql_tags t"),
+                        "SELECT COUNT(*) = 1 FROM mysql_items WHERE id = 2 AND note = 'b'"),
+                new SchemaDefinition.ChangeSet("002-mysql-trim", "TRIM ... FROM takes an operand",
+                        List.of("UPDATE mysql_items i SET i.note = TRIM(BOTH ' ' FROM i.note), "
+                                + "i.created_at = '2020-01-02' WHERE i.id = 1"),
+                        "SELECT COUNT(*) = 1 FROM mysql_items WHERE id = 1 AND note = 'a'"),
+                new SchemaDefinition.ChangeSet("003-mysql-extract", "EXTRACT ... FROM takes an operand",
+                        List.of("UPDATE mysql_items i SET i.qty = EXTRACT(YEAR FROM i.created_at) WHERE i.id = 1"),
+                        "SELECT COUNT(*) = 1 FROM mysql_items WHERE id = 1 AND qty = 2020"),
+                new SchemaDefinition.ChangeSet("004-mysql-substring", "SUBSTRING ... FROM ... FOR takes operands",
+                        List.of("UPDATE mysql_items i SET i.note = CONCAT(i.note, SUBSTRING('xyz' FROM 2 FOR 1)) "
+                                + "WHERE i.id = 1"),
+                        "SELECT COUNT(*) = 1 FROM mysql_items WHERE id = 1 AND note = 'ay'"),
+                new SchemaDefinition.ChangeSet("005-mysql-row-alias", "INSERT ... VALUES row alias",
+                        List.of("INSERT INTO mysql_items (id, note) VALUES (2, 'c') AS new "
+                                + "ON DUPLICATE KEY UPDATE note = new.note"),
+                        "SELECT COUNT(*) = 1 FROM mysql_items WHERE id = 2 AND note = 'c'"),
+                new SchemaDefinition.ChangeSet("006-mysql-cte-update", "WITH ... UPDATE",
+                        List.of("WITH c AS (SELECT id FROM mysql_staged) UPDATE mysql_items SET note = CONCAT(note, '!') "
+                                + "WHERE id IN (SELECT c.id FROM c)"),
+                        "SELECT COUNT(*) = 1 FROM mysql_items WHERE id = 1 AND note = 'ay!'")));
+        try (Connection connection = connection()) {
+            assertThat(synchronizer().synchronizeWithResult(connection, definition).changeSetsApplied())
+                    .isEqualTo(6);
+        }
+    }
+
+    @Test
+    void multiStatementTriggerBodyIsOneChangeSetStatement() throws Exception {
+        // With binary logging on, CREATE TRIGGER needs SUPER (or log_bin_trust_function_creators).
+        String adminUser = System.getProperty("schema.test.mysql.jdbc.admin.user");
+        assumeTrue(adminUser != null && !adminUser.isBlank(), "needs schema.test.mysql.jdbc.admin.user");
+        SchemaDefinition withTrigger = new SchemaDefinition(2, "mysql", Map.of(), List.of(
+                new SchemaDefinition.ChangeSet("001-mysql-items", "table",
+                        List.of("CREATE TABLE mysql_items (id BIGINT PRIMARY KEY, note VARCHAR(40), qty INT)"),
+                        "SELECT COUNT(*) = 1 FROM information_schema.tables "
+                                + "WHERE table_schema = DATABASE() AND table_name = 'mysql_items'"),
+                new SchemaDefinition.ChangeSet("002-mysql-trigger", "trigger with a compound body",
+                        List.of("CREATE TRIGGER mysql_items_fill BEFORE INSERT ON mysql_items FOR EACH ROW BEGIN "
+                                + "IF NEW.note IS NULL THEN SET NEW.note = 'a;b'; END IF; "
+                                + "SET NEW.qty = 1; END"),
+                        "SELECT COUNT(*) = 1 FROM information_schema.triggers "
+                                + "WHERE trigger_schema = DATABASE() AND trigger_name = 'mysql_items_fill'")));
+        try (Connection connection = adminConnection(adminUser)) {
+            assertThat(synchronizer().synchronizeWithResult(connection, withTrigger).changeSetsApplied())
+                    .isEqualTo(2);
+        }
+        try (Connection connection = connection(); var statement = connection.createStatement()) {
+            statement.execute("INSERT INTO mysql_items (id) VALUES (1)");
+            try (var rows = statement.executeQuery("SELECT note, qty FROM mysql_items WHERE id = 1")) {
+                assertThat(rows.next()).isTrue();
+                assertThat(rows.getString(1)).isEqualTo("a;b");
+                assertThat(rows.getInt(2)).isEqualTo(1);
+            }
+        }
+    }
+
+    @Test
+    void caseExpressionsWithIfAndRepeatCallsRunInRoutines() throws Exception {
+        String adminUser = System.getProperty("schema.test.mysql.jdbc.admin.user");
+        assumeTrue(adminUser != null && !adminUser.isBlank(), "needs schema.test.mysql.jdbc.admin.user");
+        SchemaDefinition withRoutines = new SchemaDefinition(2, "mysql", Map.of(), List.of(
+                new SchemaDefinition.ChangeSet("001-mysql-case-items", "table",
+                        List.of("CREATE TABLE mysql_case_items (id BIGINT PRIMARY KEY, note VARCHAR(40), qty INT, "
+                                + "tier INT)"),
+                        "SELECT COUNT(*) = 1 FROM information_schema.tables "
+                                + "WHERE table_schema = DATABASE() AND table_name = 'mysql_case_items'"),
+                new SchemaDefinition.ChangeSet("002-mysql-case-function", "CASE expression calling IF",
+                        List.of("CREATE FUNCTION mysql_case_tier(a INT) RETURNS INT DETERMINISTIC "
+                                + "RETURN CASE WHEN a > 0 THEN IF(a > 10, 2, 1) ELSE 0 END"),
+                        "SELECT COUNT(*) = 1 FROM information_schema.routines "
+                                + "WHERE routine_schema = DATABASE() AND routine_name = 'mysql_case_tier'"),
+                new SchemaDefinition.ChangeSet("003-mysql-case-note", "CASE expression calling REPEAT",
+                        List.of("CREATE TRIGGER mysql_case_note BEFORE INSERT ON mysql_case_items FOR EACH ROW "
+                                + "SET NEW.note = CASE WHEN NEW.qty > 0 THEN REPEAT('x', 2) ELSE '' END"),
+                        "SELECT COUNT(*) = 1 FROM information_schema.triggers "
+                                + "WHERE trigger_schema = DATABASE() AND trigger_name = 'mysql_case_note'"),
+                new SchemaDefinition.ChangeSet("004-mysql-case-tier", "CASE expression calling IF in a block",
+                        List.of("CREATE TRIGGER mysql_case_tier_fill BEFORE INSERT ON mysql_case_items FOR EACH ROW "
+                                + "FOLLOWS mysql_case_note BEGIN SET NEW.tier = CASE WHEN NEW.qty > 0 "
+                                + "THEN IF(NEW.qty > 1, 1, 2) ELSE 0 END; END"),
+                        "SELECT COUNT(*) = 1 FROM information_schema.triggers "
+                                + "WHERE trigger_schema = DATABASE() AND trigger_name = 'mysql_case_tier_fill'")));
+        try (Connection admin = adminConnection(adminUser); var cleanup = admin.createStatement()) {
+            cleanup.execute("DROP FUNCTION IF EXISTS mysql_case_tier");
+            try {
+                assertThat(synchronizer().synchronizeWithResult(admin, withRoutines).changeSetsApplied())
+                        .isEqualTo(4);
+                try (Connection connection = connection(); var statement = connection.createStatement()) {
+                    statement.execute("INSERT INTO mysql_case_items (id, qty) VALUES (1, 5)");
+                    try (var rows = statement.executeQuery(
+                            "SELECT note, tier, mysql_case_tier(qty), mysql_case_tier(20) FROM mysql_case_items")) {
+                        assertThat(rows.next()).isTrue();
+                        assertThat(rows.getString(1)).isEqualTo("xx");
+                        assertThat(rows.getInt(2)).isEqualTo(1);
+                        assertThat(rows.getInt(3)).isEqualTo(1);
+                        assertThat(rows.getInt(4)).isEqualTo(2);
+                    }
+                }
+            } finally {
+                cleanup.execute("DROP FUNCTION IF EXISTS mysql_case_tier");
+            }
         }
     }
 

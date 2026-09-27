@@ -29,10 +29,13 @@ class ChangeSetSchemaScopeTest {
         assertThatCode(() -> pg(
                 "UPDATE items SET note = 'x'", "public"))
                 .doesNotThrowAnyException();
+        assertThatCode(() -> pg(
+                "UPDATE items SET note = 'x' WHERE items.id = 1", "public"))
+                .doesNotThrowAnyException();
         assertThatThrownBy(() -> pg(
-                "UPDATE items SET items.note = 'x'", "public"))
+                "UPDATE items SET note = 'x' WHERE other.id = 1", "public"))
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("items");
+                .hasMessageContaining("other");
     }
 
     @Test

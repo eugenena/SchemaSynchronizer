@@ -21,6 +21,10 @@
   connected user, or the catalog name).
 - MySQL Connector/J connected to MariaDB is detected as `mariadb`; definitions declaring
   `"dialect": "mysql"` for a MariaDB server must switch to `mariadb` (or re-snapshot).
+- `CREATE EXTENSION`, accepted in 1.2.0, is rejected in new change sets: an extension can
+  install code that the guardrails cannot check. Install extensions outside change sets, for
+  example during database provisioning or with a migration role. Change sets already recorded
+  in history are unaffected.
 
 ### Locking and change sets
 
@@ -34,11 +38,155 @@
   cross-schema references and session namespace changes (`SET search_path`, `USE`,
   `ALTER SESSION SET CURRENT_SCHEMA`, …) are rejected. Forbidden statements are also found
   inside routine bodies. These are guardrails against mistakes, not a sandbox.
+- The change-set guardrails read SQL as tokens with each engine's quoting and escape rules
+  instead of matching text:
+  - A function or trigger with a multi-statement body is one change-set statement, and each
+    inner statement is checked: PostgreSQL `BEGIN ATOMIC` and dollar-quoted bodies,
+    MySQL/MariaDB `BEGIN … END`, SQL Server `AS BEGIN … END`, and Oracle PL/SQL triggers and
+    functions with inner `;`. A body with unbalanced `BEGIN`/`END` blocks is rejected.
+  - Admin and dynamic-SQL functions are caught when named through quoted, bracketed,
+    backticked, schema-qualified, or `U&"…"` identifiers, following each engine's case rules.
+  - Routine bodies are also checked for `SET ROLE`, `SET SESSION AUTHORIZATION`,
+    `SET DEFAULT ROLE`, `DENY`, `DISABLE`/`ENABLE TRIGGER`, `LOCK`, `FLUSH`, and
+    table-creating `SELECT … INTO`. PostgreSQL `E'…'` and `U&'…'` bodies are decoded before
+    the check.
+  - System-catalog writes are caught through `TOP (…)`, aliases, CTEs, derived tables, and
+    MySQL multi-table `UPDATE`. `dbo.items.id` in an expression is a column reference, while
+    `otherdb.dbo.items` after `FROM`/`JOIN`/`UPDATE` is still rejected.
+  - A two-part `q.column` in an expression is a column, not a schema reference, when `q` is
+    a table name or alias declared in the same query block and set-operation branch
+    (`UPDATE items AS i SET note = i.note`, MySQL `UPDATE items i JOIN tags t … SET i.note =
+    t.name`, `SET items.note = …`, `MERGE … USING staged s`, SQL Server `OPENJSON … AS j`
+    and `@t x`, MySQL 8.0.19+ `VALUES (…) AS new`), a trigger or output row (`NEW`/`OLD`,
+    Oracle `:NEW`/`:OLD` and `REFERENCING` aliases with the colon, or bare only in `WHEN`,
+    SQL Server `inserted`/`deleted`, PostgreSQL `EXCLUDED`), a routine parameter, variable,
+    loop record, block label, or the routine's own name (including an Oracle compound
+    trigger's declaration section in every timing point), a PostgreSQL
+    `label.record.field`/`routine.param.field`, an Oracle collection method or field chain on
+    a declared item in procedural code (`t.EXISTS(i)`, `t.DELETE(i)`, `t.EXTEND(n)`,
+    `t.NEXT(i)`, `h.addr.city`), or a `%TYPE`/`%ROWTYPE` anchor. `FROM`/`FOR`
+    inside `EXTRACT`, `TRIM`, `SUBSTRING`, `OVERLAY`, and `IS [NOT] DISTINCT FROM` take
+    operands, not tables. Oracle accepts `seq.NEXTVAL` and an allowlist of supplied packages
+    (`DBMS_OUTPUT`, `DBMS_RANDOM`, `UTL_RAW`, `UTL_I18N`, error-stack
+    `DBMS_UTILITY` functions, non-file `DBMS_LOB` routines); other package calls in the
+    same schema must be schema-qualified (`APP.util_pkg.f(x)`). Still rejected: `other.f(…)`,
+    `FROM other.t`, `other.s.NEXTVAL`, bare `new.f` in an Oracle trigger body, and qualifiers
+    declared in a subquery, another set branch, another body statement, or an ended Oracle
+    block or loop. See `docs/SCHEMA_DEFINITION.md` for the full list.
+  - PostgreSQL object names given as text are checked as names: the relation argument of
+    `nextval`/`currval`/`setval`, `to_regclass`, `pg_get_serial_sequence`, `pg_get_viewdef`,
+    and the relation size, partition, updatability, and index-maintenance functions; the
+    `to_reg*` lookups; the object names of `has_*_privilege`; and literals of every `reg*`
+    type in each spelling (`'…'::pg_catalog.regclass`, `CAST('…' AS regclass)`,
+    `regprocedure('…')`). A name literal may use any string spelling (`E'…'`, `U&'…'`,
+    `$$…$$`), parentheses, and text casts (`'items'::text::regclass`); an argument that
+    contains a string but is not one literal (`lower('x')::regclass`, `'a' || 'b'`) is
+    rejected. The sequence, serial-sequence, extension-config, and index-maintenance
+    functions require a name literal (or `pg_get_serial_sequence('items', 'id')` in the
+    sequence functions), so `nextval('other.seq')` and `nextval(col)` are rejected; the
+    metadata functions also accept an object id (`pg_relation_size(c.oid)`,
+    `pg_get_viewdef(c.oid, true)`).
+  - A two-part name where a type is expected is always `schema.type`, even when its first
+    part matches an alias, parameter, or variable: after `::`, in `CAST`/`TREAT`/`XMLCAST`
+    and SQL Server `CONVERT`, typed literals, `COLLATE`, `OPERATOR(…)`, Oracle `IS OF (…)`,
+    routine parameter and return types (named or not), `DECLARE` and PL/SQL declaration
+    types, and column types. `SELECT c::other.t FROM items other` is rejected.
+  - Parameters and declarations of a nested PL/SQL function or procedure qualify columns in
+    that subprogram's body only; PostgreSQL `$1.qty` is a parameter field. All `DBMS_LOB`
+    constants and exceptions are accepted.
+  - Three-part `%TYPE` anchors (`n app.items.note%TYPE`, in declarations and parameter or
+    return types) check their schema instead of being rejected as cross-database names;
+    Oracle `x r.a.c%TYPE` anchors a field of a local record. A PL/pgSQL declaration default
+    written with `=` (`q int = p.qty`) is no longer read as part of the type.
+  - Oracle `SYS` scalar collection types (`SYS.ODCINUMBERLIST`, `SYS.ODCIVARCHAR2LIST`,
+    `SYS.ODCIDATELIST`, `SYS.ODCIRAWLIST`, `SYS.ODCIGRANULELIST`, `SYS.ODCIRIDLIST`) and
+    `SYS.XMLTYPE`/`XMLTYPE.createXML` are accepted.
+  - Routine parameters no longer qualify names in their own header: Oracle
+    `f(other IN other.t.c%TYPE)` and `RETURN other.t.c%TYPE` are checked as schema names,
+    as Oracle resolves them.
+  - Oracle alias-qualified column attributes and methods (`i.doc.getStringVal()`,
+    `i.addr.city`) are accepted inside SQL, and a local record's field chain
+    (`h.addr.city`) is accepted inside SQL in a routine.
+  - Oracle supplied packages, types, and sequences are accepted only in expression and type
+    positions (`INSERT INTO SYS.ODCINUMBERLIST …` and `FROM SYS.XMLTYPE` are rejected);
+    `SYS.DUAL` is accepted where it is read.
+  - PostgreSQL `CREATE FUNCTION … SET search_path = app, pg_temp` is accepted when the list
+    names only the configured schema, `pg_catalog`, `pg_temp`, or `''`.
+  - Verification SQL rejects the PostgreSQL index-maintenance functions
+    `brin_summarize_new_values`, `brin_summarize_range`, `brin_desummarize_range`, and
+    `gin_clean_pending_list`.
+  - Rejected as SQL passed as text or access to other schemas by name: PostgreSQL
+    `query_to_xml*`, `cursor_to_xml*`, `table_to_xml*`, `schema_to_xml*`, `database_to_xml*`,
+    `ts_stat`, `ts_rewrite`, and `pg_nextoid`; Oracle `OPEN cur FOR` anything but a query,
+    the SQL-text packages (`DBMS_SQL`, `DBMS_SYS_SQL`, `DBMS_XMLSTORE`, `DBMS_SQLTUNE`,
+    `DBMS_XPLAN`, `DBMS_SCHEDULER`, …), `DBURITYPE`/`XDBURITYPE`/`URIFACTORY`,
+    `CUBE_TABLE`/`OLAP_TABLE`, XQuery `collection`/`doc`/`ora:` functions, `SQL_MACRO`
+    functions, and `LANGUAGE JAVA`/`LANGUAGE C`/`AS EXTERNAL` call specifications.
+    `DBMS_ASSERT` is no longer on the supplied-package allowlist.
+  - A change set may start with `WITH` before `UPDATE`/`INSERT` on PostgreSQL and SQL Server
+    and before `UPDATE` on MySQL; MariaDB and Oracle have no such form and still reject it.
+  - Verification SQL may use `"into"`, `[updlock]`, or `` `lock` `` as column names, and the
+    same words inside strings.
+  - A plain PostgreSQL string with a backslash before its closing quote (`'C:\'`) is now
+    rejected because where it ends depends on `standard_conforming_strings`; write
+    `E'C:\\'`.
+  - SQL Server runs a batch of statements with or without `;` between them, so a statement
+    word that starts a second statement (`UPDATE t SET a = 1 GRANT CONTROL TO bob`) is
+    rejected in change sets and verification SQL. Words inside one statement, such as
+    `MERGE … THEN UPDATE`, `INSERT … SELECT`, `ON DELETE SET NULL`, `WITH (NOLOCK)`, or a
+    CTE, are not affected. Numbers end where SQL Server ends them: `1E`, `1.E`, `0x`, and
+    money literals such as `$1` or `£1` are complete, so `SET a = 1EGRANT …` is two
+    statements. `ADD SIGNATURE`, `ADD COUNTERSIGNATURE`, `ADD SENSITIVITY CLASSIFICATION`,
+    and `LINENO` also start a statement; a column named `signature`, `load`, or `dump`
+    does not.
+  - A `--` line comment ends at a bare carriage return on PostgreSQL and SQL Server, as
+    those engines read it, so code after `--…\r` is checked. Oracle and MySQL/MariaDB
+    comments still end only at a line feed, and their optimizer hints (`/*+ … */`, which can set
+    session variables with `SET_VAR`) are rejected like `/*! … */`.
+  - New rejections: PostgreSQL routines in languages other than `sql` and `plpgsql` (their
+    bodies cannot be checked), and routines with an `AS` body but no `LANGUAGE`; PostgreSQL
+    `SET` of `role`, `session_authorization`, `session_replication_role`, `row_security`,
+    `session_preload_libraries`, `local_preload_libraries`, `shared_preload_libraries`,
+    `dynamic_library_path`, `jit_provider`, any `log_*` parameter, or any `pgaudit.*`
+    parameter in a routine's `SET` clause or a statement inside a body; every PostgreSQL
+    `set_config(…)` call, whatever parameter it names, including in verification SQL;
+    PostgreSQL `pg_stat_reset*`, `pg_replication_origin_*`, and
+    `pg_import_system_collations`; MySQL/MariaDB `SET GLOBAL`, `SET PERSIST`,
+    `SET PERSIST_ONLY`, and `SET @@global.…` assignments; SQL Server `BULK INSERT`,
+    `ADD SIGNATURE`, `ADD COUNTERSIGNATURE`, and `ADD SENSITIVITY CLASSIFICATION`, including
+    inside trigger and routine bodies; PostgreSQL server-file, large-object, backup, and WAL
+    functions (`pg_ls_dir`, `pg_stat_file`, `lo_put`, `lo_from_bytea`, `pg_switch_wal`,
+    `pg_create_restore_point`, `pg_logical_emit_message`, …); and Oracle `UTL_HTTP`,
+    `UTL_TCP`, `UTL_SMTP`, `UTL_MAIL`, `UTL_FILE`, `UTL_INADDR`, `DBMS_XMLGEN`,
+    `DBMS_XMLQUERY`, `DBMS_PIPE`, `HTTPURITYPE`, `BFILENAME`, and the `DBMS_LOB` file
+    routines (`FILEOPEN`, `FILEEXISTS`, `LOADFROMFILE`, `LOADBLOBFROMFILE`,
+    `LOADCLOBFROMFILE`, …), which read server files. Verification SQL also rejects
+    `pg_notify`, `txid_current`, `pg_current_xact_id`, and the `PAGLOCK` hint. Change sets
+    already recorded in history are not re-checked (see below).
+  - A `CASE` expression inside a MySQL/MariaDB or Oracle routine no longer confuses block
+    matching: `THEN IF(…)` / `THEN REPEAT(…)` inside `CASE … END` are function calls, and
+    `FOR i IN 1 .. CASE … END LOOP` opens a loop.
+- Sync applies the SQL guardrails only to change sets not yet recorded in history, after
+  checksums are verified and before any DDL or change-set statement (dry-run included). A
+  recorded change set with a matching checksum never runs again and is not re-checked, so
+  change sets applied under an earlier release keep syncing even if they would now be
+  rejected. Offline `validate` has no history and still checks every change set; such a
+  change set can fail `validate` while sync accepts it.
 - Dry-run no longer executes `verificationSql`, and uses transactional rollback only on
   engines that support it.
 - Duplicate-object adoption classifies errors by SQLState and vendor code only.
+- A failure to release the lock (or restore auto-commit) after a successful sync is logged as a
+  warning and the result is returned; the work is already committed, or handed to the
+  caller's transaction. After a failed sync it is
+  still attached to the original exception as suppressed.
 - SQL Server and Oracle allow 128-character identifiers; offline `validate` enforces each
   engine's limit for the schema name.
+
+### Known limitations
+
+- Change sets do not create sequences, views, stored procedures, or Oracle packages and
+  types; those statements are rejected. Use identity columns, or create the objects outside
+  SchemaSynchronizer. Planned in [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ### Comparison and validation
 

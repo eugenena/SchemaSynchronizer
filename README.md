@@ -34,6 +34,7 @@ optional bootstrap. See [Hand-authoring](docs/HAND_AUTHORING.md).
 | Diagnose an error or unexpected pending SQL | [Troubleshooting](docs/TROUBLESHOOTING.md) |
 | Understand database-specific behavior | [Database dialects](docs/DATABASE_DIALECTS.md) |
 | Understand the safety model (auto vs pending vs change sets) | [Design](docs/DESIGN.md) |
+| See what is planned next | [Roadmap](docs/ROADMAP.md) |
 | Add support for another relational database | [Dialect contribution guide](docs/CONTRIBUTING_A_DIALECT.md) |
 
 The [Javadocs](https://javadoc.io/doc/com.thinkaillc/schema-synchronizer) cover the
@@ -68,7 +69,7 @@ A `schema-definition.json` file has two complementary parts:
    indexes. SchemaSynchronizer compares this state with the live database.
 2. `changes` is an ordered, checksummed ledger for operations that cannot be
    inferred reliably from JDBC metadata: backfills, constraints, functions,
-   triggers, extensions, comments, and grants.
+   triggers, comments, and grants. Extensions are installed outside change sets.
 
 On each run SchemaSynchronizer detects the database dialect, validates the
 definition, obtains a database lock, applies safe changes, and records completed

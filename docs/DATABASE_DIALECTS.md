@@ -197,10 +197,11 @@ extension.
     (widening such a column to `(MAX)` is pending);
   - `text`, `ntext`, `image`, and `timestamp` columns;
   - columns with a non-default collation (`ALTER COLUMN` would reset it);
-  - declarations that omit the live length or precision (for example `DATETIME2` or
-    `DECIMAL` without arguments), because `ALTER COLUMN` would apply the type default.
-    `DECIMAL`, `NUMERIC`, and `DEC` without arguments compare as `DECIMAL(18,0)`, so they
-    match a live `DECIMAL(18,0)`.
+  - declarations that omit the live length (for example `VARCHAR` without a length),
+    because `ALTER COLUMN` would apply the type default. `DATETIME2`, `DATETIMEOFFSET`, and
+    `TIME` without a precision compare as precision 7, and `DECIMAL`, `NUMERIC`, and `DEC`
+    without arguments as `DECIMAL(18,0)`, so they match a live column of that precision and
+    a relaxing `ALTER COLUMN` keeps it; any other live precision is pending.
 
   DEFAULT changes are always pending because defaults are named constraints; replace them
   with a change set. `getdate()` and `CURRENT_TIMESTAMP` compare as the same default.
@@ -221,13 +222,18 @@ extension.
   lookups upper-case
 - Statements: a trailing `;` (including one followed by a comment) is removed before
   execution, except on statements that start with `BEGIN`, `DECLARE`, or
-  `CREATE [OR REPLACE] TRIGGER|PROCEDURE|FUNCTION|PACKAGE|TYPE`. The change-set guardrail
-  accepts one statement per array item, so PL/SQL bodies that contain inner `;` are not
-  supported yet; create such objects outside SchemaSynchronizer.
+  `CREATE [OR REPLACE] TRIGGER|PROCEDURE|FUNCTION|PACKAGE|TYPE`. A PL/SQL trigger or
+  function with inner `;` is one array item: its `BEGIN`/`IF`/`CASE`/`LOOP` … `END` blocks
+  must balance, and every statement inside is checked like a top-level one. Change sets
+  accept `CREATE [OR REPLACE] TRIGGER` and `FUNCTION`; create procedures, packages, and
+  types outside SchemaSynchronizer.
 - Types: `INTEGER` and ANSI `NUMERIC`/`DECIMAL`/`DEC` without precision are stored as
   `NUMBER(38,0)` and compare as that type, so against a live column with a scale they are a
-  narrowing and stay pending; `DOUBLE PRECISION` and `REAL`
-  are stored as `FLOAT` and compare equal. Unbounded `NUMBER` serializes as `NUMBER`;
+  narrowing and stay pending. `FLOAT`, `DOUBLE PRECISION`, and `REAL` are stored as `FLOAT`
+  with a binary precision and compare by it: `FLOAT` and `DOUBLE PRECISION` are `FLOAT(126)`,
+  `REAL` is `FLOAT(63)`, and `FLOAT(n)` is `n` (1..126, checked by validation). A higher
+  declared precision is applied with `MODIFY`; a lower one is pending. Snapshots write
+  `FLOAT(n)` when the precision is not 126. Unbounded `NUMBER` serializes as `NUMBER`;
   `NUMBER` declared for another engine fails validation.
   `VARCHAR2`/`NVARCHAR2` lengths up to 32767 (`MAX_STRING_SIZE=EXTENDED`) are preserved.
   Identity columns (`ISEQ$$` sequence defaults) serialize as

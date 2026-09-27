@@ -48,13 +48,17 @@ final class SqlLexer {
             Kind kind = null;
             String content = null;
             if (isLineCommentStart(sql, index, mode)) {
-                int newline = sql.indexOf('\n', index);
-                end = newline < 0 ? length : newline + 1;
+                int lineEnd = lineCommentEnd(sql, index, mode);
+                end = lineEnd < 0 ? length : lineEnd + 1;
                 kind = Kind.COMMENT;
             } else if (current == '/' && next == '*') {
                 if (mode == Mode.MYSQL && (sql.startsWith("/*!", index) || sql.startsWith("/*M!", index))) {
                     throw new IllegalArgumentException(
                             "MySQL/MariaDB executable comments (/*! ... */) are not allowed in schema change SQL");
+                }
+                if (mode == Mode.MYSQL && sql.startsWith("/*+", index)) {
+                    throw new IllegalArgumentException(
+                            "MySQL/MariaDB optimizer hints (/*+ ... */) are not allowed in schema change SQL");
                 }
                 end = blockCommentEnd(sql, index, mode == Mode.POSTGRES || mode == Mode.SQLSERVER);
                 kind = Kind.COMMENT;
@@ -174,41 +178,6 @@ final class SqlLexer {
         return (before >= 0 && sql.charAt(before) == '.') || (after < sql.length() && sql.charAt(after) == '.');
     }
 
-    /** Unescaped contents of each string literal and dollar body, in order. */
-    static List<String> literals(String sql, Mode mode) {
-        List<String> result = new ArrayList<>();
-        for (Span span : spans(sql, mode)) {
-            if (span.kind() == Kind.STRING || span.kind() == Kind.DOLLAR_BODY) {
-                result.add(span.content());
-            }
-        }
-        return result;
-    }
-
-    /**
-     * A routine body literal re-lexed as code, so its own comments and string literals
-     * (RAISE messages, notes) are blanked while nested dollar bodies stay visible. A literal
-     * that does not lex as code (plain data such as {@code 'don''t'}) is returned verbatim.
-     */
-    static String bodyAsCode(String literal, Mode mode, boolean keepIdentifiers) {
-        try {
-            return keepIdentifiers ? maskForScope(literal, mode, true) : mask(literal, mode, false, true);
-        } catch (IllegalArgumentException unlexable) {
-            return literal;
-        }
-    }
-
-    /** Concatenated unescaped contents of every string literal and dollar body. */
-    static String literalContents(String sql, Mode mode) {
-        StringBuilder result = new StringBuilder();
-        for (Span span : spans(sql, mode)) {
-            if (span.kind() == Kind.STRING || span.kind() == Kind.DOLLAR_BODY) {
-                result.append(span.content()).append('\n');
-            }
-        }
-        return result.toString();
-    }
-
     private static boolean isLineCommentStart(String sql, int index, Mode mode) {
         char current = sql.charAt(index);
         char next = index + 1 < sql.length() ? sql.charAt(index + 1) : '\0';
@@ -223,6 +192,22 @@ final class SqlLexer {
             return false;
         }
         return current == '-' && next == '-';
+    }
+
+    /**
+     * Index of the character that ends the line comment at {@code start}, or -1. PostgreSQL and
+     * SQL Server also end it at a bare {@code \r}; Oracle, MySQL, and MariaDB end it only at
+     * {@code \n}. Ending it earlier than the engine does is not safer: a quote after the
+     * {@code \r} would then hide the engine's next line inside a string.
+     */
+    static int lineCommentEnd(String sql, int start, Mode mode) {
+        for (int index = start; index < sql.length(); index++) {
+            char current = sql.charAt(index);
+            if (current == '\n' || (current == '\r' && (mode == Mode.POSTGRES || mode == Mode.SQLSERVER))) {
+                return index;
+            }
+        }
+        return -1;
     }
 
     private static int blockCommentEnd(String sql, int start, boolean nested) {
@@ -358,7 +343,8 @@ final class SqlLexer {
     private static String blank(String text) {
         StringBuilder result = new StringBuilder(text.length());
         for (int index = 0; index < text.length(); index++) {
-            result.append(text.charAt(index) == '\n' ? '\n' : ' ');
+            char current = text.charAt(index);
+            result.append(current == '\n' || current == '\r' ? current : ' ');
         }
         return result.toString();
     }
