@@ -474,6 +474,43 @@ class SchemaSynchronizerMariaDbIntegrationTest {
         }
     }
 
+    @Test
+    void addedDefaultsFollowTheTableCharsetAndUnrelatedChangeSetsSkipTheTimestampRefusal() throws Exception {
+        // MariaDB 11 gives utf8mb4 a uca1400 collation whose COLLATIONS row has a different name.
+        try (Connection connection = connection(); var statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE maria_items (id BIGINT NOT NULL PRIMARY KEY, ts TIMESTAMP NULL) "
+                    + "DEFAULT CHARSET = utf8mb4");
+            statement.execute("CREATE TABLE mariaxitems (id BIGINT NOT NULL PRIMARY KEY) DEFAULT CHARSET = latin1");
+        }
+        SchemaDefinition declared = new SchemaDefinition(2, "mariadb", Map.of(
+                "maria_items", new SchemaDefinition.TableDef(null, List.of(
+                        new SchemaDefinition.ColumnDef("id", "BIGINT NOT NULL"),
+                        new SchemaDefinition.ColumnDef("ts", "TIMESTAMP NULL"),
+                        new SchemaDefinition.ColumnDef("note", "VARCHAR(10) DEFAULT '日本'")), List.of()),
+                "mariaxitems", new SchemaDefinition.TableDef(null, List.of(
+                        new SchemaDefinition.ColumnDef("id", "BIGINT NOT NULL"),
+                        new SchemaDefinition.ColumnDef("note", "VARCHAR(10) DEFAULT '日本'")),
+                        List.of("CREATE INDEX IF NOT EXISTS idx_mx_id ON mariaxitems (id)"))),
+                List.of(new SchemaDefinition.ChangeSet("001-mx-index", "indexes mariaxitems",
+                        List.of("CREATE INDEX IF NOT EXISTS idx_mx_id ON mariaxitems (id)"),
+                        "SELECT COUNT(*) = 1 FROM information_schema.statistics WHERE table_schema = DATABASE() "
+                                + "AND table_name = 'mariaxitems' AND index_name = 'idx_mx_id'")));
+        // Runs with the server's explicit_defaults_for_timestamp (OFF on MariaDB 10.3).
+        try (Connection connection = connection()) {
+            SchemaSynchronizationResult result = synchronizer().synchronizeWithResult(connection, declared);
+            assertThat(result.changeSetsApplied()).isEqualTo(1);
+            assertThat(result.columnsAdded()).isEqualTo(1);
+            assertThat(result.pendingSql()).singleElement().asString()
+                    .contains("ADD COLUMN IF NOT EXISTS note").contains("latin1 character set cannot store");
+        }
+        try (Connection connection = connection(); var statement = connection.createStatement();
+             var rows = statement.executeQuery("SELECT COLUMN_DEFAULT FROM information_schema.COLUMNS "
+                     + "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'maria_items' AND COLUMN_NAME = 'note'")) {
+            assertThat(rows.next()).isTrue();
+            assertThat(rows.getString(1)).isEqualTo("'日本'");
+        }
+    }
+
     private SchemaDefinition labelDefinition(String label) {
         return new SchemaDefinition(2, "mariadb", Map.of("maria_items",
                 new SchemaDefinition.TableDef("CREATE TABLE IF NOT EXISTS maria_items (id BIGINT NOT NULL PRIMARY KEY)",

@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Test;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
@@ -561,6 +562,64 @@ class DialectDeclarationContractTest {
         assertThatThrownBy(() -> SchemaSynchronizer.requireExplicitTimestampDefaults(false, "adding column t.ts"))
                 .isInstanceOf(IllegalStateException.class).hasMessageContaining("adding column t.ts");
         SchemaSynchronizer.requireExplicitTimestampDefaults(true, "adding column t.ts");
+    }
+
+    @Test
+    void timestampColumnsCountFromCreateSqlOrTheColumnList() {
+        SchemaDefinition.TableDef inColumns = new SchemaDefinition.TableDef("CREATE TABLE t (id INT PRIMARY KEY)",
+                List.of(new SchemaDefinition.ColumnDef("id", "INT NOT NULL"),
+                        new SchemaDefinition.ColumnDef("ts", "TIMESTAMP(3) NULL")), List.of());
+        SchemaDefinition.TableDef inCreate = new SchemaDefinition.TableDef(
+                "CREATE TABLE t (id INT PRIMARY KEY, ts TIMESTAMP NULL)", null, List.of());
+        SchemaDefinition.TableDef none = new SchemaDefinition.TableDef(
+                "CREATE TABLE t (id INT PRIMARY KEY, `timestamp` DATETIME)",
+                List.of(new SchemaDefinition.ColumnDef("timestamp", "DATETIME"),
+                        new SchemaDefinition.ColumnDef("absent", null)), List.of());
+        assertThat(SchemaSynchronizer.tableDeclaresTimestamp(inColumns)).isTrue();
+        assertThat(SchemaSynchronizer.tableDeclaresTimestamp(inCreate)).isTrue();
+        assertThat(SchemaSynchronizer.tableDeclaresTimestamp(none)).isFalse();
+        assertThat(SchemaSynchronizer.timestampTables(
+                new SchemaDefinition(2, "mysql", Map.of("A_T", none, "Stamped", inColumns), List.of())))
+                .containsExactly("stamped");
+        assertThat(SchemaSynchronizer.timestampTables(new SchemaDefinition(2, "mysql", null, List.of()))).isEmpty();
+    }
+
+    @Test
+    void changeSetsReferenceTimestampTablesByTokenOutsideLiterals() {
+        List<String> tables = List.of("events", "orders");
+        assertThat(SchemaSynchronizer.referencedTable(List.of("ALTER TABLE events ADD INDEX i (id)"), tables))
+                .isEqualTo("events");
+        assertThat(SchemaSynchronizer.referencedTable(List.of("CREATE INDEX i ON `Orders` (id)"), tables))
+                .isEqualTo("orders");
+        assertThat(SchemaSynchronizer.referencedTable(List.of("UPDATE app.orders SET x = 1"), tables))
+                .isEqualTo("orders");
+        // Substrings, literals, and comments are not references.
+        assertThat(SchemaSynchronizer.referencedTable(List.of("CREATE TABLE events_archive (id INT)",
+                "CREATE TABLE preorders (id INT)", "INSERT INTO log VALUES ('events')",
+                "CREATE TABLE t (id INT) -- orders"), tables)).isNull();
+        assertThat(SchemaSynchronizer.referencedTable(List.of("CREATE TABLE a (id INT)",
+                "ALTER TABLE orders ADD COLUMN n INT"), tables)).isEqualTo("orders");
+    }
+
+    @Test
+    void indexesOnColumnsThatWereNotAddedAreRecognizedByToken() {
+        IndexDefinition index = IndexDefinition.parse("CREATE INDEX idx_note ON t (note, id) WHERE Flag = 1");
+        assertThat(SchemaSynchronizer.indexedColumnAmong(index, Set.of("note"))).isEqualTo("note");
+        assertThat(SchemaSynchronizer.indexedColumnAmong(index, Set.of("flag"))).isEqualTo("flag");
+        assertThat(SchemaSynchronizer.indexedColumnAmong(index, Set.of("not", "ote", "i"))).isNull();
+        assertThat(SchemaSynchronizer.indexedColumnAmong(index, Set.of())).isNull();
+    }
+
+    @Test
+    void onlyNonAsciiDefaultsOfCharacterColumnsNeedACharsetCheck() {
+        assertThat(SchemaSynchronizer.mySqlNonAsciiCharacterDefault("VARCHAR(10) DEFAULT '日本'")).isEqualTo("'日本'");
+        assertThat(SchemaSynchronizer.mySqlNonAsciiCharacterDefault("NCHAR(2) DEFAULT 'é'")).isEqualTo("'é'");
+        assertThat(SchemaSynchronizer.mySqlNonAsciiCharacterDefault("CHARACTER VARYING(5) DEFAULT 'é'"))
+                .isEqualTo("'é'");
+        assertThat(SchemaSynchronizer.mySqlNonAsciiCharacterDefault("VARCHAR(10) DEFAULT 'abc'")).isNull();
+        assertThat(SchemaSynchronizer.mySqlNonAsciiCharacterDefault("VARCHAR(10)")).isNull();
+        assertThat(SchemaSynchronizer.mySqlNonAsciiCharacterDefault("VARBINARY(10) DEFAULT 'é'")).isNull();
+        assertThat(SchemaSynchronizer.mySqlNonAsciiCharacterDefault("JSON DEFAULT (JSON_OBJECT('k','日本'))")).isNull();
     }
 
     @Test

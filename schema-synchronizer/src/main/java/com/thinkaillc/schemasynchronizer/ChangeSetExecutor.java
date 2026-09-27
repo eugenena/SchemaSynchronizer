@@ -182,6 +182,24 @@ final class ChangeSetExecutor {
         }
     }
 
+    /** Change sets {@link #apply} would execute: missing from the history table and not yet verified. */
+    List<SchemaDefinition.ChangeSet> unappliedUnverified(Connection conn, List<SchemaDefinition.ChangeSet> changes,
+                                                         SchemaSynchronizerOptions options, DatabaseDialect dialect)
+            throws SQLException {
+        if (changes.isEmpty()) {
+            return List.of();
+        }
+        String history = dialect.qualifyHistoryTable(options.schema(), options.historyTable());
+        Map<String, String> applied = historyExists(conn, options, dialect) ? readHistory(conn, history) : Map.of();
+        List<SchemaDefinition.ChangeSet> pending = new ArrayList<>();
+        for (SchemaDefinition.ChangeSet change : changes) {
+            if (!applied.containsKey(change.id()) && !isVerified(conn, change)) {
+                pending.add(change);
+            }
+        }
+        return pending;
+    }
+
     private boolean historyExists(Connection conn, SchemaSynchronizerOptions options, DatabaseDialect dialect)
             throws SQLException {
         String catalog = dialect.metadataCatalog(conn, options.schema());

@@ -362,8 +362,23 @@ public class SchemaSynchronizer {
                 throw new IllegalStateException("unsafe or destructive schema differences require manual resolution: "
                         + String.join(" | ", preflight.pendingSql()));
             }
-            ChangeSetExecutor.Result before = executor.apply(conn,
-                    changesForPhase(allChanges, SchemaDefinition.ChangeSet.Phase.BEFORE_SCHEMA), options, dialect);
+            List<SchemaDefinition.ChangeSet> beforeSchema =
+                    changesForPhase(allChanges, SchemaDefinition.ChangeSet.Phase.BEFORE_SCHEMA);
+            // The preflight saw the schema before these change sets; the apply pass may plan TIMESTAMP DDL it did not.
+            List<String> timestampTables = dialect.isMySqlFamily() ? timestampTables(def) : List.of();
+            if (!timestampTables.isEmpty()) {
+                for (SchemaDefinition.ChangeSet change
+                        : executor.unappliedUnverified(conn, beforeSchema, options, dialect)) {
+                    String table = referencedTable(change.statements(), timestampTables);
+                    if (table != null) {
+                        requireExplicitTimestampDefaults(mySqlExplicitDefaultsForTimestamp(conn),
+                                "reconciling TIMESTAMP columns of " + table + " after BEFORE_SCHEMA change set "
+                                        + change.id());
+                        break;
+                    }
+                }
+            }
+            ChangeSetExecutor.Result before = executor.apply(conn, beforeSchema, options, dialect);
             plannedSql.get().addAll(before.plannedSql());
             DeclarativeResult declarative = applyDeclarativeSchema(conn, def, dialect, true);
             ChangeSetExecutor.Result after = executor.apply(conn,
@@ -445,13 +460,14 @@ public class SchemaSynchronizer {
             Set<String> livePrimaryKeyColumns = existingTables.contains(tableName)
                     ? getLivePrimaryKeyColumns(meta, tableName, dialect) : Set.of();
             List<String> deferredNullabilitySql = new ArrayList<>();
+            Set<String> unaddedColumns = new HashSet<>();
 
             if (!existingTables.contains(tableName)) {
                 if (tableDef.createSql() != null) {
                     NonDestructiveSqlPolicy.requireCreateTable(tableDef.createSql(), dialect);
                     // CREATE TABLE IF NOT EXISTS would create the base table, then later DDL would hit the TEMPORARY one.
                     requireNoTemporaryShadow(conn, dialect, tableName);
-                    if (dialect.isMySqlFamily() && declaresTimestampColumn(tableDef.createSql())) {
+                    if (dialect.isMySqlFamily() && tableDeclaresTimestamp(tableDef)) {
                         explicitTimestamps = explicitTimestamps != null ? explicitTimestamps
                                 : mySqlExplicitDefaultsForTimestamp(conn);
                         requireExplicitTimestampDefaults(explicitTimestamps, "creating table " + tableName);
@@ -491,6 +507,13 @@ public class SchemaSynchronizer {
                                         "adding column " + tableName + "." + colName);
                             }
                             String sql = addColumnSql(tableName, col.name(), col.definition(), dialect);
+                            String unstorable = dialect.isMySqlFamily()
+                                    ? mySqlUnstorableAddedDefault(conn, tableName, col.definition()) : null;
+                            if (unstorable != null) {
+                                pendingSql.add(sql + "; -- pending: " + unstorable);
+                                unaddedColumns.add(colName);
+                                continue;
+                            }
                             requireNoTemporaryShadow(conn, dialect, tableName);
                             if (applyChanges) {
                                 execute(conn, sql);
@@ -500,6 +523,7 @@ public class SchemaSynchronizer {
                         } else {
                             pendingSql.add("-- pending: column " + tableName + "." + colName
                                     + " is missing and its definition is absent");
+                            unaddedColumns.add(colName);
                         }
                         continue;
                     }
@@ -538,6 +562,9 @@ public class SchemaSynchronizer {
                                 blockedReason = mySqlUnpredictableDefaultReason(
                                         ColumnDefinitionParser.parse(col.definition()).defaultExpr(),
                                         liveColumns.get(colName).defaultExpr());
+                            }
+                            if (blockedReason == null && planned) {
+                                blockedReason = mySqlUnstorableDefault(conn, col.definition(), facts.characterSet());
                             }
                             plan = mySqlFamilyColumnPlan(tableName, col.name(), col.definition(), plan, blockedReason);
                             plan = mySqlNationalDriftPlan(tableName, col.name(), col.definition(),
@@ -597,7 +624,7 @@ public class SchemaSynchronizer {
 
             reconcilePrimaryKey(meta, tableName, tableDef, pendingSql, dialect);
             pendingSql.addAll(deferredNullabilitySql);
-            reconcileIndexes(conn, meta, tableName, tableDef, pendingSql, dialect, applyChanges);
+            reconcileIndexes(conn, meta, tableName, tableDef, pendingSql, dialect, applyChanges, unaddedColumns);
 
             if (applyChanges && dialect == DatabaseDialect.POSTGRESQL
                     && PkIdentity.createSqlWantsIdIdentity(tableDef.createSql())) {
@@ -866,6 +893,51 @@ public class SchemaSynchronizer {
     static boolean declaresTimestampColumn(String createSql) {
         return createSql != null && TIMESTAMP_COLUMN_TYPE.matcher(
                 SqlLexer.mask(createSql, SqlLexer.Mode.MYSQL, true, false)).find();
+    }
+
+    /** Tables whose createSql or column list declares a TIMESTAMP column. */
+    static List<String> timestampTables(SchemaDefinition def) {
+        return def.tables() == null ? List.of() : def.tables().entrySet().stream()
+                .filter(entry -> tableDeclaresTimestamp(entry.getValue()))
+                .map(entry -> entry.getKey().toLowerCase(Locale.ROOT))
+                .sorted()
+                .toList();
+    }
+
+    /**
+     * The first of {@code tables} that a statement names as a token outside literals and comments,
+     * or null. Matching ignores case: a false match only refuses the sync.
+     */
+    static String referencedTable(List<String> statements, List<String> tables) {
+        for (String statement : statements) {
+            String code = SqlLexer.mask(statement, SqlLexer.Mode.MYSQL, true, false);
+            for (String table : tables) {
+                if (namesToken(code, table)) {
+                    return table;
+                }
+            }
+        }
+        return null;
+    }
+
+    /** The first of {@code columns} (sorted) that an index names in its key or predicate, or null. */
+    static String indexedColumnAmong(IndexDefinition index, Set<String> columns) {
+        String text = index.structure() + (index.predicateSql() == null ? "" : " " + index.predicateSql());
+        return columns.stream().sorted().filter(column -> namesToken(text, column)).findFirst().orElse(null);
+    }
+
+    private static boolean namesToken(String text, String name) {
+        return Pattern.compile("(?<![\\p{L}\\p{N}_$])" + Pattern.quote(name) + "(?![\\p{L}\\p{N}_$])",
+                Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE).matcher(text).find();
+    }
+
+    /** A created table is reconciled against its column list right away, so both can issue TIMESTAMP DDL. */
+    static boolean tableDeclaresTimestamp(SchemaDefinition.TableDef table) {
+        if (declaresTimestampColumn(table.createSql())) {
+            return true;
+        }
+        return table.columns() != null && table.columns().stream().anyMatch(column -> column.definition() != null
+                && "TIMESTAMP".equals(ColumnDefinitionParser.parse(column.definition()).baseType()));
     }
 
     /**
@@ -1250,6 +1322,77 @@ public class SchemaSynchronizer {
         return null;
     }
 
+    private static final Set<String> MYSQL_CHARACTER_TYPES = Set.of(
+            "CHAR", "VARCHAR", "NCHAR", "NVARCHAR", "TINYTEXT", "TEXT", "MEDIUMTEXT", "LONGTEXT");
+    private static final Set<String> MYSQL_UNICODE_CHARSETS = Set.of("utf8mb4", "utf16", "utf16le", "utf32");
+
+    /** The declared default of a character column when it has non-ASCII characters, otherwise null. */
+    static String mySqlNonAsciiCharacterDefault(String declaredDefinition) {
+        ColumnSpec spec = ColumnDefinitionParser.parse(declaredDefinition);
+        String declaredDefault = spec.defaultExpr();
+        return declaredDefault != null && MYSQL_CHARACTER_TYPES.contains(spec.baseType())
+                && !declaredDefault.chars().allMatch(c -> c < 0x80) ? declaredDefault : null;
+    }
+
+    /**
+     * A non-ASCII default the column character set cannot hold is rejected in strict sql_mode
+     * and stored with '?' otherwise, so the change would fail mid-sync or never converge.
+     * The server converts the text to decide.
+     */
+    private static String mySqlUnstorableDefault(Connection conn, String declaredDefinition, String characterSet)
+            throws SQLException {
+        String declaredDefault = mySqlNonAsciiCharacterDefault(declaredDefinition);
+        if (declaredDefault == null || characterSet == null) {
+            return null;
+        }
+        String charset = characterSet.toLowerCase(Locale.ROOT);
+        if (MYSQL_UNICODE_CHARSETS.contains(charset) || mySqlCharsetStores(conn, declaredDefault, charset)) {
+            return null;
+        }
+        return "DEFAULT " + declaredDefault + " has characters the " + charset + " character set cannot store";
+    }
+
+    /** Whether {@code text} survives a round trip through {@code charset}; sent as UTF-8 bytes. */
+    static boolean mySqlCharsetStores(Connection conn, String text, String charset) throws SQLException {
+        if (!charset.matches("[a-z0-9]+")) {
+            return false;
+        }
+        String sql = "SELECT HEX(CONVERT(CONVERT(CONVERT(? USING utf8mb4) USING " + charset
+                + ") USING utf8mb4)) = HEX(CONVERT(? USING utf8mb4))";
+        byte[] utf8 = text.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        try (var statement = conn.prepareStatement(sql)) {
+            statement.setBytes(1, utf8);
+            statement.setBytes(2, utf8);
+            try (ResultSet rs = statement.executeQuery()) {
+                return rs.next() && rs.getBoolean(1);
+            }
+        }
+    }
+
+    /** Why ADD COLUMN would store a different default, or null; the column gets the table's character set. */
+    private String mySqlUnstorableAddedDefault(Connection conn, String tableName, String definition)
+            throws SQLException {
+        if (mySqlNonAsciiCharacterDefault(definition) == null) {
+            return null;
+        }
+        String charset = mySqlDeclaresNational(definition) ? "utf8mb3" : mySqlTableCharset(conn, tableName);
+        return charset == null ? "the character set of table " + tableName + " could not be determined"
+                : mySqlUnstorableDefault(conn, definition, charset);
+    }
+
+    /** Character set names have no underscore, and a collation name starts with its character set's name. */
+    private String mySqlTableCharset(Connection conn, String tableName) throws SQLException {
+        try (var statement = conn.prepareStatement(
+                "SELECT TABLE_COLLATION FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?")) {
+            statement.setString(1, options.schema());
+            statement.setString(2, tableName);
+            try (ResultSet rs = statement.executeQuery()) {
+                String collation = rs.next() ? rs.getString(1) : null;
+                return collation == null ? null : collation.split("_", 2)[0];
+            }
+        }
+    }
+
     static boolean mySqlDeclaresNational(String declaredDefinition) {
         return declaredDefinition != null
                 && declaredDefinition.matches("(?is)^\\s*(?:NVARCHAR|NCHAR|NATIONAL)\\b.*");
@@ -1495,7 +1638,8 @@ public class SchemaSynchronizer {
 
     private void reconcileIndexes(Connection conn, DatabaseMetaData meta, String tableName,
                                   SchemaDefinition.TableDef tableDef, List<String> pendingSql,
-                                  DatabaseDialect dialect, boolean applyChanges) throws SQLException {
+                                  DatabaseDialect dialect, boolean applyChanges, Set<String> unaddedColumns)
+            throws SQLException {
         Map<String, String> live = new HashMap<>();
         if (dialect.isMySqlFamily()) {
             for (String sql : SchemaSnapshotWriter.readMySqlFamilyIndexes(conn, options.schema(), tableName, dialect)) {
@@ -1556,7 +1700,11 @@ public class SchemaSynchronizer {
                 IndexDefinition target = IndexDefinition.parse(sql);
                 expected.add(target.name());
                 String liveSql = live.get(target.name());
-                if (liveSql == null) {
+                String unadded = liveSql == null ? indexedColumnAmong(target, unaddedColumns) : null;
+                if (unadded != null) {
+                    pendingSql.add(terminated(dialectCompatibleIndexSql(sql, dialect)) + " -- pending: column "
+                            + tableName + "." + unadded + " was not added");
+                } else if (liveSql == null) {
                     requireNoTemporaryShadow(conn, dialect, tableName);
                     if (applyChanges) {
                         execute(conn, dialect.executableSql(dialectCompatibleIndexSql(sql, dialect)));

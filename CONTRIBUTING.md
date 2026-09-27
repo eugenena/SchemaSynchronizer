@@ -66,6 +66,15 @@ no integration test was skipped. Commands and properties are documented in
   `LIKE` (Oracle even the `getPrimaryKeys` schema), and escaping them breaks Connector/J under
   `NO_BACKSLASH_ESCAPES`. Pass names unescaped. Integration fixtures include a
   sibling name that differs only where the real name has `_`.
+- A check that makes a change pending must not fire where the change is already safe. Add a cell
+  for the converged case: the live value already satisfies it (a legacy character set that
+  stores the default; a change set that does not touch the table). When the answer depends on
+  server character sets or collations, ask the server, not a Java approximation or an
+  `information_schema` join: MariaDB 10.10+ reports `utf8mb4_uca1400_ai_ci` in `TABLES` but
+  `uca1400_ai_ci` in `COLLATIONS`. Run such integration tests on MariaDB 10.3 and 11.x as well.
+- A refusal meant to precede all DDL has to cover what runs between the preflight and the
+  apply pass: `BEFORE_SCHEMA` change sets, and the column list of a table the preflight skips
+  because it does not exist yet.
 - A column-change path must pass the strict round trip: a second sync with
   `failOnPending=true` reports nothing, and a snapshot replayed into an empty schema
   reports nothing.
