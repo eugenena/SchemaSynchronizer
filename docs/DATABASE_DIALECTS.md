@@ -40,6 +40,32 @@ ascending indexes there or the live index will not match the declaration.
 - DDL: may commit implicitly
 - Dry run: statements and verification are not executed; live apply may still commit DDL
 - Identifiers: unquoted lower-case, up to 64 characters (MariaDB as well)
+- Schema: the configured schema must equal the session's `DATABASE()` exactly (case-sensitive);
+  a sync or snapshot fails otherwise, including when no database is selected or a later `USE`
+  switched it. With `lower_case_table_names=1` or `2` the server can report the database name in
+  a different case than the URL, so configure the schema exactly as `SELECT DATABASE()` returns
+  it. Metadata reads are bound to that schema, also under `databaseTerm=SCHEMA` (Connector/J)
+  and `useCatalogTerm=Schema` (MariaDB Connector/J). JDBC drivers match schema and table names
+  with `LIKE`, where `_` matches any character, so on every engine the rows returned for a name
+  are filtered to that exact name (escaping is not used: under `NO_BACKSLASH_ESCAPES`
+  Connector/J finds nothing for an escaped name). A session `TEMPORARY` table with the name of
+  a declared table shadows it for DDL and `SHOW CREATE TABLE`, so a sync that would create or
+  change such a table (or read its binary defaults) fails before any DDL on it.
+- Validation (MySQL and MariaDB): defaults the server rejects in strict mode fail validation
+  before any DDL runs: an odd-length `X'…'`, an integer outside the type's range after rounding
+  (`BOOLEAN`, `MIDDLEINT` and `INT1`…`INT8` map to their integer types; unquoted `E` notation
+  rounds half to even, other literals and quoted numbers half away from zero; `0x…` counts as
+  a number, and MariaDB rejects `X'…'` on integer columns), a `DECIMAL` value with too many
+  integer digits (`DECIMAL` without precision is `DECIMAL(10,0)`), a `FLOAT`/`DOUBLE` outside
+  its range (`FLOAT4` is `FLOAT`), a negative value on an `UNSIGNED` column (on integer types an
+  unquoted exact literal is rejected even when it rounds to zero, like `-0.4`, while `'-0.4'` and
+  `-0.4E0` store `0`; MariaDB stores a quoted negative on `DOUBLE UNSIGNED`, which MySQL rejects,
+  so it is rejected on both), a binary literal longer than `BINARY(n)`/`VARBINARY(n)`, and a
+  string longer than a `CHAR(n)`/`VARCHAR(n)`/`NCHAR(n)`/`NVARCHAR(n)`. Trailing spaces count
+  toward the length: MariaDB rejects them and MySQL silently drops them, which could never
+  converge. A string containing a backslash is left to the server, because its length depends on
+  `NO_BACKSLASH_ESCAPES`. MySQL evaluates a parenthesized default such as `(300)` as an
+  expression on insert, so it is not checked there; MariaDB checks it like the bare literal.
 - Defaults: MySQL reports literal defaults unquoted; SchemaSynchronizer quotes non-numeric
   literals. Expression defaults (`DEFAULT_GENERATED`) are read in the server's canonical form,
   wrapped in parentheses (`(uuid())`, `(concat(_utf8mb4'a',_utf8mb4'b'))`); `CURRENT_TIMESTAMP`
@@ -64,14 +90,23 @@ ascending indexes there or the live index will not match the declaration.
   write them as `0x…`. If that output is denied or has an unexpected shape, the column is
   pending and a snapshot refuses to write it. A string default with a control
   character is never set automatically. `ON UPDATE CURRENT_TIMESTAMP[(n)]` (or a synonym) is
-  accepted only on a `DATETIME`/`TIMESTAMP` column of the same precision and is rejected on other
-  engines; it is compared on every sync, any difference (added, dropped, or a different
+  accepted only on a `DATETIME`/`TIMESTAMP` column of the same precision (MariaDB also accepts a
+  bare `CURRENT_TIMESTAMP`, `NOW()` or `LOCALTIMESTAMP` on `DATETIME(n)` and stores
+  `CURRENT_TIMESTAMP(n)`, but not an explicit `(0)`) and is rejected on
+  other engines. An `ON UPDATE` whose position depends on backslash escaping (`'a\' ON UPDATE …'`)
+  is rejected as ambiguous; it is compared on every sync, any difference (added, dropped, or a different
   precision) is pending, and snapshots write it. Dropping a default is applied, subject to the
   `TIMESTAMP` refusal below.
 - `TIMESTAMP` columns: when `explicit_defaults_for_timestamp` is OFF (the MariaDB default before
   10.10), `CREATE`, `ADD`, and `MODIFY` give a `TIMESTAMP` an undeclared `NOT NULL` and
   `DEFAULT`/`ON UPDATE CURRENT_TIMESTAMP`. A sync that would create, add, or modify a
-  `TIMESTAMP` column is refused before any DDL. Enable the setting in the server configuration,
+  `TIMESTAMP` column is refused before any DDL. A missing table counts its column list as well
+  as its `createSql`. An unapplied, unverified `BEFORE_SCHEMA` change set whose table DDL
+  (`CREATE`, `ALTER`, `DROP`, or `RENAME TABLE`) names a table declaring a `TIMESTAMP` column is
+  also refused before it runs. The check reads the statement text; DDL run indirectly (`CALL`,
+  `EXECUTE IMMEDIATE`) is not seen. Dry-run does not run `verificationSql`, so it treats every unrecorded
+  change set as unverified and may refuse one that a real sync would skip.
+  Enable the setting in the server configuration,
   or with `sessionVariables=explicit_defaults_for_timestamp=1` where the server accepts a session
   value (MySQL 8, MariaDB 10.5.17+/10.6.9+). Reviewed change sets are not checked. A MySQL string
   default `'NULL'` is kept as a string, distinct from no default. MySQL Connector/J connected
@@ -81,7 +116,40 @@ ascending indexes there or the live index will not match the declaration.
   `MODIFY COLUMN <declared definition>`, which replaces the whole column. When that would
   silently reset something the declaration does not repeat, the change is reported as
   pending instead: a collation that differs from the table default, `ON UPDATE`,
-  `AUTO_INCREMENT`, `INVISIBLE`, a column `COMMENT`, or a generated column.
+  `AUTO_INCREMENT`, `INVISIBLE`, MariaDB `COMPRESSED`, `ZEROFILL`, a column `COMMENT`, or a
+  generated column. A non-ASCII default of a character column that the column character set
+  cannot store is pending for `MODIFY` and `ADD COLUMN`, and so is an index on a column whose
+  `ADD` is pending (strict `sql_mode` rejects such a default; otherwise it is stored with `'?'`).
+  The server decides by converting the text to the column's character set (for `ADD`, the
+  table's; `utf8mb3` for `NVARCHAR`/`NCHAR`). A `MODIFY` to another `TINYINT` spelling never adds or removes the
+  `TINYINT(1)` display width that Connector/J reads as `BOOLEAN`/`BIT`: a live `TINYINT(1)` kept
+  as a `TINYINT` must be declared `BOOLEAN`, `BOOL`, or `TINYINT(1)`, and a live plain `TINYINT`
+  must not be. A live `TINYINT(1) UNSIGNED` (MariaDB; MySQL 8.0.19+ stores it as
+  `TINYINT UNSIGNED`) must be declared `TINYINT(1) UNSIGNED`, and snapshots write it that way.
+  `DECIMAL(p,s) UNSIGNED` keeps its precision in snapshots and compares precision and scale like
+  `DECIMAL(p,s)`; `DECIMAL` without precision compares as `DECIMAL(10,0)`, the type MySQL and
+  MariaDB create. `UNSIGNED` integer and `DECIMAL` defaults are set automatically like their
+  signed forms. `DECIMAL(p,s) [UNSIGNED] ZEROFILL` and `INT [UNSIGNED] ZEROFILL` can be declared
+  (`ZEROFILL` implies `UNSIGNED`, in either order) and snapshots write them (MySQL Connector/J
+  omits `ZEROFILL` from the type name, so it is read from `COLUMN_TYPE`). An integer display
+  width with `ZEROFILL` cannot be declared: a live `ZEROFILL` integer whose width is not the
+  type's default (`INT(5) ZEROFILL`) is pending on any change, and a snapshot refuses to write
+  it. An attribute before the length (`INT UNSIGNED(10)`) fails validation, as on the server.
+  `DEC` and `FIXED` are `DECIMAL`. `UNSIGNED`, `ZEROFILL`, and `FIXED` declared for another
+  engine fail validation.
+- Snapshots (MySQL and MariaDB): the snapshot `createSql` keeps what a column declaration
+  cannot express: `CHARACTER SET … COLLATE …` when it differs from the table's collation,
+  `INVISIBLE`, `COMMENT '…'`, and MariaDB `COMPRESSED`. Replaying the snapshot creates the table
+  with them; the column definitions stay attribute-free, and the sync never drops them (see
+  above). The table's own character set is not pinned, so a replayed table takes the target
+  database's default. Collation names are written as the source server reports them, so a
+  snapshot from a newer server (`utf8mb3_…` on MySQL 8.0.30+, `uca1400` collations on MariaDB
+  10.10+) may not replay on an older one; the same holds for `INVISIBLE` (MySQL 8.0.23+, MariaDB
+  10.3+). Comments are written with backslashes escaped, which
+  assumes the replaying session does not use `NO_BACKSLASH_ESCAPES`.
+- Primary keys in `createSql` (MySQL and MariaDB): the key is read with double-quoted text taken
+  both as identifiers (`ANSI_QUOTES`) and as strings; if the two readings differ, the sync fails.
+  Quote strings with single quotes.
 - National types (MySQL and MariaDB): `NVARCHAR`/`NCHAR` compare as `VARCHAR`/`CHAR` by length,
   and additionally require the live column to use `utf8mb3` with that character set's default
   collation. Any other character set or collation is reported as pending even when the length
@@ -131,6 +199,8 @@ extension.
   - columns with a non-default collation (`ALTER COLUMN` would reset it);
   - declarations that omit the live length or precision (for example `DATETIME2` or
     `DECIMAL` without arguments), because `ALTER COLUMN` would apply the type default.
+    `DECIMAL`, `NUMERIC`, and `DEC` without arguments compare as `DECIMAL(18,0)`, so they
+    match a live `DECIMAL(18,0)`.
 
   DEFAULT changes are always pending because defaults are named constraints; replace them
   with a change set. `getdate()` and `CURRENT_TIMESTAMP` compare as the same default.
@@ -154,9 +224,11 @@ extension.
   `CREATE [OR REPLACE] TRIGGER|PROCEDURE|FUNCTION|PACKAGE|TYPE`. The change-set guardrail
   accepts one statement per array item, so PL/SQL bodies that contain inner `;` are not
   supported yet; create such objects outside SchemaSynchronizer.
-- Types: `INTEGER` and ANSI `NUMERIC`/`DECIMAL` without precision are stored as
-  `NUMBER(38,0)` and compare equal to those declarations; `DOUBLE PRECISION` and `REAL`
-  are stored as `FLOAT` and compare equal. Unbounded `NUMBER` serializes as `NUMBER`.
+- Types: `INTEGER` and ANSI `NUMERIC`/`DECIMAL`/`DEC` without precision are stored as
+  `NUMBER(38,0)` and compare as that type, so against a live column with a scale they are a
+  narrowing and stay pending; `DOUBLE PRECISION` and `REAL`
+  are stored as `FLOAT` and compare equal. Unbounded `NUMBER` serializes as `NUMBER`;
+  `NUMBER` declared for another engine fails validation.
   `VARCHAR2`/`NVARCHAR2` lengths up to 32767 (`MAX_STRING_SIZE=EXTENDED`) are preserved.
   Identity columns (`ISEQ$$` sequence defaults) serialize as
   `GENERATED BY DEFAULT AS IDENTITY`

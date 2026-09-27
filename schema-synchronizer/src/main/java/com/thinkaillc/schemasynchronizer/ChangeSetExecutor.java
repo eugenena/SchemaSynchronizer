@@ -173,7 +173,8 @@ final class ChangeSetExecutor {
                             + " schema change requires verificationSql: "
                             + change.id());
                 }
-                if (!isVerified(conn, change) && change.statements().size() != 1) {
+                // Dry-run executes nothing, so it neither runs verificationSql nor needs recoverable commits.
+                if (change.statements().size() != 1 && !options.dryRun() && !isVerified(conn, change)) {
                     throw new IllegalArgumentException("unapplied " + dialect.id()
                             + " schema change must contain exactly one "
                             + "statement so implicit DDL commits are recoverable: " + change.id());
@@ -182,13 +183,37 @@ final class ChangeSetExecutor {
         }
     }
 
+    /** Change sets {@link #apply} would execute: missing from the history table and not yet verified. */
+    List<SchemaDefinition.ChangeSet> unappliedUnverified(Connection conn, List<SchemaDefinition.ChangeSet> changes,
+                                                         SchemaSynchronizerOptions options, DatabaseDialect dialect)
+            throws SQLException {
+        if (changes.isEmpty()) {
+            return List.of();
+        }
+        String history = dialect.qualifyHistoryTable(options.schema(), options.historyTable());
+        Map<String, String> applied = historyExists(conn, options, dialect) ? readHistory(conn, history) : Map.of();
+        List<SchemaDefinition.ChangeSet> pending = new ArrayList<>();
+        for (SchemaDefinition.ChangeSet change : changes) {
+            // Dry-run must not execute verificationSql.
+            if (!applied.containsKey(change.id()) && (options.dryRun() || !isVerified(conn, change))) {
+                pending.add(change);
+            }
+        }
+        return pending;
+    }
+
     private boolean historyExists(Connection conn, SchemaSynchronizerOptions options, DatabaseDialect dialect)
             throws SQLException {
         String catalog = dialect.metadataCatalog(conn, options.schema());
         String schema = dialect.metadataSchemaPattern(options.schema());
-        try (ResultSet tables = conn.getMetaData().getTables(
-                catalog, schema, dialect.metadataObjectName(options.historyTable()), new String[]{"TABLE"})) {
-            return tables.next();
+        String table = dialect.metadataObjectName(options.historyTable());
+        try (ResultSet tables = conn.getMetaData().getTables(catalog, schema, table, new String[]{"TABLE"})) {
+            while (tables.next()) {
+                if (DatabaseDialect.isRequestedObject(tables, schema, table)) {
+                    return true;
+                }
+            }
+            return false;
         }
     }
 

@@ -1,5 +1,76 @@
 # Greptile lessons
 
+## 2026-09-27 — PR #14 — do not open a PR on a FIX-FIRST verdict
+
+- **Bug:** Greptile scored 2/5 for three findings the local Grok review had already reported:
+  `DEFAULT '…' COLLATE x` bypassing the charset check, the TIMESTAMP refusal firing for
+  `CREATE INDEX`/`INSERT`, and a predicate literal naming a column that was not added.
+- **Missed because:** The PR was opened while the last local verdict was FIX-FIRST, and the
+  first narrowing of the TIMESTAMP check dropped `DROP TABLE`/`RENAME TABLE` from the
+  statements it must still refuse.
+- **Prevention:** Open a PR only after the last local review returns SHIP. A narrowed match
+  keeps cells for every statement kind it must still catch
+  (`DialectDeclarationContractTest#changeSetsReferenceTimestampTablesByTokenOutsideLiterals`,
+  `#mySqlColumnClausesAfterTheDefaultFailValidation`,
+  `#indexesOnColumnsThatWereNotAddedAreRecognizedByToken`).
+
+## 2026-09-27 — issue #13 — fail-closed checks must not block converged schemas
+
+- **Bug:** The `explicit_defaults_for_timestamp` refusal was checked in the preflight, but a
+  missing table's column list (added right after `CREATE TABLE`) and `BEFORE_SCHEMA` change
+  sets ran before the apply pass, so DDL could commit before the refusal. The first fix
+  refused whenever any change set was unrecorded, which blocked MariaDB 10.3 users whose
+  `TIMESTAMP` columns already matched, and adopting a database whose change sets already
+  verify. A non-ASCII default the column character set cannot hold failed in strict
+  `sql_mode` or was stored as `'??'` and re-applied on every sync. The first fix judged
+  character sets in Java (so a `gbk` column that already stored its default blocked every
+  widening) and read the table character set through a `COLLATIONS` join that finds nothing
+  for MariaDB 11's default `utf8mb4_uca1400_ai_ci`.
+- **Missed because:** The refusal was placed where DDL was planned, not where the first DDL
+  could run. The follow-up fixes were tested only for the case they refuse, not for a schema
+  that already converged, and only on MySQL.
+- **Prevention:** `CONTRIBUTING.md` requires a converged-case cell for every new pending or
+  refusal check, asking the server for character-set verdicts, MariaDB 10.3 and 11.x runs,
+  and covering what runs between the preflight and the apply pass. Contracts:
+  `SchemaSynchronizerMySqlIntegrationTest#timestampRefusalPrecedesCreatedTablesAndChangeSets`,
+  `#defaultsTheCharsetCannotStoreArePendingInAnySqlMode`,
+  `SchemaSynchronizerMariaDbIntegrationTest#addedDefaultsFollowTheTableCharsetAndUnrelatedChangeSetsSkipTheTimestampRefusal`,
+  `DialectDeclarationContractTest#changeSetsReferenceTimestampTablesByTokenOutsideLiterals`.
+
+## 2026-09-27 — issue #13 — newly parseable types must reach every comparison
+
+- **Bug:** `DECIMAL(p,s) UNSIGNED` became parseable, but live precision was read and compared
+  only for the exact type name `NUMERIC`, so a nullability or default change could run
+  `MODIFY COLUMN` to a narrower `DECIMAL`. A bare `DECIMAL` compared as unbounded on
+  MySQL/MariaDB, although the server creates `DECIMAL(10,0)`, so every sync re-ran `MODIFY`
+  (and would round a wider live column). JDBC `getTables`/`getColumns` received schema and
+  table names as LIKE patterns, so `user_role` read `user1role`'s columns and a
+  `databaseTerm=SCHEMA` schema matched sibling databases. `precision() - scale()` overflowed
+  an `int` for `1E2147483647`, letting the default through validation. The first fix escaped
+  the metadata arguments with `getSearchStringEscape()`, which made Connector/J under
+  `NO_BACKSLASH_ESCAPES` find no tables at all (every change set would re-run, every column
+  would be re-added). Normalizing `DEC` to `NUMERIC` exposed that a bare `DECIMAL` compared as
+  unbounded on SQL Server and Oracle too, and filling SQL Server's `(18,0)` for every bare
+  `NUMERIC` spelling let an Oracle-only `NUMBER` reach an applied `ALTER COLUMN c NUMBER`.
+- **Missed because:** The parser change was tested for parsing and snapshots, not for
+  comparison with a live column of different precision, and the bare-form cell covered only
+  MySQL/MariaDB. Metadata arguments were assumed to be names; no fixture had a sibling name
+  that differs only where the real name has `_`, and the escaping fix was verified with the
+  default `sql_mode` only. Exponent arithmetic had no cells at the `int` boundary.
+- **Prevention:** `CONTRIBUTING.md` requires a live-vs-declared precision cell for every
+  newly parseable type, including the bare form on every engine, rejects normalized spellings
+  on engines that do not accept them (`#unsignedAndZerofillAreRejectedOutsideMySqlFamily`),
+  and filters metadata rows through `DatabaseDialect.isRequestedObject` instead of escaping.
+  Contracts:
+  `DialectDeclarationContractTest#unsignedDecimalComparesPrecisionAndScale`,
+  `#metadataPatternsMatchOnlyTheExactName`, the int-boundary exponent cells in
+  `#mysqlDefaultsTheServerRejectsFailValidation`, `#unsignedZerofillDecimalKeepsPrecision`,
+  and the `namesAreNotPatternsAndDecimalPrecisionIsCompared` (MySQL, MariaDB, which also
+  sync and snapshot under `NO_BACKSLASH_ESCAPES`), `schemaAndTableNamesAreNotMetadataPatterns`
+  (PostgreSQL), and `tableNamesAreNotMetadataPatterns` (SQL Server, Oracle, with bare `DEC`
+  cells) integration tests. A metadata workaround is verified against every driver and
+  under every session mode the code already supports, not per the JDBC javadoc.
+
 ## 2026-09-26 — PR #12 — identifier case folding and per-version DDL syntax
 
 - **Bug:** Scope binding lowercased every namespace comparison, so `appdb.*` / `appdb.t`
@@ -25,10 +96,10 @@
   `CliCredentials`; Oracle dual-lock leak and PG dual-lock AB-BA wait; `GRANT *.*` /
   `SCHEMA::` escaped binding; UNIQUE/filter/INCLUDE indexes and DEFAULT-blocked
   `ALTER COLUMN` mis-handled; 63-char validation despite 128-char dialects; internal
-  audit/resume/LinkedIn drafts committed to a public repo.
+  drafts committed to a public repo.
 - **Missed because:** Workflow quoting and IT serialize paths were not exercised in the
   unit suite; lock dual-acquire lacked failure/ordering contracts; GRANT forms beyond
-  `schema.object` were out of the scope matrix; career/audit docs were treated as
+  `schema.object` were out of the scope matrix; internal drafts were treated as
   project docs.
 - **Prevention:** Quote JDBC `-D` URLs; `SchemaSnapshotWriter.writeSnapshot(Connection…)`;
   release Oracle lock on partial failure; acquire PG locks primary-then-legacy only;
@@ -38,17 +109,17 @@
   `docs/DESIGN.md` only. Contracts in `ChangeSetSchemaScopeTest` and
   `SchemaSynchronizerTest`.
 
-## 2026-09-26 — 1.4.0 — P2 hardening before release
+## 2026-09-26 — pre-1.3.0 — least-privilege defaults
 
 - **Bug / gaps:** Boot on-by-default DDL; argv passwords; message-only duplicate
   classification; unbounded PG advisory wait; history without actor; dry-run API
   unused; `public` default misleading on SQL Server/Oracle/MySQL.
-- **Missed because:** Audit P2s deferred after P0/P1 1.3.1 pass.
+- **Missed because:** Defaults were chosen for convenience, not least privilege.
 - **Prevention:** `enabled` default false; `CliCredentials` env-only password;
   SQLState/vendor-code-only `DuplicateObjectSql`; `pg_try_*` 30s; `applied_by`;
   dialect schema reject for `public` on non-PG; wire `supportsTransactionalDryRun`.
 
-## 2026-09-26 — 1.3.1 — schema scope and routine-body policy bypasses
+## 2026-09-26 — pre-1.3.0 — schema scope and routine-body policy bypasses
 
 - **Bug:** Change-set schema binding only matched bare `ident.ident` after masking
   double quotes, so `"other"."t"`, `[other].[t]`, and `` `other`.`t` `` escaped.
@@ -61,8 +132,8 @@
 - **Prevention:** Target-position qualified-name matching with quote forms; reject
   search_path / CURRENT_SCHEMA / USE; extract AS body (dollar or single-quoted) before
   forbidden-token scan. Contracts in `ChangeSetSchemaScopeTest` and
-  `NonDestructiveSqlPolicyTest`. Publish `needs: [oracle-verify]`; dual-acquire legacy
-  PG/Oracle locks across the 1.3.0→1.3.1 lock-key change.
+  `NonDestructiveSqlPolicyTest`. Publish `needs: [oracle-verify]`; dual-acquire the 1.2.0
+  lock alongside the schema-scoped lock.
 
 ## 2026-09-26 — 1.2.0 — fail-closed uniqueness when skipping already-exists DDL
 
@@ -231,7 +302,7 @@
   validation.
 - **Prevention:** Trace public input through normalization and validation before
   documenting whether an unsupported shape is rejected, normalized, or ignored.
-- **Coverage:** The schema reference, troubleshooting guide, and production audit now
+- **Coverage:** The schema reference and troubleshooting guide now
   consistently describe lowercase normalization and quoted-identifier rejection.
 
 ## 2026-09-23 — PR #8 — database readiness must cross the SQL boundary

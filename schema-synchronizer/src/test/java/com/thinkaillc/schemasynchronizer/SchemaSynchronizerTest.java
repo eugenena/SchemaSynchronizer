@@ -106,9 +106,12 @@ class SchemaSynchronizerTest {
     void addsMissingColumn() throws Exception {
         when(metaData.getTables(null, "public", "%", new String[]{"TABLE"})).thenReturn(tablesRs);
         when(tablesRs.next()).thenReturn(true, false);
+        when(tablesRs.getString("TABLE_SCHEM")).thenReturn("public");
         when(tablesRs.getString("TABLE_NAME")).thenReturn("existing_table");
         when(metaData.getColumns(null, "public", "existing_table", "%")).thenReturn(columnsRs);
         when(columnsRs.next()).thenReturn(true, false);
+        when(columnsRs.getString("TABLE_SCHEM")).thenReturn("public");
+        when(columnsRs.getString("TABLE_NAME")).thenReturn("existing_table");
         when(columnsRs.getString("COLUMN_NAME")).thenReturn("name");
         when(columnsRs.getString("TYPE_NAME")).thenReturn("VARCHAR");
         when(columnsRs.getInt("COLUMN_SIZE")).thenReturn(255);
@@ -132,9 +135,12 @@ class SchemaSynchronizerTest {
     void appliesDefaultChangeOnExistingColumn() throws Exception {
         when(metaData.getTables(null, "public", "%", new String[]{"TABLE"})).thenReturn(tablesRs);
         when(tablesRs.next()).thenReturn(true, false);
+        when(tablesRs.getString("TABLE_SCHEM")).thenReturn("public");
         when(tablesRs.getString("TABLE_NAME")).thenReturn("t");
         when(metaData.getColumns(null, "public", "t", "%")).thenReturn(columnsRs);
         when(columnsRs.next()).thenReturn(true, false);
+        when(columnsRs.getString("TABLE_SCHEM")).thenReturn("public");
+        when(columnsRs.getString("TABLE_NAME")).thenReturn("t");
         when(columnsRs.getString("COLUMN_NAME")).thenReturn("status");
         when(columnsRs.getString("TYPE_NAME")).thenReturn("VARCHAR");
         when(columnsRs.getInt("COLUMN_SIZE")).thenReturn(50);
@@ -331,6 +337,12 @@ class SchemaSynchronizerTest {
                 .isNull();
         assertThat(SchemaSynchronizer.sqlServerBlockReason(parameterized, ColumnDefinitionParser.parse("DECIMAL"),
                 relax, false, "DECIMAL")).contains("precision");
+        // Bare DEC is DECIMAL(18,0), so ALTER COLUMN c DEC keeps the precision the planner compared.
+        ColumnSpec bareDecimal = SchemaSynchronizer.withDefaultNumericPrecision(
+                ColumnDefinitionParser.parse("DEC"), "DEC", DatabaseDialect.SQLSERVER);
+        assertThat(SchemaSynchronizer.sqlServerBlockReason(parameterized, bareDecimal, relax, false, "DEC")).isNull();
+        assertThat(SchemaSynchronizer.sqlServerBlockReason(parameterized, ColumnDefinitionParser.parse("VARCHAR"),
+                relax, false, "VARCHAR")).contains("precision");
         assertThat(SchemaSynchronizer.sqlServerBlockReason(missing, varchar100, widen, false, "VARCHAR(100)"))
                 .contains("not found");
     }
@@ -378,12 +390,17 @@ class SchemaSynchronizerTest {
         LiveColumn live = new LiveColumn("NUMERIC", 38, 0, true, null);
         assertThat(comparable(live, "INTEGER NOT NULL").baseType()).isEqualTo("INTEGER");
         assertThat(comparable(live, "NUMBER(19)")).isSameAs(live);
-        for (String ansi : List.of("NUMERIC NOT NULL", "DECIMAL NOT NULL", "numeric NOT NULL")) {
-            NonDestructiveAlterPlanner.Plan plan = planFor(ansi, comparable(live, ansi));
+        for (String ansi : List.of("NUMERIC NOT NULL", "DECIMAL NOT NULL", "numeric NOT NULL", "DEC NOT NULL")) {
+            ColumnSpec target = SchemaSynchronizer.withDefaultNumericPrecision(
+                    ColumnDefinitionParser.parse(ansi), ansi, DatabaseDialect.ORACLE);
+            NonDestructiveAlterPlanner.Plan plan = NonDestructiveAlterPlanner.plan("items", "c", target,
+                    SchemaSynchronizer.oracleComparableLive(live, target));
             assertThat(plan.applySql()).as(ansi).isEmpty();
             assertThat(plan.pendingSql()).as(ansi).isEmpty();
         }
         assertThat(comparable(live, "NUMBER")).as("Oracle NUMBER is unbounded, not NUMBER(38,0)").isSameAs(live);
+        assertThat(planFor("NUMBER NOT NULL", comparable(live, "NUMBER NOT NULL")).applySql())
+                .as("unbounded NUMBER widens NUMBER(38,0)").isNotEmpty();
         LiveColumn floatLive = new LiveColumn("FLOAT", null, null, false, null);
         assertThat(comparable(floatLive, "DOUBLE PRECISION").baseType()).isEqualTo("DOUBLE PRECISION");
         assertThat(comparable(floatLive, "REAL").baseType()).isEqualTo("REAL");
@@ -392,7 +409,7 @@ class SchemaSynchronizerTest {
     }
 
     private static LiveColumn comparable(LiveColumn live, String definition) {
-        return SchemaSynchronizer.oracleComparableLive(live, ColumnDefinitionParser.parse(definition), definition);
+        return SchemaSynchronizer.oracleComparableLive(live, ColumnDefinitionParser.parse(definition));
     }
 
     @Test

@@ -1,24 +1,64 @@
 # Changelog
 
-## Unreleased
+## 1.3.0 — Unreleased
 
-Review fixes that can change what an existing definition reports after upgrading:
+### New engines
+
+- **SQL Server 2019+ and Oracle 19c+** dialects: detection, history DDL, session locking,
+  metadata catalog/schema mapping, serialize/sync, and duplicate-object adoption. SQL Server
+  uses transactional DDL and `sp_getapplock`; Oracle follows the implicit-DDL path
+  (verification + single-statement change sets when unverified) and `DBMS_LOCK` with
+  `release_on_commit=false`, so implicit DDL commits do not drop the lock mid-sync.
+- JDBC drivers are Maven `<optional>` in the library; applications declare the engines they
+  use. The standalone CLI shades all five drivers.
+
+### Breaking changes
+
+- Spring Boot auto-configuration is **off by default**: set `schema-synchronizer.enabled=true`.
+- CLI `serialize`/`sync` reject literal passwords on the command line: pass `-` and set
+  `SCHEMA_DB_PASSWORD`.
+- `schema=public` is rejected on SQL Server, Oracle, and MySQL/MariaDB (use `dbo`, the
+  connected user, or the catalog name).
+- MySQL Connector/J connected to MariaDB is detected as `mariadb`; definitions declaring
+  `"dialect": "mysql"` for a MariaDB server must switch to `mariadb` (or re-snapshot).
+
+### Locking and change sets
+
+- Locks are scoped to the schema, so products sharing one cluster do not serialize on the
+  default id; the 1.2.0 lock is acquired as well, so a rolling upgrade still excludes 1.2.0
+  peers. PostgreSQL waits at most 30 seconds (`pg_try_advisory_xact_lock`), like MySQL and SQL
+  Server. MySQL lock names longer than 64 characters are hashed instead of truncated.
+- The history table records `applied_by` (`SCHEMA_SYNCHRONIZER_ACTOR` or `user.name`);
+  existing history tables gain the column on the next sync.
+- Change-set and verification SQL must target the configured schema (or system catalogs);
+  cross-schema references and session namespace changes (`SET search_path`, `USE`,
+  `ALTER SESSION SET CURRENT_SCHEMA`, …) are rejected. Forbidden statements are also found
+  inside routine bodies. These are guardrails against mistakes, not a sandbox.
+- Dry-run no longer executes `verificationSql`, and uses transactional rollback only on
+  engines that support it.
+- Duplicate-object adoption classifies errors by SQLState and vendor code only.
+- SQL Server and Oracle allow 128-character identifiers; offline `validate` enforces each
+  engine's limit for the schema name.
+
+### Comparison and validation
+
+Changes that can alter what an existing definition reports after upgrading:
 
 - **Fractional-second precision** is compared on every engine (`TIMESTAMP(3)` vs `(6)`,
-  `DATETIME(3)`, `DATETIME2(3)`, Oracle `WITH LOCAL TIME ZONE`). Snapshots from 1.4.0 that
-  wrote bare `TIMESTAMP`/`TIME`/`DATETIME` for a non-default precision now report pending;
+  `DATETIME(3)`, `DATETIME2(3)`, Oracle `WITH LOCAL TIME ZONE`). Snapshots from earlier
+  versions that wrote bare `TIMESTAMP`/`TIME`/`DATETIME` for a non-default precision now report pending;
   re-snapshot.
 - **`BIT`** is its own fixed-length type (bare `BIT` = `BIT(1)`), no longer folded into
   `BOOLEAN`; a `BIT`/`BOOLEAN` change or `BIT(n)` resize is pending. On MySQL/MariaDB,
   `BOOLEAN` compares as `TINYINT` (what the server stores), including when Connector/J reports
-  `TINYINT(1)` as `BIT`; snapshots write those columns as `BOOLEAN`. Snapshots from 1.4.0 wrote
+  `TINYINT(1)` as `BIT`; snapshots write those columns as `BOOLEAN`. Earlier snapshots wrote
   bare `BIT` for `BIT(n)` and `BIT` for MySQL `BOOLEAN` columns; re-snapshot. PostgreSQL
   `BIT VARYING(n)` keeps its length, and `B'101'` defaults compare with the stored form.
 - **MySQL/MariaDB defaults** compare in the stored form, and only defaults the server stores
   exactly are set automatically; expression defaults are pending. A MySQL string default
   `'NULL'` is kept as a string. Binary defaults compare as bytes (a non-ASCII string literal
   depends on the session character set and stays pending; declare it as `X'…'`), and MySQL snapshots write them
-  as `0x…` (1.4.0 wrote `'0x…'`, which does not replay; re-snapshot). Words such as `COLLATE` or
+  as `0x…` (earlier snapshots that wrote `'0x…'` do not replay; re-snapshot). Words such as `COLLATE` or
   `COMMENT` inside a default literal no longer count as the clause when checking which column
   attributes `MODIFY COLUMN` would reset, and neither do identifiers in an expression default
   (`comment_count`). Binary literal defaults are read from `SHOW CREATE TABLE`, because
@@ -32,80 +72,62 @@ Review fixes that can change what an existing definition reports after upgrading
 - **MySQL national types** (`NVARCHAR`, `NATIONAL VARCHAR`, …) report charset and collation
   drift even when the type matches.
 - **`explicit_defaults_for_timestamp` OFF** (MariaDB before 10.10): a sync that would create,
-  add, or modify a `TIMESTAMP` column is refused before any DDL.
+  add, or modify a `TIMESTAMP` column is refused before any DDL, including a column that a
+  missing table's column list adds after `CREATE TABLE`, and before an unapplied
+  `BEFORE_SCHEMA` change set whose table DDL names a table declaring a `TIMESTAMP` column.
+- **MySQL/MariaDB character defaults** the column character set cannot store (for example
+  `'日本'` on a `latin1` table) are pending for `MODIFY COLUMN` and `ADD COLUMN`, as is an index
+  on such a column, instead of failing in strict `sql_mode` or being stored as `'??'` and
+  re-applied on every sync. An index on a missing column with no definition is pending too.
+  Character set, collation, `BINARY`, `SIGNED`, and `COMMENT` attributes in a MySQL/MariaDB
+  column definition fail validation (they were read as part of the type or default); declare
+  them in `createSql`.
 - **MySQL Connector/J against MariaDB** is detected as `mariadb`; definitions declaring
   `"dialect": "mysql"` for a MariaDB server must switch to `mariadb` (or re-snapshot).
-
-## 1.4.0 — 2026-09-26
-
-Closes remaining enterprise-audit P2s and deferred least-privilege defaults
-(**breaking** for Spring Boot and CLI callers):
-
-- **SS-004:** Spring Boot auto-config is **off by default**
-  (`schema-synchronizer.enabled` must be `true`; `matchIfMissing=false`).
-- **SS-008:** History ledger records `applied_by` (from `SCHEMA_SYNCHRONIZER_ACTOR`
-  or `user.name`). Existing history tables gain the column on next sync.
-- **SS-009:** PostgreSQL locks use `pg_try_advisory_xact_lock` with a 30s deadline
-  (no unbounded wait), matching MySQL/SQL Server timeouts.
-- **SS-012:** Rejects misleading `schema=public` on SQL Server, Oracle, and MySQL
-  family (require `dbo` / connected user / catalog name).
-- **SS-014:** Dry-run paths consult `supportsTransactionalDryRun()`; transactional
-  dry-run rollback is asserted only for dialects that support it; others warn and
-  skip execution only.
-- **SS-016:** CLI/serialize/sync reject literal passwords on argv — password
-  argument must be `-` with `SCHEMA_DB_PASSWORD` set.
-- **SS-019:** `DuplicateObjectSql` classifies only by SQLState / vendor code
-  (no message-substring fail-open).
-- **SS-018 / SS-010:** Docs clarify declarative scope (tables/columns/indexes/PK)
-  and that UPDATE/INSERT/GRANT are intentional trusted-artifact operations, not a
-  sandbox.
-- Offline `validate` enforces dialect `maxIdentifierLength` for the schema name.
-- MySQL `GET_LOCK` long names use SHA-256 (not 32-bit `hashCode`), and dual-acquire
-  the 1.3.1 hashCode form during rolling upgrades.
-
-## 1.3.1 — 2026-09-26
-
-Hardening from the enterprise audit (P0/P1 correctness and packaging):
-
-- **Oracle lock (SS-001):** `DBMS_LOCK.REQUEST` now uses `release_on_commit=false` so
-  implicit DDL commits do not drop the session lock mid-sync. Lock id mixes schema
-  namespace with the configured advisory id.
-- **Change-set schema scope (SS-002):** change-set and verification SQL must target the
-  configured namespace (or system catalogs); cross-schema `schema.object` (including
-  quoted / bracket / backtick forms) and `IN SCHEMA other` references are rejected.
-  Session namespace mutators (`SET search_path`, `set_config('search_path')`,
-  `ALTER SESSION SET CURRENT_SCHEMA`, `USE`) are rejected so unqualified DDL cannot
-  escape the bound namespace.
-- **Function-body policy (SS-003):** forbidden tokens are scanned inside
-  `CREATE FUNCTION` / `TRIGGER` / `PROCEDURE` dollar-quoted bodies (string literals
-  still masked).
-- **Postgres lock namespace (SS-005):** `pg_advisory_xact_lock(key1, key2)` mixes schema
-  namespace with the configured lock id so multi-schema clusters do not serialize on
-  the default id alone. During 1.3.1 the legacy single-key lock is also acquired so
-  rolling upgrades still exclude 1.3.0 peers (the two Postgres lock spaces are
-  independent). Oracle acquires both namespaced and legacy `DBMS_LOCK` ids for the
-  same reason.
-- **Optional JDBC drivers (SS-006):** library drivers are Maven `<optional>`; apps
-  declare the engines they use. The standalone CLI still shades all five drivers.
-- **Dry-run (SS-007):** dry-run no longer executes `verificationSql`.
-- **Identifier length (SS-011):** SQL Server and Oracle allow 128-character unquoted
-  identifiers; PostgreSQL/MySQL family remain at 63.
-- **MySQL GET_LOCK (SS-013):** lock resource names longer than 64 characters are
-  hashed instead of silently truncating.
-- **Index schema compare (SS-015):** index schema binding uses case-insensitive match.
-- Publish workflow runs Oracle verify before Central deploy (`needs: oracle-verify`)
-  and includes SQL Server in the publish job; docs clarify trusted-artifact policy,
-  locking, and dry-run side effects.
-
-## 1.3.0 — 2026-09-26
-
-- Added SQL Server and Oracle dialects with detection, history DDL, session locking,
-  metadata catalog/schema mapping, serialize/sync paths, and duplicate-object adoption
-  codes.
-- SQL Server uses transactional DDL and `sp_getapplock`; Oracle follows the implicit-DDL
-  path (verification + single-statement change sets when unverified) and `DBMS_LOCK`.
-- Bundled Microsoft SQL Server and Oracle JDBC drivers in the library and standalone CLI.
-- CI covers SQL Server 2022; Oracle XE runs as a dedicated workflow job.
+- **MySQL/MariaDB validation** rejects defaults the server would reject at DDL time (odd-length
+  `X'…'`, out-of-range integers, `DECIMAL` overflow, over-long binary and string literals,
+  including trailing spaces, `FLOAT`/`DOUBLE` overflow, negatives on `UNSIGNED`, integer type
+  synonyms such as `MIDDLEINT`) before any DDL runs. MariaDB's bare `ON UPDATE CURRENT_TIMESTAMP`
+  on `DATETIME(n)` is accepted; an explicit `(0)` is not. A bare number on a binary column
+  compares as its decimal text. `TINYINT(1) UNSIGNED`, `INT(n) UNSIGNED` and
+  `DECIMAL(p,s) UNSIGNED` parse; `UNSIGNED` types normalize like their signed base, their
+  numeric defaults and large `DOUBLE` exponents compare by value, and their defaults are set
+  automatically like the signed forms. `DECIMAL(p,s) UNSIGNED` compares precision and scale.
+- **`DECIMAL` without precision** compares as the type the engine creates: `DECIMAL(10,0)` on
+  MySQL/MariaDB, `DECIMAL(18,0)` on SQL Server, `NUMBER(38,0)` for Oracle's ANSI spellings
+  (Oracle `NUMBER` and PostgreSQL `NUMERIC` stay unbounded). On MySQL/MariaDB it compared as
+  unbounded, which re-ran `MODIFY COLUMN` on every sync and would have rounded a wider live
+  column to `(10,0)`. A wider live column is now pending on MySQL/MariaDB, SQL Server, and
+  Oracle, and SQL Server's bare declaration no longer stays pending against a live
+  `DECIMAL(18,0)`. On Oracle, a bare `DECIMAL`/`NUMERIC` declared for a live unbounded
+  `NUMBER` column now reports a pending change; declare `NUMBER`.
+- **Metadata name matching:** JDBC drivers match schema and table names with `LIKE`, so
+  `user_role` read the columns of `user1role` (every engine), a MySQL-family schema matched a
+  sibling database under `databaseTerm=SCHEMA`, and Oracle primary-key lookups matched a
+  sibling schema. Rows are now filtered to the exact name.
+- **`DEC` and `FIXED`** compare as `DECIMAL`; they stayed pending against the live column.
+  `ZEROFILL` implies `UNSIGNED` in either order, and `DECIMAL(p,s) ZEROFILL` parses. `UNSIGNED`,
+  `ZEROFILL`, or `FIXED` declared for PostgreSQL, SQL Server, or Oracle, `NUMBER` declared for
+  any engine but Oracle, and an attribute before the length (`INT UNSIGNED(10)`), fail
+  validation instead of failing at DDL time. A PostgreSQL definition that declared
+  `NUMBER(p,s)` for an existing column must switch to `NUMERIC(p,s)`.
+- **MySQL/MariaDB schema binding:** the configured schema must equal `DATABASE()` exactly, also
+  when the driver reports no catalog; metadata reads are bound to it, including after a `USE`
+  (Connector/J caches the URL database) and with `databaseTerm=SCHEMA`/`useCatalogTerm=Schema`.
+  A session `TEMPORARY` table that shadows a declared table fails the sync before any DDL on it.
+- **MySQL/MariaDB `MODIFY COLUMN`** is pending when it would drop MariaDB `COMPRESSED` or
+  `ZEROFILL`, reset a non-default `ZEROFILL` display width (`INT(5) ZEROFILL`), or add or
+  remove the `TINYINT(1)` display width of a column kept as `TINYINT`. `COMPRESSED` and
+  `INVISIBLE` columns read their binary defaults correctly.
+- **MySQL/MariaDB snapshots** keep column character set/collation (when not the table's),
+  `INVISIBLE`, `COMMENT`, and MariaDB `COMPRESSED` in `createSql`, write MariaDB
+  `TINYINT(1) UNSIGNED` with its display width, keep the precision of `DECIMAL(p,s) UNSIGNED`
+  (also with `ZEROFILL`), and write `ZEROFILL` when taken through MySQL Connector/J. A
+  `ZEROFILL` column in an older Connector/J snapshot reports a pending change; re-snapshot.
+  A snapshot refuses a `ZEROFILL` integer with a non-default display width, which a
+  declaration cannot express. Primary-key text inside literals or comments of
+  `createSql` is no longer read as a key clause; a key that reads differently with and without
+  `ANSI_QUOTES` fails the sync.
 
 ## 1.2.0 — 2026-09-26
 

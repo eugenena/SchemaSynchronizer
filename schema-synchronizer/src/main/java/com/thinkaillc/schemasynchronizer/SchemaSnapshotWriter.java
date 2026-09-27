@@ -86,7 +86,7 @@ public class SchemaSnapshotWriter {
         String url = args[0];
         String user = args[1];
         String password = CliCredentials.requirePasswordFromEnv(args[2]);
-        String schema = SqlIdentifiers.requireIdentifier(args[3], "schema");
+        String schema = SqlIdentifiers.requireIdentifierPreservingCase(args[3], "schema");
         Path outputPath = Paths.get(args[4]);
 
         log.info("[SchemaSnapshotWriter] Connecting to source database");
@@ -94,7 +94,7 @@ public class SchemaSnapshotWriter {
             DatabaseDialect dialect = DatabaseDialect.detect(conn.getMetaData());
             log.info("[SchemaSnapshotWriter] Detected {} {}", dialect.id(),
                     conn.getMetaData().getDatabaseProductVersion());
-            Map<String, Object> tables = buildSnapshot(conn.getMetaData(), conn, schema, dialect);
+            Map<String, Object> tables = buildSnapshot(conn.getMetaData(), conn, namespace(schema, dialect), dialect);
             writeJson(tables, outputPath, dialect);
         }
 
@@ -112,9 +112,13 @@ public class SchemaSnapshotWriter {
         String scoped = SqlIdentifiers.requireIdentifierPreservingCase(
                 schema, "schema", SqlIdentifiers.EXTENDED_MAX_LENGTH);
         DatabaseDialect dialect = DatabaseDialect.detect(conn.getMetaData());
-        Map<String, Object> tables = buildSnapshot(conn.getMetaData(), conn,
-                scoped.toLowerCase(Locale.ROOT), dialect);
+        Map<String, Object> tables = buildSnapshot(conn.getMetaData(), conn, namespace(scoped, dialect), dialect);
         writeJson(tables, outputPath, dialect);
+    }
+
+    /** MySQL/MariaDB database names are case-sensitive on most platforms; other namespaces fold to lower case. */
+    private static String namespace(String schema, DatabaseDialect dialect) {
+        return dialect.usesCatalogNamespace() ? schema : schema.toLowerCase(Locale.ROOT);
     }
 
     private static Map<String, Object> buildSnapshot(DatabaseMetaData meta, Connection conn, String schema,
@@ -123,10 +127,22 @@ public class SchemaSnapshotWriter {
         Map<String, Object> tables = new TreeMap<>();
 
         String catalog = dialect.metadataCatalog(conn, schema);
+        if (dialect.usesCatalogNamespace()) {
+            // Metadata reads are bound to the schema; SHOW CREATE TABLE and the driver use DATABASE().
+            catalog = SchemaSynchronizer.mySqlCurrentDatabase(conn);
+            if (!schema.equals(catalog)) {
+                throw new IllegalStateException("Connected " + dialect.id() + " database '" + catalog
+                        + "' does not match schema '" + schema + "' (compared case-sensitively)");
+            }
+        }
         String schemaPattern = dialect.metadataSchemaPattern(schema);
+
 
         try (ResultSet rs = meta.getTables(catalog, schemaPattern, "%", new String[]{"TABLE"})) {
             while (rs.next()) {
+                if (!DatabaseDialect.isRequestedObject(rs, schemaPattern, null)) {
+                    continue;
+                }
                 String tableName = rs.getString("TABLE_NAME").toLowerCase(Locale.ROOT);
                 if (EXCLUDE.contains(tableName) || SchemaSynchronizer.isIgnorableSchemaTable(tableName)) {
                     continue;
@@ -137,20 +153,25 @@ public class SchemaSnapshotWriter {
                 List<String> pkCols = new ArrayList<>();
                 List<Map<String, Object>> pendingCols = new ArrayList<>();
                 Set<String> generatedDefaults = dialect == DatabaseDialect.MYSQL
-                        ? mysqlGeneratedDefaultColumns(conn, tableName) : Set.of();
+                        ? mysqlGeneratedDefaultColumns(conn, catalog, tableName) : Set.of();
                 Map<String, Integer> datetimePrecisions = dialect.isMySqlFamily()
-                        ? mysqlDatetimePrecisions(conn, tableName) : Map.of();
-                Map<String, String> dataTypes = dialect.isMySqlFamily() ? mysqlDataTypes(conn, tableName) : Map.of();
-                Map<String, String> onUpdates = dialect.isMySqlFamily() ? mysqlOnUpdate(conn, tableName) : Map.of();
+                        ? mysqlDatetimePrecisions(conn, catalog, tableName) : Map.of();
+                Map<String, String> dataTypes = dialect.isMySqlFamily() ? mysqlDataTypes(conn, catalog, tableName) : Map.of();
+                Map<String, String> onUpdates = dialect.isMySqlFamily() ? mysqlOnUpdate(conn, catalog, tableName) : Map.of();
                 Map<String, String> mariaDbDefaults = dialect == DatabaseDialect.MARIADB
-                        ? mariaDbColumnDefaults(conn, tableName) : Map.of();
+                        ? mariaDbColumnDefaults(conn, catalog, tableName) : Map.of();
                 Map<String, String> binaryDefaults = dialect.isMySqlFamily()
-                        ? mysqlBinaryDefaults(conn, tableName, dialect == DatabaseDialect.MARIADB) : Map.of();
+                        ? mysqlBinaryDefaults(conn, catalog, tableName, dialect == DatabaseDialect.MARIADB) : Map.of();
+                Map<String, String[]> columnClauses = dialect.isMySqlFamily()
+                        ? mysqlColumnClauses(conn, catalog, tableName, dialect == DatabaseDialect.MARIADB) : Map.of();
 
                 try (ResultSet cols = meta.getColumns(catalog, schemaPattern, metadataTable, "%")) {
                     while (cols.next()) {
                         // Oracle JDBC exposes COLUMN_DEF as LONG — read it before any other column.
                         String colDefault = cols.getString("COLUMN_DEF");
+                        if (!DatabaseDialect.isRequestedObject(cols, schemaPattern, metadataTable)) {
+                            continue;
+                        }
                         String colName  = cols.getString("COLUMN_NAME").toLowerCase(Locale.ROOT);
                         if (mariaDbDefaults.containsKey(colName)) {
                             colDefault = mariaDbDefaults.get(colName);
@@ -159,6 +180,15 @@ public class SchemaSnapshotWriter {
                         if (dialect.isMySqlFamily() && !typeName.startsWith("TINYINT")) {
                             String stored = mysqlTypeName(typeName, dataTypes.get(colName));
                             typeName = "TINYINT".equals(stored) ? "BOOLEAN" : stored;
+                        }
+                        if (dialect.isMySqlFamily()) {
+                            Integer zerofillWidth = mysqlZerofillCustomWidth(dataTypes.get(colName));
+                            if (zerofillWidth != null) {
+                                throw new IllegalStateException("Cannot snapshot " + tableName + "." + colName
+                                        + ": a ZEROFILL display width (" + zerofillWidth + ") cannot be declared");
+                            }
+                            typeName = mysqlZerofill(mysqlUnsignedTinyint1(typeName, dataTypes.get(colName)),
+                                    dataTypes.get(colName));
                         }
                         int size        = cols.getInt("COLUMN_SIZE");
                         int scale       = cols.getInt("DECIMAL_DIGITS");
@@ -215,6 +245,9 @@ public class SchemaSnapshotWriter {
 
                 try (ResultSet pk = meta.getPrimaryKeys(catalog, schemaPattern, metadataTable)) {
                     while (pk.next()) {
+                        if (!DatabaseDialect.isRequestedObject(pk, schemaPattern, metadataTable)) {
+                            continue;
+                        }
                         pkCols.add(pk.getString("COLUMN_NAME").toLowerCase(Locale.ROOT));
                     }
                 }
@@ -239,10 +272,16 @@ public class SchemaSnapshotWriter {
                     col.put("definition", colDef);
                     columns.add(col);
 
+                    String rawType = buildCreateType(
+                            typeName, size, scale, nullable, colDefault, autoInc, isPk, dialect) + onUpdate;
+                    String[] clauses = columnClauses.get(colName);
+                    if (clauses != null) {
+                        String type = columnType(typeName, size, scale, dialect);
+                        rawType = type + clauses[0] + rawType.substring(type.length()) + clauses[1];
+                    }
                     Map<String, String> rawCol = new LinkedHashMap<>();
                     rawCol.put("name", colName);
-                    rawCol.put("type", buildCreateType(
-                            typeName, size, scale, nullable, colDefault, autoInc, isPk, dialect) + onUpdate);
+                    rawCol.put("type", rawType);
                     rawColumns.add(rawCol);
                 }
 
@@ -295,7 +334,7 @@ public class SchemaSnapshotWriter {
             return readPostgresIndexes(conn, schema, tableName);
         }
         if (dialect.isMySqlFamily()) {
-            return readMySqlFamilyIndexes(conn, tableName, dialect);
+            return readMySqlFamilyIndexes(conn, schema, tableName, dialect);
         }
         return readJdbcIndexes(meta, dialect, dialect.metadataCatalog(conn, schema),
                 dialect.metadataSchemaPattern(schema), tableName);
@@ -343,6 +382,9 @@ public class SchemaSnapshotWriter {
         Set<String> skipIndexes = new HashSet<>();
         try (ResultSet rows = meta.getPrimaryKeys(catalog, schemaPattern, metadataTable)) {
             while (rows.next()) {
+                if (!DatabaseDialect.isRequestedObject(rows, schemaPattern, metadataTable)) {
+                    continue;
+                }
                 String pkName = rows.getString("PK_NAME");
                 if (pkName != null && !pkName.isBlank()) {
                     skipIndexes.add(pkName.toLowerCase(Locale.ROOT));
@@ -496,11 +538,12 @@ public class SchemaSnapshotWriter {
             "INTEGER", "BIGINT", "DECIMAL", "NUMERIC", "FLOAT", "DOUBLE", "REAL", "BIT", "BOOLEAN", "BOOL", "YEAR");
 
     /** MySQL columns whose default is an expression (EXTRA = DEFAULT_GENERATED), not a literal. */
-    static Set<String> mysqlGeneratedDefaultColumns(Connection conn, String tableName) throws SQLException {
+    static Set<String> mysqlGeneratedDefaultColumns(Connection conn, String schema, String tableName) throws SQLException {
         Set<String> names = new HashSet<>();
         try (var statement = conn.prepareStatement("SELECT column_name FROM information_schema.columns "
-                + "WHERE table_schema = DATABASE() AND table_name = ? AND extra LIKE '%DEFAULT_GENERATED%'")) {
-            statement.setString(1, tableName);
+                + "WHERE table_schema = ? AND table_name = ? AND extra LIKE '%DEFAULT_GENERATED%'")) {
+            statement.setString(1, schema);
+            statement.setString(2, tableName);
             try (ResultSet rows = statement.executeQuery()) {
                 while (rows.next()) {
                     names.add(rows.getString(1).toLowerCase(Locale.ROOT));
@@ -514,11 +557,12 @@ public class SchemaSnapshotWriter {
             "(?i)\\bon update ([a-z_]+(?:\\(\\d*\\))?)");
 
     /** MySQL/MariaDB ON UPDATE expression by column, from information_schema EXTRA ({@code CURRENT_TIMESTAMP(3)}). */
-    static Map<String, String> mysqlOnUpdate(Connection conn, String tableName) throws SQLException {
+    static Map<String, String> mysqlOnUpdate(Connection conn, String schema, String tableName) throws SQLException {
         Map<String, String> onUpdates = new HashMap<>();
         try (var statement = conn.prepareStatement("SELECT column_name, extra FROM information_schema.columns "
-                + "WHERE table_schema = DATABASE() AND table_name = ? AND LOWER(extra) LIKE '%on update%'")) {
-            statement.setString(1, tableName);
+                + "WHERE table_schema = ? AND table_name = ? AND LOWER(extra) LIKE '%on update%'")) {
+            statement.setString(1, schema);
+            statement.setString(2, tableName);
             try (ResultSet rows = statement.executeQuery()) {
                 while (rows.next()) {
                     java.util.regex.Matcher onUpdate = MYSQL_EXTRA_ON_UPDATE.matcher(rows.getString(2));
@@ -537,11 +581,12 @@ public class SchemaSnapshotWriter {
      * {@code NULL} for none. MySQL Connector/J reports MariaDB defaults unquoted, so the
      * driver's COLUMN_DEF is not used.
      */
-    static Map<String, String> mariaDbColumnDefaults(Connection conn, String tableName) throws SQLException {
+    static Map<String, String> mariaDbColumnDefaults(Connection conn, String schema, String tableName) throws SQLException {
         Map<String, String> defaults = new HashMap<>();
         try (var statement = conn.prepareStatement("SELECT column_name, column_default "
-                + "FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ?")) {
-            statement.setString(1, tableName);
+                + "FROM information_schema.columns WHERE table_schema = ? AND table_name = ?")) {
+            statement.setString(1, schema);
+            statement.setString(2, tableName);
             try (ResultSet rows = statement.executeQuery()) {
                 while (rows.next()) {
                     defaults.put(rows.getString(1).toLowerCase(Locale.ROOT), rows.getString(2));
@@ -551,12 +596,61 @@ public class SchemaSnapshotWriter {
         return defaults;
     }
 
+    /**
+     * Column attributes a declaration cannot carry, as CREATE TABLE clauses by column:
+     * {@code [0]} goes after the type (COMPRESSED, CHARACTER SET/COLLATE when not the table's),
+     * {@code [1]} at the end (INVISIBLE, COMMENT).
+     */
+    static Map<String, String[]> mysqlColumnClauses(Connection conn, String schema, String tableName,
+                                                    boolean mariaDb) throws SQLException {
+        Map<String, String[]> clauses = new HashMap<>();
+        try (var statement = conn.prepareStatement("SELECT c.column_name, c.character_set_name, c.collation_name, "
+                + "t.table_collation, c.column_comment, c.extra, c.column_type FROM information_schema.columns c "
+                + "JOIN information_schema.tables t ON t.table_schema = c.table_schema AND t.table_name = c.table_name "
+                + "WHERE c.table_schema = ? AND c.table_name = ?")) {
+            statement.setString(1, schema);
+            statement.setString(2, tableName);
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    String[] column = mysqlColumnClauses(rows.getString(2), rows.getString(3), rows.getString(4),
+                            rows.getString(5), rows.getString(6), rows.getString(7), mariaDb);
+                    if (!column[0].isEmpty() || !column[1].isEmpty()) {
+                        clauses.put(rows.getString(1).toLowerCase(Locale.ROOT), column);
+                    }
+                }
+            }
+        }
+        return clauses;
+    }
+
+    private static final Pattern MYSQL_INVISIBLE_EXTRA = Pattern.compile("(?i)(?:^|[\\s,])INVISIBLE(?:$|[\\s,])");
+
+    static String[] mysqlColumnClauses(String charset, String collation, String tableCollation, String comment,
+                                       String extra, String columnType, boolean mariaDb) {
+        StringBuilder afterType = new StringBuilder();
+        if (mariaDb && columnType != null && MARIADB_COMPRESSED_COMMENT.matcher(columnType).find()) {
+            afterType.append(" COMPRESSED");
+        }
+        if (charset != null && collation != null && !collation.equals(tableCollation)) {
+            afterType.append(" CHARACTER SET ").append(charset).append(" COLLATE ").append(collation);
+        }
+        StringBuilder trailing = new StringBuilder();
+        if (extra != null && MYSQL_INVISIBLE_EXTRA.matcher(extra).find()) {
+            trailing.append(" INVISIBLE");
+        }
+        if (comment != null && !comment.isEmpty()) {
+            trailing.append(" COMMENT '").append(comment.replace("\\", "\\\\").replace("'", "''")).append("'");
+        }
+        return new String[] {afterType.toString(), trailing.toString()};
+    }
+
     /** MySQL/MariaDB information_schema COLUMN_TYPE by column (lower case, e.g. {@code tinyint(1) unsigned}). */
-    static Map<String, String> mysqlDataTypes(Connection conn, String tableName) throws SQLException {
+    static Map<String, String> mysqlDataTypes(Connection conn, String schema, String tableName) throws SQLException {
         Map<String, String> types = new HashMap<>();
         try (var statement = conn.prepareStatement("SELECT column_name, column_type "
-                + "FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ?")) {
-            statement.setString(1, tableName);
+                + "FROM information_schema.columns WHERE table_schema = ? AND table_name = ?")) {
+            statement.setString(1, schema);
+            statement.setString(2, tableName);
             try (ResultSet rows = statement.executeQuery()) {
                 while (rows.next()) {
                     types.put(rows.getString(1).toLowerCase(Locale.ROOT), rows.getString(2).toLowerCase(Locale.ROOT));
@@ -566,12 +660,16 @@ public class SchemaSnapshotWriter {
         return types;
     }
 
+    /** The versioned COMPRESSED comment MariaDB renders after the type (and MariaDB Connector/J in TYPE_NAME). */
+    static final Pattern MARIADB_COMPRESSED_COMMENT = Pattern.compile("(?i)\\s*/\\*M?!\\d+\\s+COMPRESSED\\s*\\*/");
+
     /**
      * Connector/J reports TINYINT(1) as BIT and MariaDB Connector/J reports TINYINT(1) [UNSIGNED [ZEROFILL]]
      * as BOOLEAN; MySQL BOOLEAN is signed TINYINT(1). Returns the column type the server stores for
      * those, otherwise the driver's TYPE_NAME.
      */
     static String mysqlTypeName(String typeName, String columnType) {
+        typeName = MARIADB_COMPRESSED_COMMENT.matcher(typeName).replaceAll("");
         String normalized = ColumnDefinitionParser.normalizeType(typeName);
         if ((!"BIT".equals(normalized) && !"BOOLEAN".equals(normalized)) || columnType == null
                 || !columnType.startsWith("tinyint")) {
@@ -582,15 +680,51 @@ public class SchemaSnapshotWriter {
     }
 
     /**
+     * Unsigned TINYINT(1) has no BOOLEAN spelling, so its display width must stay in the snapshot type:
+     * a replayed {@code TINYINT UNSIGNED} would no longer read as BOOLEAN/BIT through the drivers.
+     */
+    static String mysqlUnsignedTinyint1(String typeName, String columnType) {
+        return "tinyint(1) unsigned".equals(columnType) ? "TINYINT(1) UNSIGNED" : typeName;
+    }
+
+    private static final Pattern MYSQL_NUMERIC_ATTRIBUTES = Pattern.compile("^(.+?) (UNSIGNED(?: ZEROFILL)?)$");
+    private static final Pattern MYSQL_ZEROFILL_COLUMN_TYPE = Pattern.compile("^[a-z]+(?:\\([\\d,]+\\))? unsigned zerofill$");
+
+    private static final Pattern MYSQL_ZEROFILL_INTEGER = Pattern.compile(
+            "^(tinyint|smallint|mediumint|int|bigint)\\((\\d+)\\) unsigned zerofill$");
+    private static final Map<String, Integer> MYSQL_ZEROFILL_DEFAULT_WIDTH = Map.of(
+            "tinyint", 3, "smallint", 5, "mediumint", 8, "int", 10, "bigint", 20);
+
+    /**
+     * The display width of a ZEROFILL integer when it is not the type's default: declarations cannot
+     * spell it, so replaying or MODIFY COLUMN would change the zero padding. Null otherwise.
+     */
+    static Integer mysqlZerofillCustomWidth(String columnType) {
+        Matcher matcher = columnType == null ? null : MYSQL_ZEROFILL_INTEGER.matcher(columnType);
+        if (matcher == null || !matcher.matches()) {
+            return null;
+        }
+        int width = Integer.parseInt(matcher.group(2));
+        return width == MYSQL_ZEROFILL_DEFAULT_WIDTH.get(matcher.group(1)) ? null : width;
+    }
+
+    /** MySQL Connector/J omits ZEROFILL from TYPE_NAME (MariaDB Connector/J reports it); COLUMN_TYPE has it. */
+    static String mysqlZerofill(String typeName, String columnType) {
+        return columnType != null && typeName.toUpperCase(Locale.ROOT).endsWith(" UNSIGNED")
+                && MYSQL_ZEROFILL_COLUMN_TYPE.matcher(columnType).matches() ? typeName + " ZEROFILL" : typeName;
+    }
+
+    /**
      * MySQL/MariaDB fractional-second precision by column. Connector/J and MariaDB Connector/J
      * report DECIMAL_DIGITS as null for DATETIME/TIMESTAMP/TIME.
      */
-    static Map<String, Integer> mysqlDatetimePrecisions(Connection conn, String tableName) throws SQLException {
+    static Map<String, Integer> mysqlDatetimePrecisions(Connection conn, String schema, String tableName) throws SQLException {
         Map<String, Integer> precisions = new HashMap<>();
         try (var statement = conn.prepareStatement("SELECT column_name, datetime_precision "
-                + "FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? "
+                + "FROM information_schema.columns WHERE table_schema = ? AND table_name = ? "
                 + "AND datetime_precision IS NOT NULL")) {
-            statement.setString(1, tableName);
+            statement.setString(1, schema);
+            statement.setString(2, tableName);
             try (ResultSet rows = statement.executeQuery()) {
                 while (rows.next()) {
                     precisions.put(rows.getString(1).toLowerCase(Locale.ROOT), rows.getInt(2));
@@ -641,13 +775,14 @@ public class SchemaSnapshotWriter {
      * with {@code ?} (MariaDB before 11.8), and {@code DEFAULT(col)} needs a row, so it answers
      * NULL for NOT NULL columns of an empty table. Expression defaults are left to COLUMN_DEFAULT.
      */
-    static Map<String, String> mysqlBinaryDefaults(Connection conn, String tableName, boolean mariaDb)
+    static Map<String, String> mysqlBinaryDefaults(Connection conn, String schema, String tableName, boolean mariaDb)
             throws SQLException {
         List<String> literalColumns = new ArrayList<>();
         try (var statement = conn.prepareStatement("SELECT column_name, column_default, extra "
-                + "FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? "
+                + "FROM information_schema.columns WHERE table_schema = ? AND table_name = ? "
                 + "AND data_type IN ('binary', 'varbinary') AND column_default IS NOT NULL")) {
-            statement.setString(1, tableName);
+            statement.setString(1, schema);
+            statement.setString(2, tableName);
             try (ResultSet rows = statement.executeQuery()) {
                 while (rows.next()) {
                     String columnDefault = rows.getString(2);
@@ -667,7 +802,7 @@ public class SchemaSnapshotWriter {
         }
         byte[] createTable;
         try {
-            createTable = mysqlCreateTableBytes(conn, tableName);
+            createTable = mysqlCreateTableBytes(conn, schema, tableName);
         } catch (SQLException denied) {
             return unreadableBinaryDefaults(literalColumns, denied);
         }
@@ -683,7 +818,8 @@ public class SchemaSnapshotWriter {
      * binary default bytes exactly on MySQL 8 and every MariaDB version; the session setting is
      * restored afterwards.
      */
-    private static byte[] mysqlCreateTableBytes(Connection conn, String tableName) throws SQLException {
+    private static byte[] mysqlCreateTableBytes(Connection conn, String schema, String tableName)
+            throws SQLException {
         String saved;
         try (var statement = conn.createStatement();
              ResultSet rows = statement.executeQuery("SELECT @@SESSION.character_set_results")) {
@@ -692,11 +828,12 @@ public class SchemaSnapshotWriter {
         }
         try (var statement = conn.createStatement()) {
             statement.execute("SET SESSION character_set_results = binary");
-            try (ResultSet rows = statement.executeQuery("SHOW CREATE TABLE " + backtickQuoted(tableName))) {
+            try (ResultSet rows = statement.executeQuery("SHOW CREATE TABLE " + backtickQuoted(schema) + "."
+                    + backtickQuoted(tableName))) {
                 if (!rows.next()) {
                     throw new SQLException("SHOW CREATE TABLE returned no row for " + tableName);
                 }
-                return rows.getBytes(2);
+                return requireBaseTable(rows.getBytes(2), tableName);
             } finally {
                 statement.execute("SET SESSION character_set_results = "
                         + (saved == null ? "NULL" : "'" + saved.replace("'", "''") + "'"));
@@ -704,8 +841,35 @@ public class SchemaSnapshotWriter {
         }
     }
 
+    /** Fails when DDL on {@code tableName} would hit a session TEMPORARY table instead of the base table. */
+    static void requireNoTemporaryShadow(Connection conn, String schema, String tableName) throws SQLException {
+        try (var statement = conn.createStatement();
+             ResultSet rows = statement.executeQuery("SHOW CREATE TABLE " + backtickQuoted(schema) + "."
+                     + backtickQuoted(tableName))) {
+            if (rows.next()) {
+                requireBaseTable(rows.getBytes(2), tableName);
+            }
+        } catch (SQLException missing) {
+            // ER_NO_SUCH_TABLE: neither a base nor a TEMPORARY table has this name.
+            if (missing.getErrorCode() != 1146) {
+                throw missing;
+            }
+        }
+    }
+
+    private static final Pattern CREATE_TEMPORARY_TABLE = Pattern.compile("(?i)^\\s*CREATE\\s+TEMPORARY\\b");
+
+    /** A session TEMPORARY table shadows the base table of the same name in SHOW CREATE TABLE and DDL. */
+    static byte[] requireBaseTable(byte[] createTable, String tableName) {
+        if (CREATE_TEMPORARY_TABLE.matcher(new String(createTable, StandardCharsets.ISO_8859_1)).find()) {
+            throw new IllegalStateException("A TEMPORARY table named " + tableName + " shadows the base table in"
+                    + " this session; drop it or run on a connection without it");
+        }
+        return createTable;
+    }
+
     private static final Pattern CREATE_TABLE_BINARY_DEFAULT = Pattern.compile(
-            "(?i)^\\s+(?:var)?binary\\(\\d+\\)(?:\\s+(?:NOT\\s+)?NULL)?\\s+DEFAULT\\s+(?:_binary\\s*)?"
+            "(?i)^\\s+(?:var)?binary\\(\\d+\\)(?:\\s+/\\*M?!\\d+\\s+COMPRESSED\\s*\\*/)?(?:\\s+(?:NOT\\s+)?NULL)?(?:\\s+INVISIBLE)?\\s+DEFAULT\\s+(?:_binary\\s*)?"
                     + "(0x[0-9A-F]+|x'[0-9A-F]*'|'(?:[^'\\\\]|''|\\\\.)*')");
 
     /**
@@ -820,15 +984,16 @@ public class SchemaSnapshotWriter {
                 "^CREATE (UNIQUE )?INDEX ", "CREATE $1INDEX IF NOT EXISTS ");
     }
 
-    static List<String> readMySqlFamilyIndexes(Connection conn, String tableName, DatabaseDialect dialect)
+    static List<String> readMySqlFamilyIndexes(Connection conn, String schema, String tableName, DatabaseDialect dialect)
             throws SQLException {
         record IndexParts(boolean unique, SortedMap<Short, String> columns) {}
         Map<String, IndexParts> byName = new TreeMap<>();
         try (var statement = conn.prepareStatement("SELECT index_name, non_unique, seq_in_index, column_name, "
                 + "sub_part, collation "
-                + "FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = ? "
+                + "FROM information_schema.statistics WHERE table_schema = ? AND table_name = ? "
                 + "ORDER BY index_name, seq_in_index")) {
-            statement.setString(1, tableName);
+            statement.setString(1, schema);
+            statement.setString(2, tableName);
             try (ResultSet rows = statement.executeQuery()) {
             while (rows.next()) {
                 String name = rows.getString("index_name");
@@ -931,6 +1096,11 @@ public class SchemaSnapshotWriter {
     }
 
     static String columnType(String typeName, int size, Integer scale, DatabaseDialect dialect) {
+        // DECIMAL(p,s) UNSIGNED [ZEROFILL]: the precision goes before the attributes.
+        Matcher attributes = MYSQL_NUMERIC_ATTRIBUTES.matcher(typeName);
+        if (dialect.isMySqlFamily() && typeName.indexOf('(') < 0 && attributes.matches()) {
+            return columnType(attributes.group(1), size, scale, dialect) + " " + attributes.group(2);
+        }
         return switch (typeName) {
             case "VARCHAR", "CHARACTER VARYING", "VARCHAR2" -> portableVarchar(size, "", dialect, false);
             case "NVARCHAR", "NVARCHAR2" -> portableVarchar(size, "", dialect, true);
