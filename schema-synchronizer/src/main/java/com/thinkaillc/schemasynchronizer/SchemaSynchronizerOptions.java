@@ -18,7 +18,11 @@ public record SchemaSynchronizerOptions(
     }
 
     public SchemaSynchronizerOptions {
-        schema = SqlIdentifiers.requireIdentifierPreservingCase(schema, "schema");
-        historyTable = SqlIdentifiers.requireIdentifier(historyTable, "history table");
+        // Allow SQL Server / Oracle lengths at construction; PostgreSQL/MySQL enforce
+        // their shorter limit when synchronizing against a live dialect.
+        schema = SqlIdentifiers.requireIdentifierPreservingCase(
+                schema, "schema", SqlIdentifiers.EXTENDED_MAX_LENGTH);
+        historyTable = SqlIdentifiers.requireIdentifier(
+                historyTable, "history table", SqlIdentifiers.EXTENDED_MAX_LENGTH);
     }
 }

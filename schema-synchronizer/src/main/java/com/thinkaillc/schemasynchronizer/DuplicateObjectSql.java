@@ -4,7 +4,6 @@
 package com.thinkaillc.schemasynchronizer;
 
 import java.sql.SQLException;
-import java.util.Locale;
 
 /**
  * Classifies JDBC errors that mean a DDL object already exists.
@@ -14,6 +13,10 @@ import java.util.Locale;
  * uniqueness violations are never treated as duplicates to skip. Only the primary
  * {@link SQLException} is inspected — chained {@code nextException} values are ignored
  * so a hard failure is not masked by a later duplicate-object detail.
+ *
+ * <p>Classification is <strong>SQLState / vendor-code only</strong>. Message substring
+ * matching is intentionally absent so a null SQLState plus an {@code already exists}
+ * message cannot fail-open and ledger an incomplete change.
  */
 final class DuplicateObjectSql {
     private DuplicateObjectSql() {
@@ -30,7 +33,7 @@ final class DuplicateObjectSql {
         String state = exception.getSQLState();
         int code = exception.getErrorCode();
         // Data uniqueness — never skip (fail closed even when the message says "already exists")
-        if ("23505".equals(state) || code == 1062) {
+        if ("23505".equals(state) || code == 1062 || code == 2627 || code == 2601 || code == 1) {
             return false;
         }
         if (state != null) {
@@ -47,15 +50,15 @@ final class DuplicateObjectSql {
         if (code == 1050 || code == 1060 || code == 1061 || code == 1068 || code == 1826) {
             return true;
         }
-        String message = exception.getMessage();
-        if (message == null || message.isBlank()) {
-            return false;
+        // SQL Server: object/index/column already present (not 1911 missing-column / 1758 online-DDL)
+        if (code == 2714 || code == 1913 || code == 2705 || code == 1779) {
+            return true;
         }
-        String lower = message.toLowerCase(Locale.ROOT);
-        if (lower.contains("duplicate entry") || lower.contains("unique constraint")
-                || lower.contains("unique_violation") || lower.contains("duplicate key")) {
-            return false;
+        // Oracle: ORA-00955 name used; ORA-01430 column exists; ORA-00957 duplicate column name;
+        // ORA-02260 table already has a primary key; ORA-02261 unique/PK already exists
+        if (code == 955 || code == 1430 || code == 957 || code == 2260 || code == 2261) {
+            return true;
         }
-        return lower.contains("already exists");
+        return false;
     }
 }

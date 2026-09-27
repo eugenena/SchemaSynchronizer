@@ -86,19 +86,17 @@ class SchemaSynchronizerPostgresIntegrationTest {
         createSchema(dataSource, targetSchema);
         try (Connection connection = dataSource.getConnection(); var statement = connection.createStatement()) {
             statement.execute("CREATE TABLE " + sourceSchema
-                    + ".accounts (id BIGINT PRIMARY KEY, email VARCHAR(320) NOT NULL UNIQUE, display_name TEXT)");
+                    + ".accounts (id BIGINT PRIMARY KEY, email VARCHAR(320) NOT NULL UNIQUE, display_name TEXT, "
+                    + "created_at TIMESTAMP(3), seen_at TIMESTAMPTZ, clock TIME(0), stamped TIMESTAMP, "
+                    + "mask BIT(3) DEFAULT B'101', flags BIT VARYING(5))");
             statement.execute("CREATE INDEX idx_accounts_display_name ON "
                     + sourceSchema + ".accounts (display_name)");
         }
 
         Path definitionPath = tempDirectory.resolve("schema-definition.json");
-        SchemaSnapshotWriter.main(new String[]{
-                System.getProperty("schema.test.jdbc.url"),
-                System.getProperty("schema.test.jdbc.user", ""),
-                System.getProperty("schema.test.jdbc.password", ""),
-                sourceSchema,
-                definitionPath.toString()
-        });
+        try (Connection connection = dataSource.getConnection()) {
+            SchemaSnapshotWriter.writeSnapshot(connection, sourceSchema, definitionPath);
+        }
         SchemaDefinition definition = new ObjectMapper().readValue(definitionPath.toFile(), SchemaDefinition.class);
 
         assertThat(definition.tables().get("accounts").indexes())
@@ -115,6 +113,48 @@ class SchemaSynchronizerPostgresIntegrationTest {
                     + ".accounts (id, email) VALUES (2, 'a@example.com')"))
                     .isInstanceOf(SQLException.class);
         }
+        try (Connection connection = dataSource.getConnection()) {
+            for (String schema : List.of(sourceSchema, targetSchema)) {
+                SchemaSynchronizationResult strict = synchronizer(dataSource, schema, false)
+                        .synchronizeWithResult(connection, definition);
+                assertThat(strict.pendingSql()).as(schema).isEmpty();
+                assertThat(strict.changed()).as(schema).isFalse();
+            }
+        }
+        assertThat(definition.tables().get("accounts").columns())
+                .anyMatch(column -> column.name().equals("created_at") && column.definition().startsWith("TIMESTAMP(3)"))
+                .anyMatch(column -> column.name().equals("clock") && column.definition().startsWith("TIME(0)"))
+                .anyMatch(column -> column.name().equals("stamped") && column.definition().equals("TIMESTAMP"));
+
+        SchemaDefinition.TableDef accounts = definition.tables().get("accounts");
+        List<SchemaDefinition.ColumnDef> handWritten = accounts.columns().stream()
+                .map(column -> switch (column.name()) {
+                    case "mask" -> new SchemaDefinition.ColumnDef("mask", "BIT(3) DEFAULT B'101'");
+                    case "flags" -> new SchemaDefinition.ColumnDef("flags", "BIT VARYING(5)");
+                    default -> column;
+                })
+                .toList();
+        try (Connection connection = dataSource.getConnection()) {
+            SchemaSynchronizationResult declared = synchronizer(dataSource, sourceSchema, false).synchronizeWithResult(
+                    connection, new SchemaDefinition(definition.formatVersion(), definition.dialect(),
+                            Map.of("accounts", new SchemaDefinition.TableDef(accounts.createSql(), handWritten,
+                                    accounts.indexes())), List.of()));
+            assertThat(declared.pendingSql()).isEmpty();
+            assertThat(declared.changed()).isFalse();
+        }
+        List<SchemaDefinition.ColumnDef> finer = accounts.columns().stream()
+                .map(column -> column.name().equals("created_at")
+                        ? new SchemaDefinition.ColumnDef("created_at", "TIMESTAMP(6)") : column)
+                .toList();
+        SchemaDefinition drifted = new SchemaDefinition(definition.formatVersion(), definition.dialect(),
+                Map.of("accounts", new SchemaDefinition.TableDef(accounts.createSql(), finer, accounts.indexes())),
+                List.of());
+        try (Connection connection = dataSource.getConnection()) {
+            SchemaSynchronizationResult result = reportingSynchronizer(dataSource, targetSchema)
+                    .synchronizeWithResult(connection, drifted);
+            assertThat(result.columnsAltered()).isZero();
+            assertThat(result.pendingSql()).anyMatch(sql -> sql.contains("ALTER COLUMN created_at TYPE TIMESTAMP(6)"));
+        }
     }
 
     @Test
@@ -128,13 +168,11 @@ class SchemaSynchronizerPostgresIntegrationTest {
         }
 
         Path definitionPath = tempDirectory.resolve("exclude-schema-definition.json");
-        assertThatThrownBy(() -> SchemaSnapshotWriter.main(new String[]{
-                System.getProperty("schema.test.jdbc.url"),
-                System.getProperty("schema.test.jdbc.user", ""),
-                System.getProperty("schema.test.jdbc.password", ""),
-                sourceSchema,
-                definitionPath.toString()
-        }))
+        assertThatThrownBy(() -> {
+            try (Connection connection = dataSource.getConnection()) {
+                SchemaSnapshotWriter.writeSnapshot(connection, sourceSchema, definitionPath);
+            }
+        })
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("EXCLUDE constraint")
                 .hasMessageContaining("ordered change set");

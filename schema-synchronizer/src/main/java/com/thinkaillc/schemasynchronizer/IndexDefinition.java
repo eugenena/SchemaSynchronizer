@@ -20,25 +20,36 @@ record IndexDefinition(String name, String schema, String table, String structur
             "(?i)\\(('(?:''|[^'])*')::text\\)::text");
 
     static IndexDefinition parse(String sql) {
+        return parse(sql, SqlIdentifiers.EXTENDED_MAX_LENGTH);
+    }
+
+    static IndexDefinition parse(String sql, int maxIdentifierLength) {
         Matcher matcher = CREATE_INDEX.matcher(sql == null ? "" : sql);
         if (!matcher.matches()) {
             throw new IllegalArgumentException("index definition must use unquoted PostgreSQL identifiers");
         }
         String unique = matcher.group(1) == null ? "" : "UNIQUE ";
-        String name = SqlIdentifiers.requireIdentifier(matcher.group(2), "index");
+        String name = SqlIdentifiers.requireIdentifier(matcher.group(2), "index", maxIdentifierLength);
         String schema = matcher.group(3) == null ? null
-                : SqlIdentifiers.requireIdentifier(matcher.group(3), "index schema");
-        String table = SqlIdentifiers.requireIdentifier(matcher.group(4), "index table");
+                : SqlIdentifiers.requireIdentifierPreservingCase(matcher.group(3), "index schema",
+                        maxIdentifierLength);
+        String table = SqlIdentifiers.requireIdentifier(matcher.group(4), "index table", maxIdentifierLength);
         String rawTail = matcher.group(5).trim();
         int whereOffset = findTopLevelWhere(rawTail);
         String rawStructure = whereOffset < 0 ? rawTail : rawTail.substring(0, whereOffset);
         String rawPredicate = whereOffset < 0 ? null : rawTail.substring(whereOffset + 5);
-        String structure = normalize(rawStructure.trim()
-                .replaceFirst("(?i)^USING\\s+BTREE\\s+", ""));
+        String structure = lowerOutsideLiterals(normalize(rawStructure.trim()
+                .replaceFirst("(?i)^USING\\s+BTREE\\s+", "")))
+                .replaceAll("\\s+asc(?=[,)])", "");
         String predicate = rawPredicate == null ? null : normalize(rawPredicate);
         String structural = "CREATE " + unique + "INDEX " + name + " ON " + table + " " + structure;
         String canonical = structural + (predicate == null ? "" : " WHERE " + predicate);
         return new IndexDefinition(name, schema, table, structural, predicate, canonical);
+    }
+
+    /** The part after {@code ON table}, e.g. {@code (a,b DESC)} or {@code USING gin(tags)}. */
+    String structure() {
+        return structuralSql.replaceFirst("^CREATE (?:UNIQUE )?INDEX \\S+ ON \\S+ ", "");
     }
 
     boolean hasSameStructure(IndexDefinition other) {
@@ -132,6 +143,26 @@ record IndexDefinition(String name, String schema, String table, String structur
             }
         }
         return -1;
+    }
+
+    private static String lowerOutsideLiterals(String sql) {
+        StringBuilder result = new StringBuilder(sql.length());
+        char quote = 0;
+        for (int index = 0; index < sql.length(); index++) {
+            char current = sql.charAt(index);
+            if (quote == 0 && (current == '\'' || current == '"')) {
+                quote = current;
+                result.append(current);
+            } else if (quote != 0) {
+                if (current == quote) {
+                    quote = 0;
+                }
+                result.append(current);
+            } else {
+                result.append(Character.toLowerCase(current));
+            }
+        }
+        return result.toString();
     }
 
     private static String normalize(String sql) {
