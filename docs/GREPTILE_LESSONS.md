@@ -1,5 +1,19 @@
 # Greptile lessons
 
+## 2026-09-27 — PR #14 — do not open a PR on a FIX-FIRST verdict
+
+- **Bug:** Greptile scored 2/5 for three findings the local Grok review had already reported:
+  `DEFAULT '…' COLLATE x` bypassing the charset check, the TIMESTAMP refusal firing for
+  `CREATE INDEX`/`INSERT`, and a predicate literal naming a column that was not added.
+- **Missed because:** The PR was opened while the last local verdict was FIX-FIRST, and the
+  first narrowing of the TIMESTAMP check dropped `DROP TABLE`/`RENAME TABLE` from the
+  statements it must still refuse.
+- **Prevention:** Open a PR only after the last local review returns SHIP. A narrowed match
+  keeps cells for every statement kind it must still catch
+  (`DialectDeclarationContractTest#changeSetsReferenceTimestampTablesByTokenOutsideLiterals`,
+  `#mySqlColumnClausesAfterTheDefaultFailValidation`,
+  `#indexesOnColumnsThatWereNotAddedAreRecognizedByToken`).
+
 ## 2026-09-27 — issue #13 — fail-closed checks must not block converged schemas
 
 - **Bug:** The `explicit_defaults_for_timestamp` refusal was checked in the preflight, but a

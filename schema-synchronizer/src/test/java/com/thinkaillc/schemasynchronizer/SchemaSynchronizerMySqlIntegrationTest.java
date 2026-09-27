@@ -441,7 +441,7 @@ class SchemaSynchronizerMySqlIntegrationTest {
                 "SELECT COUNT(*) = 1 FROM information_schema.tables "
                         + "WHERE table_schema = DATABASE() AND table_name = 'mysql_flag'");
         SchemaDefinition.ChangeSet touching = new SchemaDefinition.ChangeSet("002-strict-index", "indexes ts",
-                List.of("CREATE INDEX idx_strict_ts ON mysql_strict (ts)"),
+                List.of("ALTER TABLE mysql_strict ADD INDEX idx_strict_ts (ts)"),
                 "SELECT COUNT(*) = 1 FROM information_schema.statistics WHERE table_schema = DATABASE() "
                         + "AND table_name = 'mysql_strict' AND index_name = 'idx_strict_ts'");
         // A change set that does not name a TIMESTAMP table leaves a matching TIMESTAMP column alone.
