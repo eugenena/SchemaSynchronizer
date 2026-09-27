@@ -1,5 +1,41 @@
 # Changelog
 
+## Unreleased
+
+Review fixes that can change what an existing definition reports after upgrading:
+
+- **Fractional-second precision** is compared on every engine (`TIMESTAMP(3)` vs `(6)`,
+  `DATETIME(3)`, `DATETIME2(3)`, Oracle `WITH LOCAL TIME ZONE`). Snapshots from 1.4.0 that
+  wrote bare `TIMESTAMP`/`TIME`/`DATETIME` for a non-default precision now report pending;
+  re-snapshot.
+- **`BIT`** is its own fixed-length type (bare `BIT` = `BIT(1)`), no longer folded into
+  `BOOLEAN`; a `BIT`/`BOOLEAN` change or `BIT(n)` resize is pending. On MySQL/MariaDB,
+  `BOOLEAN` compares as `TINYINT` (what the server stores), including when Connector/J reports
+  `TINYINT(1)` as `BIT`; snapshots write those columns as `BOOLEAN`. Snapshots from 1.4.0 wrote
+  bare `BIT` for `BIT(n)` and `BIT` for MySQL `BOOLEAN` columns; re-snapshot. PostgreSQL
+  `BIT VARYING(n)` keeps its length, and `B'101'` defaults compare with the stored form.
+- **MySQL/MariaDB defaults** compare in the stored form, and only defaults the server stores
+  exactly are set automatically; expression defaults are pending. A MySQL string default
+  `'NULL'` is kept as a string. Binary defaults compare as bytes (a non-ASCII string literal
+  depends on the session character set and stays pending; declare it as `X'…'`), and MySQL snapshots write them
+  as `0x…` (1.4.0 wrote `'0x…'`, which does not replay; re-snapshot). Words such as `COLLATE` or
+  `COMMENT` inside a default literal no longer count as the clause when checking which column
+  attributes `MODIFY COLUMN` would reset, and neither do identifiers in an expression default
+  (`comment_count`). Binary literal defaults are read from `SHOW CREATE TABLE`, because
+  `information_schema` truncates them at a zero byte (MySQL) or replaces invalid bytes (MariaDB
+  before 11.8); when that read fails the column is pending. MariaDB defaults are read from `information_schema`
+  rather than the driver.
+- **MySQL/MariaDB `ON UPDATE`** is compared on every sync; adding, dropping, or changing it is
+  pending, and snapshots write it. Validation rejects an `ON UPDATE` other than
+  `CURRENT_TIMESTAMP` and its synonyms, on a column that is not `DATETIME`/`TIMESTAMP`, with a
+  different precision than the column, or on another engine.
+- **MySQL national types** (`NVARCHAR`, `NATIONAL VARCHAR`, …) report charset and collation
+  drift even when the type matches.
+- **`explicit_defaults_for_timestamp` OFF** (MariaDB before 10.10): a sync that would create,
+  add, or modify a `TIMESTAMP` column is refused before any DDL.
+- **MySQL Connector/J against MariaDB** is detected as `mariadb`; definitions declaring
+  `"dialect": "mysql"` for a MariaDB server must switch to `mariadb` (or re-snapshot).
+
 ## 1.4.0 — 2026-09-26
 
 Closes remaining enterprise-audit P2s and deferred least-privilege defaults

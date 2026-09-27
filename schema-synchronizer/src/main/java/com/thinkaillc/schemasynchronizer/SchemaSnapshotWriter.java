@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.Files;
@@ -18,6 +19,8 @@ import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -135,18 +138,37 @@ public class SchemaSnapshotWriter {
                 List<Map<String, Object>> pendingCols = new ArrayList<>();
                 Set<String> generatedDefaults = dialect == DatabaseDialect.MYSQL
                         ? mysqlGeneratedDefaultColumns(conn, tableName) : Set.of();
+                Map<String, Integer> datetimePrecisions = dialect.isMySqlFamily()
+                        ? mysqlDatetimePrecisions(conn, tableName) : Map.of();
+                Map<String, String> dataTypes = dialect.isMySqlFamily() ? mysqlDataTypes(conn, tableName) : Map.of();
+                Map<String, String> onUpdates = dialect.isMySqlFamily() ? mysqlOnUpdate(conn, tableName) : Map.of();
+                Map<String, String> mariaDbDefaults = dialect == DatabaseDialect.MARIADB
+                        ? mariaDbColumnDefaults(conn, tableName) : Map.of();
+                Map<String, String> binaryDefaults = dialect.isMySqlFamily()
+                        ? mysqlBinaryDefaults(conn, tableName, dialect == DatabaseDialect.MARIADB) : Map.of();
 
                 try (ResultSet cols = meta.getColumns(catalog, schemaPattern, metadataTable, "%")) {
                     while (cols.next()) {
                         // Oracle JDBC exposes COLUMN_DEF as LONG — read it before any other column.
                         String colDefault = cols.getString("COLUMN_DEF");
-                        String colName  = cols.getString("COLUMN_NAME").toLowerCase();
-                        String typeName = cols.getString("TYPE_NAME").toUpperCase();
+                        String colName  = cols.getString("COLUMN_NAME").toLowerCase(Locale.ROOT);
+                        if (mariaDbDefaults.containsKey(colName)) {
+                            colDefault = mariaDbDefaults.get(colName);
+                        }
+                        String typeName = cols.getString("TYPE_NAME").toUpperCase(Locale.ROOT);
+                        if (dialect.isMySqlFamily() && !typeName.startsWith("TINYINT")) {
+                            String stored = mysqlTypeName(typeName, dataTypes.get(colName));
+                            typeName = "TINYINT".equals(stored) ? "BOOLEAN" : stored;
+                        }
                         int size        = cols.getInt("COLUMN_SIZE");
                         int scale       = cols.getInt("DECIMAL_DIGITS");
                         boolean scaleNull = cols.wasNull();
+                        if (datetimePrecisions.containsKey(colName)) {
+                            scale = datetimePrecisions.get(colName);
+                            scaleNull = false;
+                        }
                         String nullable = "YES".equals(cols.getString("IS_NULLABLE")) ? "" : " NOT NULL";
-                        if (dialect != DatabaseDialect.POSTGRESQL && "NULL".equalsIgnoreCase(colDefault)) {
+                        if (SchemaSynchronizer.reportsNoDefaultAsNullText(dialect) && "NULL".equalsIgnoreCase(colDefault)) {
                             colDefault = null;
                         }
                         boolean autoInc = "YES".equalsIgnoreCase(cols.getString("IS_AUTOINCREMENT"));
@@ -160,6 +182,14 @@ public class SchemaSnapshotWriter {
                         if (dialect == DatabaseDialect.MYSQL) {
                             colDefault = mysqlLiteralDefault(colDefault, typeName,
                                     generatedDefaults.contains(colName));
+                        }
+                        if (binaryDefaults.containsKey(colName)) {
+                            colDefault = binaryDefaults.get(colName);
+                            if (UNREADABLE_BINARY_DEFAULT.equals(colDefault)) {
+                                throw new IllegalStateException("Cannot read the binary default of " + tableName
+                                        + "." + colName + " exactly (SHOW CREATE TABLE is denied or has an "
+                                        + "unexpected shape)");
+                            }
                         }
                         if (dialect == DatabaseDialect.ORACLE && colDefault != null
                                 && colDefault.toUpperCase(Locale.ROOT).contains("ISEQ$$")) {
@@ -185,7 +215,7 @@ public class SchemaSnapshotWriter {
 
                 try (ResultSet pk = meta.getPrimaryKeys(catalog, schemaPattern, metadataTable)) {
                     while (pk.next()) {
-                        pkCols.add(pk.getString("COLUMN_NAME").toLowerCase());
+                        pkCols.add(pk.getString("COLUMN_NAME").toLowerCase(Locale.ROOT));
                     }
                 }
 
@@ -200,7 +230,9 @@ public class SchemaSnapshotWriter {
                     boolean autoInc = Boolean.TRUE.equals(pending.get("autoInc"));
                     boolean isPk = pkCols.contains(colName);
 
-                    String colDef = buildDefinition(typeName, size, scale, nullable, colDefault, autoInc, dialect);
+                    String onUpdate = onUpdates.containsKey(colName) ? " ON UPDATE " + onUpdates.get(colName) : "";
+                    String colDef = buildDefinition(typeName, size, scale, nullable, colDefault, autoInc, dialect)
+                            + onUpdate;
 
                     Map<String, String> col = new LinkedHashMap<>();
                     col.put("name", colName);
@@ -210,7 +242,7 @@ public class SchemaSnapshotWriter {
                     Map<String, String> rawCol = new LinkedHashMap<>();
                     rawCol.put("name", colName);
                     rawCol.put("type", buildCreateType(
-                            typeName, size, scale, nullable, colDefault, autoInc, isPk, dialect));
+                            typeName, size, scale, nullable, colDefault, autoInc, isPk, dialect) + onUpdate);
                     rawColumns.add(rawCol);
                 }
 
@@ -478,21 +510,308 @@ public class SchemaSnapshotWriter {
         return names;
     }
 
+    private static final java.util.regex.Pattern MYSQL_EXTRA_ON_UPDATE = java.util.regex.Pattern.compile(
+            "(?i)\\bon update ([a-z_]+(?:\\(\\d*\\))?)");
+
+    /** MySQL/MariaDB ON UPDATE expression by column, from information_schema EXTRA ({@code CURRENT_TIMESTAMP(3)}). */
+    static Map<String, String> mysqlOnUpdate(Connection conn, String tableName) throws SQLException {
+        Map<String, String> onUpdates = new HashMap<>();
+        try (var statement = conn.prepareStatement("SELECT column_name, extra FROM information_schema.columns "
+                + "WHERE table_schema = DATABASE() AND table_name = ? AND LOWER(extra) LIKE '%on update%'")) {
+            statement.setString(1, tableName);
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    java.util.regex.Matcher onUpdate = MYSQL_EXTRA_ON_UPDATE.matcher(rows.getString(2));
+                    if (onUpdate.find()) {
+                        onUpdates.put(rows.getString(1).toLowerCase(Locale.ROOT),
+                                onUpdate.group(1).toUpperCase(Locale.ROOT));
+                    }
+                }
+            }
+        }
+        return onUpdates;
+    }
+
+    /**
+     * MariaDB information_schema COLUMN_DEFAULT by column: literals quoted, expressions bare,
+     * {@code NULL} for none. MySQL Connector/J reports MariaDB defaults unquoted, so the
+     * driver's COLUMN_DEF is not used.
+     */
+    static Map<String, String> mariaDbColumnDefaults(Connection conn, String tableName) throws SQLException {
+        Map<String, String> defaults = new HashMap<>();
+        try (var statement = conn.prepareStatement("SELECT column_name, column_default "
+                + "FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ?")) {
+            statement.setString(1, tableName);
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    defaults.put(rows.getString(1).toLowerCase(Locale.ROOT), rows.getString(2));
+                }
+            }
+        }
+        return defaults;
+    }
+
+    /** MySQL/MariaDB information_schema COLUMN_TYPE by column (lower case, e.g. {@code tinyint(1) unsigned}). */
+    static Map<String, String> mysqlDataTypes(Connection conn, String tableName) throws SQLException {
+        Map<String, String> types = new HashMap<>();
+        try (var statement = conn.prepareStatement("SELECT column_name, column_type "
+                + "FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ?")) {
+            statement.setString(1, tableName);
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    types.put(rows.getString(1).toLowerCase(Locale.ROOT), rows.getString(2).toLowerCase(Locale.ROOT));
+                }
+            }
+        }
+        return types;
+    }
+
+    /**
+     * Connector/J reports TINYINT(1) as BIT and MariaDB Connector/J reports TINYINT(1) [UNSIGNED [ZEROFILL]]
+     * as BOOLEAN; MySQL BOOLEAN is signed TINYINT(1). Returns the column type the server stores for
+     * those, otherwise the driver's TYPE_NAME.
+     */
+    static String mysqlTypeName(String typeName, String columnType) {
+        String normalized = ColumnDefinitionParser.normalizeType(typeName);
+        if ((!"BIT".equals(normalized) && !"BOOLEAN".equals(normalized)) || columnType == null
+                || !columnType.startsWith("tinyint")) {
+            return typeName;
+        }
+        String attributes = columnType.replaceFirst("^tinyint(?:\\(\\d+\\))?", "").trim().toUpperCase(Locale.ROOT);
+        return attributes.isEmpty() ? "TINYINT" : "TINYINT " + attributes;
+    }
+
+    /**
+     * MySQL/MariaDB fractional-second precision by column. Connector/J and MariaDB Connector/J
+     * report DECIMAL_DIGITS as null for DATETIME/TIMESTAMP/TIME.
+     */
+    static Map<String, Integer> mysqlDatetimePrecisions(Connection conn, String tableName) throws SQLException {
+        Map<String, Integer> precisions = new HashMap<>();
+        try (var statement = conn.prepareStatement("SELECT column_name, datetime_precision "
+                + "FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? "
+                + "AND datetime_precision IS NOT NULL")) {
+            statement.setString(1, tableName);
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    precisions.put(rows.getString(1).toLowerCase(Locale.ROOT), rows.getInt(2));
+                }
+            }
+        }
+        return precisions;
+    }
+
     /**
      * MySQL reports literal defaults unquoted ({@code new}, {@code 2020-01-01}); quote non-numeric
      * literals so they compare with declarations and replay as valid SQL.
      */
     static String mysqlLiteralDefault(String columnDefault, String typeName, boolean generated) {
-        if (columnDefault == null || generated || columnDefault.startsWith("'")
-                || columnDefault.matches("(?i)CURRENT_TIMESTAMP(?:\\(\\d*\\))?")) {
-            return columnDefault;
+        if (columnDefault == null) {
+            return null;
         }
         String baseType = typeName.toUpperCase(Locale.ROOT).replaceAll("\\s+UNSIGNED.*$", "")
                 .replaceAll("\\(.*$", "").trim();
+        // Servers that do not flag DEFAULT_GENERATED still report CURRENT_TIMESTAMP on temporal columns;
+        // on any other type it is the literal text 'CURRENT_TIMESTAMP'.
+        boolean temporal = baseType.equals("DATETIME") || baseType.equals("TIMESTAMP");
+        if (temporal && columnDefault.matches("(?i)CURRENT_TIMESTAMP(?:\\(\\d*\\))?")) {
+            return columnDefault;
+        }
+        if (generated) {
+            // MySQL requires parentheses around expression defaults and reports them escaped one level (\' and \\).
+            String expression = doubleEscapedQuotes(unescapeOneLevel(columnDefault)).trim();
+            boolean wrapped = !ColumnDefinitionParser.stripOuterParentheses(expression).equals(expression);
+            return wrapped ? expression : "(" + expression + ")";
+        }
+        if (columnDefault.startsWith("'")) {
+            return columnDefault;
+        }
         if (MYSQL_NUMERIC_TYPES.contains(baseType)) {
             return columnDefault;
         }
+        // MySQL reports binary literal defaults as hex (0x6162), which is itself a valid literal.
+        if ((baseType.equals("BINARY") || baseType.equals("VARBINARY")) && columnDefault.matches("0x[0-9A-Fa-f]*")) {
+            return columnDefault.length() == 2 ? "''" : columnDefault;
+        }
         return "'" + columnDefault.replace("\\", "\\\\").replace("'", "''") + "'";
+    }
+
+    /**
+     * Literal BINARY/VARBINARY defaults by column as {@code 0x…}, read from SHOW CREATE TABLE:
+     * information_schema truncates them at the first zero byte (MySQL) or replaces invalid bytes
+     * with {@code ?} (MariaDB before 11.8), and {@code DEFAULT(col)} needs a row, so it answers
+     * NULL for NOT NULL columns of an empty table. Expression defaults are left to COLUMN_DEFAULT.
+     */
+    static Map<String, String> mysqlBinaryDefaults(Connection conn, String tableName, boolean mariaDb)
+            throws SQLException {
+        List<String> literalColumns = new ArrayList<>();
+        try (var statement = conn.prepareStatement("SELECT column_name, column_default, extra "
+                + "FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? "
+                + "AND data_type IN ('binary', 'varbinary') AND column_default IS NOT NULL")) {
+            statement.setString(1, tableName);
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    String columnDefault = rows.getString(2);
+                    String extra = rows.getString(3) == null ? "" : rows.getString(3);
+                    boolean literal = mariaDb
+                            ? columnDefault.startsWith("'") || columnDefault.matches("(?i)x'[0-9a-f]*'")
+                            : !extra.toUpperCase(Locale.ROOT).contains("DEFAULT_GENERATED");
+                    if (literal) {
+                        literalColumns.add(rows.getString(1));
+                    }
+                }
+            }
+        }
+        Map<String, String> defaults = new HashMap<>();
+        if (literalColumns.isEmpty()) {
+            return defaults;
+        }
+        byte[] createTable;
+        try {
+            createTable = mysqlCreateTableBytes(conn, tableName);
+        } catch (SQLException denied) {
+            return unreadableBinaryDefaults(literalColumns, denied);
+        }
+        for (String column : literalColumns) {
+            String exact = binaryDefaultInCreateTable(createTable, column);
+            defaults.put(column.toLowerCase(Locale.ROOT), exact == null ? UNREADABLE_BINARY_DEFAULT : exact);
+        }
+        return defaults;
+    }
+
+    /**
+     * SHOW CREATE TABLE with character_set_results=binary, the one server rendering that keeps
+     * binary default bytes exactly on MySQL 8 and every MariaDB version; the session setting is
+     * restored afterwards.
+     */
+    private static byte[] mysqlCreateTableBytes(Connection conn, String tableName) throws SQLException {
+        String saved;
+        try (var statement = conn.createStatement();
+             ResultSet rows = statement.executeQuery("SELECT @@SESSION.character_set_results")) {
+            rows.next();
+            saved = rows.getString(1);
+        }
+        try (var statement = conn.createStatement()) {
+            statement.execute("SET SESSION character_set_results = binary");
+            try (ResultSet rows = statement.executeQuery("SHOW CREATE TABLE " + backtickQuoted(tableName))) {
+                if (!rows.next()) {
+                    throw new SQLException("SHOW CREATE TABLE returned no row for " + tableName);
+                }
+                return rows.getBytes(2);
+            } finally {
+                statement.execute("SET SESSION character_set_results = "
+                        + (saved == null ? "NULL" : "'" + saved.replace("'", "''") + "'"));
+            }
+        }
+    }
+
+    private static final Pattern CREATE_TABLE_BINARY_DEFAULT = Pattern.compile(
+            "(?i)^\\s+(?:var)?binary\\(\\d+\\)(?:\\s+(?:NOT\\s+)?NULL)?\\s+DEFAULT\\s+(?:_binary\\s*)?"
+                    + "(0x[0-9A-F]+|x'[0-9A-F]*'|'(?:[^'\\\\]|''|\\\\.)*')");
+
+    /**
+     * The default of a BINARY/VARBINARY column in raw SHOW CREATE TABLE bytes as {@code 0x…}
+     * (or {@code ''}), or null when the column line does not have that shape.
+     */
+    static String binaryDefaultInCreateTable(byte[] createTable, String column) {
+        String ddl = new String(createTable, StandardCharsets.ISO_8859_1);
+        String name = new String(column.getBytes(StandardCharsets.UTF_8), StandardCharsets.ISO_8859_1);
+        String[] prefixes = {"`" + name.replace("`", "``") + "`", "\"" + name.replace("\"", "\"\"") + "\"", name};
+        for (String line : ddl.split("\n")) {
+            String trimmed = line.stripLeading();
+            for (String prefix : prefixes) {
+                if (trimmed.startsWith(prefix + " ")) {
+                    Matcher literal = CREATE_TABLE_BINARY_DEFAULT.matcher(trimmed.substring(prefix.length()));
+                    if (literal.find()) {
+                        return binaryLiteralHex(literal.group(1));
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    private static String binaryLiteralHex(String literal) {
+        StringBuilder hex = new StringBuilder();
+        if (literal.startsWith("0x") || literal.startsWith("0X")) {
+            hex.append(literal.substring(2));
+        } else if (literal.charAt(0) == 'x' || literal.charAt(0) == 'X') {
+            hex.append(literal, 2, literal.length() - 1);
+        } else {
+            String body = literal.substring(1, literal.length() - 1);
+            for (int index = 0; index < body.length(); index++) {
+                char current = body.charAt(index);
+                if (current == '\'') {
+                    index++;
+                } else if (current == '\\') {
+                    index++;
+                    current = switch (body.charAt(index)) {
+                        case '0' -> 0;
+                        case 'b' -> '\b';
+                        case 'n' -> '\n';
+                        case 'r' -> '\r';
+                        case 't' -> '\t';
+                        case 'Z' -> 0x1A;
+                        default -> body.charAt(index);
+                    };
+                }
+                hex.append(String.format("%02X", (int) current & 0xFF));
+            }
+        }
+        return hex.isEmpty() ? "''" : "0x" + hex.toString().toUpperCase(Locale.ROOT);
+    }
+
+    /** Never equal to a declared default: the column stays pending and a snapshot refuses to write it. */
+    static final String UNREADABLE_BINARY_DEFAULT = "<binary default not readable exactly>";
+
+    /** A sync user without any privilege on the table (MySQL errors 1142/1143) cannot read its DDL. */
+    static Map<String, String> unreadableBinaryDefaults(List<String> columns, SQLException failure)
+            throws SQLException {
+        if (failure.getErrorCode() != 1142 && failure.getErrorCode() != 1143) {
+            throw failure;
+        }
+        Map<String, String> unreadable = new HashMap<>();
+        for (String column : columns) {
+            unreadable.put(column.toLowerCase(Locale.ROOT), UNREADABLE_BINARY_DEFAULT);
+        }
+        return unreadable;
+    }
+
+    private static String backtickQuoted(String identifier) {
+        return "`" + identifier.replace("`", "``") + "`";
+    }
+
+    static String unescapeOneLevel(String text) {
+        StringBuilder result = new StringBuilder(text.length());
+        for (int index = 0; index < text.length(); index++) {
+            char current = text.charAt(index);
+            if (current == '\\' && index + 1 < text.length()) {
+                current = text.charAt(++index);
+            }
+            result.append(current);
+        }
+        return result.toString();
+    }
+
+    /** Rewrites {@code \'} inside string literals as {@code ''}, which every SQL mode reads the same way. */
+    static String doubleEscapedQuotes(String sql) {
+        StringBuilder result = new StringBuilder(sql.length());
+        boolean quoted = false;
+        for (int index = 0; index < sql.length(); index++) {
+            char current = sql.charAt(index);
+            if (quoted && current == '\\' && index + 1 < sql.length()) {
+                char next = sql.charAt(++index);
+                result.append(next == '\'' ? "''" : "\\" + next);
+            } else if (quoted && current == '\'' && index + 1 < sql.length() && sql.charAt(index + 1) == '\'') {
+                result.append("''");
+                index++;
+            } else {
+                if (current == '\'') {
+                    quoted = !quoted;
+                }
+                result.append(current);
+            }
+        }
+        return result.toString();
     }
 
     static String portablePostgresIndex(String indexDefinition) {
@@ -620,6 +939,8 @@ public class SchemaSnapshotWriter {
             case "CHAR", "CHARACTER", "BPCHAR" -> sized("CHAR", size);
             case "NCHAR" -> sized("NCHAR", size);
             case "BINARY" -> sized("BINARY", size);
+            case "BIT" -> dialect == DatabaseDialect.SQLSERVER ? "BIT" : sized("BIT", size);
+            case "VARBIT" -> size > 0 && size < Integer.MAX_VALUE ? "VARBIT(" + size + ")" : "VARBIT";
             case "RAW" -> sized("RAW", size);
             // Oracle NUMBER without precision is unbounded; ANSI NUMERIC there means NUMBER(38,0).
             case "NUMERIC", "DECIMAL", "NUMBER" -> dialect == DatabaseDialect.ORACLE && size <= 0
@@ -631,8 +952,12 @@ public class SchemaSnapshotWriter {
                     ? typeName + "(" + scale + ")" : typeName;
             case "TIME" -> (dialect == DatabaseDialect.SQLSERVER && scale != null)
                     || (dialect.isMySqlFamily() && scale != null && scale > 0)
+                    || (dialect == DatabaseDialect.POSTGRESQL && scale != null && scale != 6)
                     ? typeName + "(" + scale + ")" : typeName;
-            case "DATETIME", "TIMESTAMP" -> dialect.isMySqlFamily() && scale != null && scale > 0
+            case "DATETIME", "TIMESTAMP" -> (dialect.isMySqlFamily() && scale != null && scale > 0)
+                    || (dialect == DatabaseDialect.POSTGRESQL && scale != null && scale != 6)
+                    ? typeName + "(" + scale + ")" : typeName;
+            case "TIMESTAMPTZ", "TIMETZ" -> dialect == DatabaseDialect.POSTGRESQL && scale != null && scale != 6
                     ? typeName + "(" + scale + ")" : typeName;
             default -> typeName;
         };

@@ -41,18 +41,68 @@ ascending indexes there or the live index will not match the declaration.
 - Dry run: statements and verification are not executed; live apply may still commit DDL
 - Identifiers: unquoted lower-case, up to 64 characters (MariaDB as well)
 - Defaults: MySQL reports literal defaults unquoted; SchemaSynchronizer quotes non-numeric
-  literals and leaves expression defaults (`DEFAULT_GENERATED`, e.g. `CURRENT_TIMESTAMP`,
-  `(uuid())`) as written
+  literals. Expression defaults (`DEFAULT_GENERATED`) are read in the server's canonical form,
+  wrapped in parentheses (`(uuid())`, `(concat(_utf8mb4'a',_utf8mb4'b'))`); `CURRENT_TIMESTAMP`
+  on `DATETIME`/`TIMESTAMP` stays bare. MySQL rewrites expressions (charset introducers,
+  spacing), so declare them as a snapshot writes them; quotes inside literals are written doubled
+  (`'it''s'`), never backslash-escaped. Defaults compare in the form the server stores them:
+  `NOW(n)`, `LOCALTIMESTAMP` and `CURRENT_TIMESTAMP(0)` fold to `CURRENT_TIMESTAMP[(n)]`, numeric
+  and bit defaults compare by value (`1` = `1.00`, `FALSE` = `0`, `1` = `b'1'`), and zero
+  fraction digits in date/time literals are ignored. A default is set automatically only when
+  the server stores it exactly for the column: a whole number on an integer type, a number with
+  no more fraction digits than a `DECIMAL` scale, `'YYYY-MM-DD'` on `DATE`,
+  `'YYYY-MM-DD hh:mm:ss[.f]'` on `DATETIME`, `'hh:mm:ss[.f]'` on `TIME`, or
+  `CURRENT_TIMESTAMP[(n)]` on `DATETIME`/`TIMESTAMP`, within the column's fractional precision,
+  or a quoted string without backslashes or trailing spaces on a character type. Any other
+  default change (expressions, `TIMESTAMP` literals, which depend on the session time zone,
+  `BIT`, `YEAR`, `FLOAT`/`DOUBLE`, `ENUM`, binary types) is reported as pending. Binary defaults
+  compare as bytes: `'ab'`, `X'6162'`, and `0x6162` are equal, zero-padded to the length of a
+  `BINARY(n)`. A string literal with non-ASCII characters is stored in the session's client
+  character set, so it never compares equal; declare such defaults as `X'…'`. `information_schema` reports them lossily (MySQL stops at the first zero byte;
+  MariaDB before 11.8 replaces invalid bytes with `?`), so literal binary defaults are read from
+  `SHOW CREATE TABLE` with `character_set_results=binary` (restored afterwards), and snapshots
+  write them as `0x…`. If that output is denied or has an unexpected shape, the column is
+  pending and a snapshot refuses to write it. A string default with a control
+  character is never set automatically. `ON UPDATE CURRENT_TIMESTAMP[(n)]` (or a synonym) is
+  accepted only on a `DATETIME`/`TIMESTAMP` column of the same precision and is rejected on other
+  engines; it is compared on every sync, any difference (added, dropped, or a different
+  precision) is pending, and snapshots write it. Dropping a default is applied, subject to the
+  `TIMESTAMP` refusal below.
+- `TIMESTAMP` columns: when `explicit_defaults_for_timestamp` is OFF (the MariaDB default before
+  10.10), `CREATE`, `ADD`, and `MODIFY` give a `TIMESTAMP` an undeclared `NOT NULL` and
+  `DEFAULT`/`ON UPDATE CURRENT_TIMESTAMP`. A sync that would create, add, or modify a
+  `TIMESTAMP` column is refused before any DDL. Enable the setting in the server configuration,
+  or with `sessionVariables=explicit_defaults_for_timestamp=1` where the server accepts a session
+  value (MySQL 8, MariaDB 10.5.17+/10.6.9+). Reviewed change sets are not checked. A MySQL string
+  default `'NULL'` is kept as a string, distinct from no default. MySQL Connector/J connected
+  to MariaDB is detected as MariaDB from the server version; MariaDB defaults are read from
+  `information_schema`, because that driver reports them unquoted.
 - Column changes (MySQL and MariaDB): changes are applied with
   `MODIFY COLUMN <declared definition>`, which replaces the whole column. When that would
   silently reset something the declaration does not repeat, the change is reported as
   pending instead: a collation that differs from the table default, `ON UPDATE`,
-  `AUTO_INCREMENT`, `INVISIBLE`, a column `COMMENT`, a generated column, or `NVARCHAR`/`NCHAR`
-  declared on a column whose character set is not `utf8mb3`. `NVARCHAR`/`NCHAR` compare as
-  `VARCHAR`/`CHAR`.
+  `AUTO_INCREMENT`, `INVISIBLE`, a column `COMMENT`, or a generated column.
+- National types (MySQL and MariaDB): `NVARCHAR`/`NCHAR` compare as `VARCHAR`/`CHAR` by length,
+  and additionally require the live column to use `utf8mb3` with that character set's default
+  collation. Any other character set or collation is reported as pending even when the length
+  already matches. On MariaDB 11.2+ the utf8mb3 default can be changed per session
+  (`character_set_collations`); declare plain `VARCHAR`/`CHAR` if sessions differ.
+- Character set and collation of non-national columns are not part of the declaration model:
+  they are not compared, and a column whose collation differs from the table default is never
+  modified automatically (the change is reported as pending instead).
 - Types (all dialects): `NCHAR` and `CHAR`, and `BINARY` and `VARBINARY`, are distinct;
   converting between them, or resizing `BINARY`, is always pending. `CHAR`, `NCHAR`, and
   `BINARY` without a length mean length 1.
+- Fractional-second precision (all dialects): `TIMESTAMP(n)`, `TIMESTAMP(n) WITH [LOCAL] TIME ZONE`,
+  `TIME(n)`, `DATETIME(n)`, `DATETIME2(n)`, and `DATETIMEOFFSET(n)` compare by precision. A
+  declaration without `(n)` means the engine default: 6 on PostgreSQL and Oracle, 0 on MySQL and
+  MariaDB, 7 on SQL Server. Any precision change is pending (a decrease rounds stored values).
+  Validation rejects a precision above the engine maximum (6 on PostgreSQL, MySQL, and MariaDB;
+  7 on SQL Server; 9 on Oracle) and a precision on a type that takes none (for example SQL Server
+  `DATETIME(3)`) before any DDL runs.
+  SQL Server legacy `DATETIME` has no precision and is not compared. Oracle
+  `TIMESTAMP WITH LOCAL TIME ZONE` and `TIMESTAMP WITH TIME ZONE` are distinct types.
+  Snapshots record non-default precision.
 
 The MySQL dialect is also compatibility-tested against Percona Server 8.4 and TiDB
 8.5 LTS. This covers SchemaSynchronizer's documented schema model, not every vendor

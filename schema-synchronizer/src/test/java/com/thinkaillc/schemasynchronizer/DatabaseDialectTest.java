@@ -26,6 +26,13 @@ class DatabaseDialectTest {
         assertThat(DatabaseDialect.detect(metadata)).isEqualTo(DatabaseDialect.MARIADB);
 
         when(metadata.getDatabaseProductName()).thenReturn("MySQL");
+        when(metadata.getDatabaseProductVersion()).thenReturn("8.4.3");
+        assertThat(DatabaseDialect.detect(metadata)).isEqualTo(DatabaseDialect.MYSQL);
+
+        // MySQL Connector/J connected to a MariaDB server.
+        when(metadata.getDatabaseProductVersion()).thenReturn("10.11.9-MariaDB-ubu2204");
+        assertThat(DatabaseDialect.detect(metadata)).isEqualTo(DatabaseDialect.MARIADB);
+        when(metadata.getDatabaseProductVersion()).thenReturn(null);
         assertThat(DatabaseDialect.detect(metadata)).isEqualTo(DatabaseDialect.MYSQL);
 
         when(metadata.getDatabaseProductName()).thenReturn("Microsoft SQL Server");

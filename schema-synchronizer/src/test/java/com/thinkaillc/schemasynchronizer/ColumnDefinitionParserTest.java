@@ -119,8 +119,11 @@ class ColumnDefinitionParserTest {
         assertThat(tstz.baseType()).isEqualTo("TIMESTAMPTZ");
         assertThat(tstz.notNull()).isTrue();
 
+        assertThat(tstz.length()).isEqualTo(6);
+
         var local = ColumnDefinitionParser.parse("TIMESTAMP WITH LOCAL TIME ZONE");
-        assertThat(local.baseType()).isEqualTo("TIMESTAMPTZ");
+        assertThat(local.baseType()).isEqualTo("TIMESTAMPLTZ");
+        assertThat(local.length()).isNull();
         assertThat(local.notNull()).isFalse();
     }
 
