@@ -10,6 +10,11 @@ schema definition. It applies additive and otherwise safe changes automatically,
 while returning destructive or ambiguous changes as SQL for a human operator to
 review.
 
+The project and repository are named **SchemaSynchronizer**; the published Maven
+artifacts are `com.thinkaillc:schema-synchronizer` (library) and
+`com.thinkaillc:schema-synchronizer-cli` (command-line tools), and the Java package is
+`com.thinkaillc.schemasynchronizer`.
+
 Use it as:
 
 - two command-line utilities that serialize a source schema and synchronize a target
