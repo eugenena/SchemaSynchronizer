@@ -14,6 +14,7 @@ import java.util.regex.Pattern;
  * <pre>
  * backend     quoted form   unquoted names       catalog stores         names compare
  * PostgreSQL  "x"           fold to lower case   exact spelling         case-sensitively
+ * H2          "X"           fold to upper case   exact spelling         case-sensitively
  * Oracle      "X"           fold to upper case   exact spelling         case-sensitively
  * MySQL       `x`           kept as written      tables: as written or  tables: by lower_case_table_names
  * MariaDB     `x`           kept as written        lower (l_c_t_n=1)    (0 = sensitive); columns/indexes:
@@ -64,7 +65,8 @@ final class SqlIdentifiers {
     /** Catalog spelling of a declared identifier: what 1.x's unquoted DDL produced. */
     static String storedForm(DatabaseDialect dialect, String declared) {
         String valid = requireIdentifierPreservingCase(declared, "identifier", Integer.MAX_VALUE);
-        return dialect == DatabaseDialect.ORACLE ? valid.toUpperCase(Locale.ROOT) : valid.toLowerCase(Locale.ROOT);
+        return dialect == DatabaseDialect.ORACLE || dialect == DatabaseDialect.H2
+                ? valid.toUpperCase(Locale.ROOT) : valid.toLowerCase(Locale.ROOT);
     }
 
     /**
@@ -98,7 +100,7 @@ final class SqlIdentifiers {
         return switch (dialect) {
             case MYSQL, MARIADB -> "`" + name.replace("`", "``") + "`";
             case SQLSERVER -> "[" + name.replace("]", "]]") + "]";
-            case POSTGRESQL, ORACLE -> "\"" + name.replace("\"", "\"\"") + "\"";
+            case POSTGRESQL, H2, ORACLE -> "\"" + name.replace("\"", "\"\"") + "\"";
         };
     }
 
@@ -168,7 +170,7 @@ final class SqlIdentifiers {
         return switch (dialect) {
             case MYSQL, MARIADB -> '`';
             case SQLSERVER -> '[';
-            case POSTGRESQL, ORACLE -> '"';
+            case POSTGRESQL, H2, ORACLE -> '"';
         };
     }
 

@@ -10,8 +10,8 @@ working commands (plus `help` / `--help` / `-h` and `version` / `--version` / `-
   against a disposable instance.
 - `sync` applies a definition to a target and reports manual work.
 
-The JAR requires Java 17 or later and includes PostgreSQL, MariaDB, MySQL, SQL Server, and
-Oracle JDBC drivers.
+The JAR requires Java 17 or later and includes PostgreSQL, MariaDB, MySQL, SQL Server, Oracle,
+and H2 JDBC drivers.
 
 Connect as a schema-scoped, least-privilege database account, never a superuser, `sa`,
 `root`, or `SYSTEM`: the change-set SQL checks catch mistakes, they are not a security
@@ -28,6 +28,7 @@ The executable JAR bundles third-party code, so it is distributed under several 
 | MySQL Connector/J | GPLv2 with the Universal FOSS Exception |
 | MariaDB Connector/J | LGPL-2.1-or-later |
 | Oracle JDBC (`ojdbc11`) | Oracle Free Use Terms and Conditions |
+| H2 | MPL-2.0 or EPL-1.0 |
 | PostgreSQL JDBC | BSD-2-Clause |
 | Microsoft JDBC Driver for SQL Server | MIT |
 | Protocol Buffers (used by Connector/J) | BSD-3-Clause |

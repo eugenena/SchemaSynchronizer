@@ -22,19 +22,9 @@ Until then, create these objects outside SchemaSynchronizer, for example with yo
 database provisioning or a migration tool run by a privileged role, and reference them
 from change sets and verification SQL as needed.
 
-## Adoption gaps found by LedgerPulse
+## LedgerPulse adoption
 
-These two gaps block replacing Flyway in Spring Boot 4 applications whose tests use H2.
-LedgerPulse stays on Flyway until both are fixed in this library.
-
-1. **Spring Boot 4 auto-configuration does not load.** 2.0.0 is built against Spring Boot 3.5.16.
-   `SchemaSynchronizerAutoConfiguration` names
-   `org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration` and
-   `org.springframework.boot.autoconfigure.orm.jpa.HibernateJpaAutoConfiguration`.
-   Boot 4 moved those classes to
-   `org.springframework.boot.jdbc.autoconfigure.DataSourceAutoConfiguration` and
-   `org.springframework.boot.hibernate.autoconfigure.HibernateJpaAutoConfiguration`.
-   Spring fails while loading the auto-configuration, before any schema comparison.
-2. **No H2 dialect.** LedgerPulse tests apply schema on H2. A definition is still not a
-   cross-engine translation: an H2 dialect must emit H2 SQL, and PostgreSQL definitions
-   stay on PostgreSQL.
+Spring Boot 3 and 4 are both supported through version-specific integration artifacts; the
+shared Java API and schema definition format are the same. H2 is supported for local/test use
+through its own dialect, with native H2 SQL. Its DDL commits implicitly, so synchronization
+requires an auto-commit connection and an administrator connection for the database-wide lock.

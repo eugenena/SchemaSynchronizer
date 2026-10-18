@@ -29,6 +29,8 @@ upstream_url() {
       echo "https://raw.githubusercontent.com/microsoft/mssql-jdbc/v${version%%.jre*}/LICENSE" ;;
     protobuf-java)
       echo "https://raw.githubusercontent.com/protocolbuffers/protobuf/v${version#*.}/LICENSE" ;;
+    h2)
+      echo "https://h2database.com/html/license.html" ;;
     *) echo "" ;;
   esac
 }
@@ -36,7 +38,6 @@ upstream_url() {
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-find "$DEST" -mindepth 1 -maxdepth 1 -type d -exec rm -rf {} + 2>/dev/null || true
 mkdir -p "$DEST"
 
 grep -oE '\([A-Za-z0-9_.-]+:[A-Za-z0-9_.-]+:[^ )]+ - ' "$LISTING" \

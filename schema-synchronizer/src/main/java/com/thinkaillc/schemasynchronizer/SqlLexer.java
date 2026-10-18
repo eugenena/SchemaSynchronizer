@@ -29,7 +29,7 @@ final class SqlLexer {
 
     static Mode mode(DatabaseDialect dialect) {
         return switch (dialect) {
-            case POSTGRESQL -> Mode.POSTGRES;
+            case POSTGRESQL, H2 -> Mode.POSTGRES;
             case ORACLE -> Mode.ORACLE;
             case SQLSERVER -> Mode.SQLSERVER;
             case MYSQL, MARIADB -> Mode.MYSQL;

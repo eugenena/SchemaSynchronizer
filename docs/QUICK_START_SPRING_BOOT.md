@@ -1,14 +1,18 @@
 # Five-minute Spring Boot quick start
 
-This guide adds SchemaSynchronizer 2.0.0 to an existing Spring Boot application.
-It requires Java 17 or later, a configured JDBC `DataSource`, and PostgreSQL 16+, MariaDB
-10.3+, MySQL 8.0+, SQL Server 2019+, or Oracle 19c+ (CI tests Oracle XE 21c).
+This guide adds SchemaSynchronizer 2.0.0 to an existing Spring Boot 3 or 4 application.
+It requires Java 17 or later and a configured JDBC `DataSource`. Supported engines are
+PostgreSQL 16+, MariaDB 10.3+, MySQL 8.0+, SQL Server 2019+, Oracle 19c+ (CI tests Oracle XE 21c),
+and H2 2.5+ for local/test use. See [Database dialects](DATABASE_DIALECTS.md) for engine-specific
+limits; H2 is not a substitute for testing against the production database engine.
 
 The `DataSource` must connect as a schema-scoped, least-privilege account, never a
 superuser, `sa`, `root`, or `SYSTEM`; see
 [Least-privilege database account](OPERATIONS.md#least-privilege-database-account-required).
 
-## 1. Add the dependency
+## 1. Add the matching dependency
+
+For Spring Boot 3, use the original integration artifact:
 
 ```xml
 <dependency>
@@ -17,6 +21,19 @@ superuser, `sa`, `root`, or `SYSTEM`; see
   <version>2.0.0</version>
 </dependency>
 ```
+
+For Spring Boot 4, use the Boot 4 adapter (it brings in the shared library):
+
+```xml
+<dependency>
+  <groupId>com.thinkaillc</groupId>
+  <artifactId>schema-synchronizer-spring-boot4</artifactId>
+  <version>2.0.0</version>
+</dependency>
+```
+
+Do not add both adapters to one application. The same properties and definition format work
+with either major version.
 
 The artifact is published on Maven Central; no additional repository is required.
 
@@ -46,7 +63,8 @@ one table and one index:
 ```
 
 For MariaDB use `"dialect": "mariadb"`; for MySQL `"dialect": "mysql"`; for SQL Server
-`"dialect": "sqlserver"`; for Oracle `"dialect": "oracle"`. SQL inside a definition must use the selected database's
+`"dialect": "sqlserver"`; for Oracle `"dialect": "oracle"`; for H2 `"dialect": "h2"`.
+SQL inside a definition must use the selected database's
 native syntax. Definitions are not cross-database SQL translations.
 
 ## 3. Configure startup

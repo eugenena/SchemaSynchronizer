@@ -617,10 +617,28 @@ public class SchemaSnapshotWriter {
      */
     static Set<String> uniqueConstraintIndexNames(Connection conn, DatabaseDialect dialect, String catalog,
                                                   String schemaPattern, String tableName) throws SQLException {
-        if (conn == null || (dialect != DatabaseDialect.SQLSERVER && dialect != DatabaseDialect.ORACLE)) {
+        if (conn == null || (dialect != DatabaseDialect.H2 && dialect != DatabaseDialect.SQLSERVER
+                && dialect != DatabaseDialect.ORACLE)) {
             return Set.of();
         }
         Set<String> names = new HashSet<>();
+        if (dialect == DatabaseDialect.H2) {
+            String sql = "SELECT index_name FROM information_schema.indexes "
+                    + "WHERE table_schema = ? AND table_name = ? AND is_generated = TRUE";
+            try (var statement = conn.prepareStatement(sql)) {
+                statement.setString(1, schemaPattern == null ? "PUBLIC" : schemaPattern);
+                statement.setString(2, tableName);
+                try (ResultSet rows = statement.executeQuery()) {
+                    while (rows.next()) {
+                        String name = rows.getString(1);
+                        if (name != null) {
+                            names.add(name);
+                        }
+                    }
+                }
+            }
+            return names;
+        }
         if (dialect == DatabaseDialect.SQLSERVER) {
             String sql = "SELECT kc.name FROM sys.key_constraints kc "
                     + "INNER JOIN sys.tables t ON t.object_id = kc.parent_object_id "

@@ -337,6 +337,7 @@ final class ChangeSetSchemaScope {
         }
         return switch (dialect) {
             case POSTGRESQL -> identifier.toLowerCase(Locale.ROOT);
+            case H2 -> identifier.toUpperCase(Locale.ROOT);
             case ORACLE -> identifier.toUpperCase(Locale.ROOT);
             case MYSQL, MARIADB, SQLSERVER -> identifier;
         };
@@ -2133,7 +2134,7 @@ final class ChangeSetSchemaScope {
          */
         private boolean sameCorrelation(Token declaredName, Token qualifier) {
             return switch (dialect) {
-                case POSTGRESQL, ORACLE -> canonical(declaredName.value(), declaredName.quoted(), dialect)
+                case POSTGRESQL, H2, ORACLE -> canonical(declaredName.value(), declaredName.quoted(), dialect)
                         .equals(canonical(qualifier.value(), qualifier.quoted(), dialect));
                 case MYSQL, MARIADB -> declaredName.value().equals(qualifier.value());
                 case SQLSERVER -> declaredName.value().equalsIgnoreCase(qualifier.value());
@@ -2468,7 +2469,7 @@ final class ChangeSetSchemaScope {
             return false;
         }
         return switch (dialect) {
-            case POSTGRESQL, ORACLE -> canonical(candidate.value(), candidate.quoted(), dialect)
+            case POSTGRESQL, H2, ORACLE -> canonical(candidate.value(), candidate.quoted(), dialect)
                     .equals(canonical(name.value(), name.quoted(), dialect));
             case MYSQL, MARIADB, SQLSERVER -> candidate.value().equalsIgnoreCase(name.value());
         };
@@ -2562,6 +2563,7 @@ final class ChangeSetSchemaScope {
                 String folded = canonical(schema.value(), schema.quoted(), dialect);
                 yield "pg_catalog".equals(folded) || "information_schema".equals(folded);
             }
+            case H2 -> "information_schema".equals(lower);
             case SQLSERVER -> "sys".equals(lower) || "information_schema".equals(lower);
             case MYSQL, MARIADB -> "information_schema".equals(lower);
             case ORACLE -> false;

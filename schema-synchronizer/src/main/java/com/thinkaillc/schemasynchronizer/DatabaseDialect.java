@@ -15,6 +15,7 @@ import java.util.Locale;
  */
 public enum DatabaseDialect {
     POSTGRESQL("postgresql"),
+    H2("h2"),
     MARIADB("mariadb"),
     MYSQL("mysql"),
     SQLSERVER("sqlserver"),
@@ -37,7 +38,7 @@ public enum DatabaseDialect {
 
     /** PostgreSQL and SQL Server resolve unqualified names within a schema namespace. */
     boolean usesSchemaNamespace() {
-        return this == POSTGRESQL || this == SQLSERVER;
+        return this == POSTGRESQL || this == H2 || this == SQLSERVER;
     }
 
     /** MySQL/MariaDB treat the database/catalog as the managed namespace. */
@@ -55,7 +56,7 @@ public enum DatabaseDialect {
      * verificationSql and single-statement change sets when unverified).
      */
     boolean ddlMayCommitImplicitly() {
-        return isMySqlFamily() || this == ORACLE;
+        return isMySqlFamily() || this == ORACLE || this == H2;
     }
 
     boolean supportsTransactionalDryRun() {
@@ -66,6 +67,9 @@ public enum DatabaseDialect {
     int maxIdentifierLength() {
         if (this == POSTGRESQL) {
             return SqlIdentifiers.DEFAULT_MAX_LENGTH;
+        }
+        if (this == H2) {
+            return 256;
         }
         return isMySqlFamily() ? SqlIdentifiers.MYSQL_MAX_LENGTH : SqlIdentifiers.EXTENDED_MAX_LENGTH;
     }
@@ -91,6 +95,9 @@ public enum DatabaseDialect {
         if (normalized.contains("postgresql")) {
             return POSTGRESQL;
         }
+        if (normalized.equals("h2") || normalized.contains("h2 database")) {
+            return H2;
+        }
         if (normalized.contains("microsoft sql server") || normalized.contains("sql server")) {
             return SQLSERVER;
         }
@@ -102,7 +109,7 @@ public enum DatabaseDialect {
 
     /**
      * The dialect named by a definition's {@code dialect} field: an id ({@code postgresql},
-     * {@code mysql}, {@code mariadb}, {@code sqlserver}, {@code oracle}) or {@code mssql} /
+     * {@code mysql}, {@code mariadb}, {@code sqlserver}, {@code oracle}, {@code h2}) or {@code mssql} /
      * {@code sql-server}, in any case. Null or blank means PostgreSQL, the 1.x default.
      *
      * @throws SchemaDefinitionException for any other value
@@ -220,17 +227,17 @@ public enum DatabaseDialect {
 
     /** Engines that accept {@code CREATE INDEX IF NOT EXISTS}. */
     boolean supportsCreateIndexIfNotExists() {
-        return this == POSTGRESQL || this == MARIADB;
+        return this == POSTGRESQL || this == H2 || this == MARIADB;
     }
 
     /** Engines that accept {@code CREATE TABLE IF NOT EXISTS}. */
     boolean supportsCreateTableIfNotExists() {
-        return this == POSTGRESQL || isMySqlFamily();
+        return this == POSTGRESQL || this == H2 || isMySqlFamily();
     }
 
     /** Engines that accept {@code ADD COLUMN IF NOT EXISTS}. */
     boolean supportsAddColumnIfNotExists() {
-        return this == POSTGRESQL || this == MARIADB;
+        return this == POSTGRESQL || this == H2 || this == MARIADB;
     }
 
     /**
@@ -241,7 +248,7 @@ public enum DatabaseDialect {
         if (identifier == null) {
             return null;
         }
-        if (this == ORACLE) {
+        if (this == ORACLE || this == H2) {
             return identifier.toUpperCase(Locale.ROOT);
         }
         return identifier;

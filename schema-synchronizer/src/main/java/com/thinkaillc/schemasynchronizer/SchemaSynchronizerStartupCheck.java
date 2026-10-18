@@ -25,7 +25,7 @@ import java.util.Objects;
  * It registers one bean that only reads the environment, bean definitions, and the classpath; it
  * needs no {@code DataSource} and never connects.
  */
-@AutoConfiguration(after = SchemaSynchronizerAutoConfiguration.class)
+@AutoConfiguration(afterName = "com.thinkaillc.schemasynchronizer.SchemaSynchronizerAutoConfiguration")
 public class SchemaSynchronizerStartupCheck {
 
     private static final Logger log = LoggerFactory.getLogger(SchemaSynchronizerStartupCheck.class);

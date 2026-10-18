@@ -517,6 +517,9 @@ public class SchemaSynchronizer {
         if (dialect == DatabaseDialect.ORACLE) {
             requireOracleSchema(conn, options.schema());
         }
+        if (dialect == DatabaseDialect.H2) {
+            requireH2Schema(conn, options.schema());
+        }
         String lockToken = null;
         SchemaSynchronizationResult result;
         try {
@@ -606,7 +609,7 @@ public class SchemaSynchronizer {
     record NameRules(boolean tablesCaseSensitive, boolean columnsCaseSensitive, boolean indexesCaseSensitive) {
         static NameRules read(Connection conn, DatabaseDialect dialect) throws SQLException {
             return switch (dialect) {
-                case POSTGRESQL, ORACLE -> new NameRules(true, true, true);
+                case POSTGRESQL, H2, ORACLE -> new NameRules(true, true, true);
                 case MYSQL, MARIADB -> new NameRules(queryInt(conn, "SELECT @@lower_case_table_names") == 0,
                         false, false);
                 case SQLSERVER -> {
@@ -2212,7 +2215,7 @@ public class SchemaSynchronizer {
         return switch (dialect) {
             case MYSQL, MARIADB, SQLSERVER ->
                     "DROP INDEX " + indexSql + " ON " + tableSql + ";";
-            case POSTGRESQL -> "DROP INDEX IF EXISTS " + indexSql + ";";
+            case POSTGRESQL, H2 -> "DROP INDEX IF EXISTS " + indexSql + ";";
             // DROP INDEX IF EXISTS is 23ai+; 19c/21c reject it.
             case ORACLE -> "DROP INDEX " + indexSql + ";";
         };
@@ -2340,7 +2343,7 @@ public class SchemaSynchronizer {
         return switch (dialect) {
             case MYSQL, MARIADB -> Set.of("KEY", "INDEX", "FULLTEXT", "SPATIAL");
             case SQLSERVER, ORACLE -> Set.of("INDEX");
-            case POSTGRESQL -> Set.of();
+            case POSTGRESQL, H2 -> Set.of();
         };
     }
 
@@ -2603,7 +2606,7 @@ public class SchemaSynchronizer {
      */
     static Integer defaultFractionalPrecision(String normalizedType, DatabaseDialect dialect) {
         return switch (dialect) {
-            case POSTGRESQL -> switch (normalizedType) {
+            case POSTGRESQL, H2 -> switch (normalizedType) {
                 case "TIMESTAMP", "TIMESTAMPTZ", "TIME", "TIMETZ" -> 6;
                 default -> null;
             };
@@ -2625,6 +2628,7 @@ public class SchemaSynchronizer {
     static int maxFractionalPrecision(DatabaseDialect dialect) {
         return switch (dialect) {
             case POSTGRESQL, MYSQL, MARIADB -> 6;
+            case H2 -> 9;
             case SQLSERVER -> 7;
             case ORACLE -> 9;
         };
@@ -2667,6 +2671,7 @@ public class SchemaSynchronizer {
             case SQLSERVER -> 18;
             case ORACLE -> 38;
             case POSTGRESQL -> null;
+            case H2 -> 100_000;
         };
         return precision == null ? spec
                 : new ColumnSpec(spec.baseType(), precision, 0, spec.notNull(), spec.defaultExpr());
@@ -2716,7 +2721,7 @@ public class SchemaSynchronizer {
     /** {@code tableName} and {@code columnName} are emitted SQL (already quoted). */
     static String addColumnSql(String tableName, String columnName, String definition, DatabaseDialect dialect) {
         return switch (dialect) {
-            case POSTGRESQL, MARIADB -> "ALTER TABLE " + tableName + " ADD COLUMN IF NOT EXISTS "
+            case POSTGRESQL, H2, MARIADB -> "ALTER TABLE " + tableName + " ADD COLUMN IF NOT EXISTS "
                     + columnName + " " + definition;
             case MYSQL -> "ALTER TABLE " + tableName + " ADD COLUMN " + columnName + " " + definition;
             case SQLSERVER -> "ALTER TABLE " + tableName + " ADD " + columnName + " " + definition;
@@ -2987,6 +2992,15 @@ public class SchemaSynchronizer {
         if (!user.equals(ChangeSetSchemaScope.canonical(schema, false, DatabaseDialect.ORACLE))) {
             throw new IllegalStateException("Connected Oracle user '" + user
                     + "' does not match configured schema '" + schema + "'");
+        }
+    }
+
+    private void requireH2Schema(Connection conn, String schema) throws SQLException {
+        String current = conn.getSchema();
+        if (current == null || !current.equalsIgnoreCase(schema)) {
+            throw new IllegalStateException("Connected H2 schema '" + current
+                    + "' does not match configured schema '" + schema
+                    + "' (compared case-insensitively); set the connection's current schema before syncing");
         }
     }
 

@@ -19,7 +19,7 @@ review definitions like production code. See [SECURITY.md](../SECURITY.md).
 | Field | Required | Description |
 |---|---:|---|
 | `formatVersion` | Yes for new files | Current format is `2` |
-| `dialect` | Yes for new files | `postgresql`, `mariadb`, `mysql`, `sqlserver`, or `oracle` |
+| `dialect` | Yes for new files | `postgresql`, `h2`, `mariadb`, `mysql`, `sqlserver`, or `oracle` |
 | `tables` | Yes | Desired tables keyed by unquoted table name |
 | `changes` | No | Ordered explicit change-set ledger |
 

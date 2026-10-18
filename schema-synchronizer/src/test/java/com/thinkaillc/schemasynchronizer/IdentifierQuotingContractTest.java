@@ -36,6 +36,7 @@ class IdentifierQuotingContractTest {
     private static String schemaFor(DatabaseDialect dialect) {
         return switch (dialect) {
             case POSTGRESQL -> "public";
+            case H2 -> "APP";
             case SQLSERVER -> "dbo";
             case MYSQL, MARIADB, ORACLE -> "app";
         };
@@ -44,6 +45,7 @@ class IdentifierQuotingContractTest {
     private static String q(DatabaseDialect dialect, String declared) {
         return switch (dialect) {
             case POSTGRESQL -> "\"" + declared + "\"";
+            case H2 -> "\"" + declared.toUpperCase(java.util.Locale.ROOT) + "\"";
             case ORACLE -> "\"" + declared.toUpperCase(java.util.Locale.ROOT) + "\"";
             case MYSQL, MARIADB -> "`" + declared + "`";
             case SQLSERVER -> "[" + declared + "]";

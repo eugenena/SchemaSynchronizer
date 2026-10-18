@@ -183,7 +183,7 @@ final class NonDestructiveSqlPolicy {
             boolean insertInto = token.keyword("INSERT") && index + 1 < tokens.size()
                     && tokens.get(index + 1).keyword("INTO");
             return switch (dialect) {
-                case POSTGRESQL, SQLSERVER -> token.keyword("UPDATE") || insertInto;
+                case POSTGRESQL, H2, SQLSERVER -> token.keyword("UPDATE") || insertInto;
                 case MYSQL -> token.keyword("UPDATE");
                 case MARIADB, ORACLE -> false;
             };

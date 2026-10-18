@@ -9,8 +9,6 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnSingleCandidate;
-import org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration;
-import org.springframework.boot.autoconfigure.orm.jpa.HibernateJpaAutoConfiguration;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 
@@ -21,8 +19,13 @@ import javax.sql.DataSource;
  * startup, before JPA. Active only with {@code schema-synchronizer.enabled=true} and a single {@link DataSource};
  * either bean can be replaced by declaring one.
  */
-@AutoConfiguration(after = DataSourceAutoConfiguration.class, before = HibernateJpaAutoConfiguration.class)
-@ConditionalOnClass({DataSource.class, ObjectMapper.class})
+@AutoConfiguration(afterName = "org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration",
+        beforeName = "org.springframework.boot.autoconfigure.orm.jpa.HibernateJpaAutoConfiguration")
+@ConditionalOnClass(name = {
+        "org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration",
+        "javax.sql.DataSource",
+        "com.fasterxml.jackson.databind.ObjectMapper"
+})
 @ConditionalOnSingleCandidate(DataSource.class)
 @ConditionalOnProperty(prefix = "schema-synchronizer", name = "enabled", havingValue = "true", matchIfMissing = false)
 @EnableConfigurationProperties(SchemaSynchronizerProperties.class)

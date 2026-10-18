@@ -29,6 +29,7 @@ class GuardrailTokenizerContractTest {
     private static String namespace(DatabaseDialect dialect) {
         return switch (dialect) {
             case POSTGRESQL -> "public";
+            case H2 -> "APP";
             case MYSQL, MARIADB -> "appdb";
             case SQLSERVER -> "dbo";
             case ORACLE -> "APP";
