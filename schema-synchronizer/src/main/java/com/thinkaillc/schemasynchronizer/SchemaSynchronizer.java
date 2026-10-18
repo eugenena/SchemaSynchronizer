@@ -2194,6 +2194,14 @@ public class SchemaSynchronizer {
                     naming)) {
                 putLiveIndex(live, IndexDefinition.parseLive(sql, dialect).name(), sql);
             }
+            // H2 UNIQUE-constraint indexes are intentionally serialized in snapshots, but they are
+            // constraint-owned in a live schema and must not be treated as undeclared drift.
+            if (dialect == DatabaseDialect.H2) {
+                for (String name : SchemaSnapshotWriter.h2UniqueConstraintIndexNames(conn, schemaPattern,
+                        liveTable)) {
+                    live.put(name, OMITTED_UNIQUE_CONSTRAINT + name);
+                }
+            }
             // UNIQUE-constraint indexes exist live but are omitted from JDBC reconstruct —
             // treat as present so we neither CREATE nor DROP.
             for (String name : SchemaSnapshotWriter.uniqueConstraintIndexNames(

@@ -684,6 +684,33 @@ public class SchemaSnapshotWriter {
         return names;
     }
 
+    /** H2 UNIQUE-constraint backing indexes, which snapshots may serialize but live comparison must protect. */
+    static Set<String> h2UniqueConstraintIndexNames(Connection conn, String schemaPattern, String tableName)
+            throws SQLException {
+        if (conn == null) {
+            return Set.of();
+        }
+        Set<String> names = new HashSet<>();
+        String sql = "SELECT i.index_name FROM information_schema.indexes i "
+                + "INNER JOIN information_schema.table_constraints tc "
+                + "ON tc.table_schema = i.table_schema AND tc.table_name = i.table_name "
+                + "AND tc.index_name = i.index_name "
+                + "WHERE i.table_schema = ? AND i.table_name = ? AND tc.constraint_type = 'UNIQUE'";
+        try (var statement = conn.prepareStatement(sql)) {
+            statement.setString(1, schemaPattern == null ? "PUBLIC" : schemaPattern);
+            statement.setString(2, tableName);
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    String name = rows.getString(1);
+                    if (name != null) {
+                        names.add(name);
+                    }
+                }
+            }
+        }
+        return names;
+    }
+
     /**
      * Indexes that {@link DatabaseMetaData#getIndexInfo} cannot reconstruct as a plain column-list
      * CREATE INDEX: SQL Server filtered, INCLUDE, clustered (non-PK), columnstore, XML, spatial;

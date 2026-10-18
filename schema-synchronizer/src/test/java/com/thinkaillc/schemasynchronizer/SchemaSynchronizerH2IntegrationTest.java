@@ -199,4 +199,26 @@ class SchemaSynchronizerH2IntegrationTest {
                     .isInstanceOf(java.sql.SQLException.class);
         }
     }
+
+    @Test
+    void matchingUniqueConstraintDoesNotCreateFalsePendingIndexDrop() throws Exception {
+        try (Connection connection = connection(); var statement = connection.createStatement()) {
+            statement.execute("CREATE SCHEMA APP");
+            connection.setSchema("APP");
+            statement.execute("CREATE TABLE widgets (id BIGINT NOT NULL PRIMARY KEY, name VARCHAR(40) NOT NULL, "
+                    + "CONSTRAINT uq_widgets_name UNIQUE (name))");
+            SchemaDefinition definition = new SchemaDefinition(2, "h2", Map.of("widgets",
+                    new SchemaDefinition.TableDef(
+                            "CREATE TABLE IF NOT EXISTS widgets (id BIGINT NOT NULL PRIMARY KEY, "
+                                    + "name VARCHAR(40) NOT NULL, CONSTRAINT uq_widgets_name UNIQUE (name))",
+                            List.of(new SchemaDefinition.ColumnDef("id", "BIGINT NOT NULL"),
+                                    new SchemaDefinition.ColumnDef("name", "VARCHAR(40) NOT NULL")),
+                            List.of())), List.of());
+
+            SchemaSynchronizationResult result = synchronizer().synchronizeWithResult(connection, definition);
+
+            assertThat(result.pendingSql()).isEmpty();
+            assertThat(result.changed()).isFalse();
+        }
+    }
 }
