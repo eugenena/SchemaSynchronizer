@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.1.0 — Unreleased
+
+- Add a dedicated Spring Boot 4 integration artifact while retaining the Spring Boot 3
+  integration for existing applications.
+- Add the H2 dialect for local and test databases.
+
 ## 2.0.0 — 2026-09-27
 
 2.0.0 is a breaking release. Read [Upgrading from 1.2.0](#upgrading-from-120) before
