@@ -221,4 +221,30 @@ class SchemaSynchronizerH2IntegrationTest {
             assertThat(result.changed()).isFalse();
         }
     }
+
+    @Test
+    void declaredUniqueConstraintBackingIndexStillDetectsChangedColumns() throws Exception {
+        try (Connection connection = connection(); var statement = connection.createStatement()) {
+            statement.execute("CREATE SCHEMA APP");
+            connection.setSchema("APP");
+            statement.execute("CREATE TABLE widgets (id BIGINT NOT NULL PRIMARY KEY, name VARCHAR(40) NOT NULL, "
+                    + "code VARCHAR(40), CONSTRAINT uq_widgets_name UNIQUE (name))");
+            String backingIndex = SchemaSnapshotWriter.h2UniqueConstraintIndexNames(connection, "APP", "WIDGETS")
+                    .iterator().next();
+            SchemaDefinition definition = new SchemaDefinition(2, "h2", Map.of("widgets",
+                    new SchemaDefinition.TableDef(
+                            "CREATE TABLE IF NOT EXISTS widgets (id BIGINT NOT NULL PRIMARY KEY, "
+                                    + "name VARCHAR(40) NOT NULL, code VARCHAR(40), "
+                                    + "CONSTRAINT uq_widgets_name UNIQUE (name))",
+                            List.of(new SchemaDefinition.ColumnDef("id", "BIGINT NOT NULL"),
+                                    new SchemaDefinition.ColumnDef("name", "VARCHAR(40) NOT NULL"),
+                                    new SchemaDefinition.ColumnDef("code", "VARCHAR(40)")),
+                            List.of("CREATE UNIQUE INDEX IF NOT EXISTS " + backingIndex
+                                    + " ON widgets (code)"))), List.of());
+
+            assertThatThrownBy(() -> synchronizer().synchronizeWithResult(connection, definition))
+                    .isInstanceOf(SchemaDefinitionException.class)
+                    .hasMessageContaining("replace index definition drift");
+        }
+    }
 }

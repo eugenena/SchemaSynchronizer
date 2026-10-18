@@ -2104,6 +2104,10 @@ public class SchemaSynchronizer {
                                   DatabaseDialect dialect, boolean applyChanges, Set<String> unaddedColumns,
                                   NameRules rules, boolean readable) throws SQLException {
         Map<String, String> live = readable ? readLiveIndexes(conn, meta, table.live, dialect, rules) : Map.of();
+        Set<String> h2UniqueConstraintIndexes = dialect == DatabaseDialect.H2 && readable
+                ? SchemaSnapshotWriter.h2UniqueConstraintIndexNames(conn,
+                        dialect.metadataSchemaPattern(options.schema()), table.live)
+                : Set.of();
         Set<String> matched = new HashSet<>();
         if (tableDef.indexes() != null) {
             for (String sql : tableDef.indexes()) {
@@ -2150,7 +2154,7 @@ public class SchemaSynchronizer {
         for (String liveName : live.keySet().stream().sorted().toList()) {
             String liveSql = live.get(liveName);
             if (matched.contains(liveName) || liveSql.startsWith(OMITTED_UNIQUE_CONSTRAINT)
-                    || liveSql.startsWith(OMITTED_COMPLEX_INDEX)) {
+                    || liveSql.startsWith(OMITTED_COMPLEX_INDEX) || h2UniqueConstraintIndexes.contains(liveName)) {
                 continue;
             }
             pendingSql.add(dropIndexSql(dialect, SqlIdentifiers.quoteExact(dialect, liveName), table.sql)
@@ -2193,14 +2197,6 @@ public class SchemaSynchronizer {
             for (String sql : SchemaSnapshotWriter.readJdbcIndexes(meta, dialect, catalog, schemaPattern, liveTable,
                     naming)) {
                 putLiveIndex(live, IndexDefinition.parseLive(sql, dialect).name(), sql);
-            }
-            // H2 UNIQUE-constraint indexes are intentionally serialized in snapshots, but they are
-            // constraint-owned in a live schema and must not be treated as undeclared drift.
-            if (dialect == DatabaseDialect.H2) {
-                for (String name : SchemaSnapshotWriter.h2UniqueConstraintIndexNames(conn, schemaPattern,
-                        liveTable)) {
-                    live.put(name, OMITTED_UNIQUE_CONSTRAINT + name);
-                }
             }
             // UNIQUE-constraint indexes exist live but are omitted from JDBC reconstruct —
             // treat as present so we neither CREATE nor DROP.
