@@ -41,6 +41,9 @@ class DatabaseDialectTest {
         when(metadata.getDatabaseProductName()).thenReturn("Oracle");
         assertThat(DatabaseDialect.detect(metadata)).isEqualTo(DatabaseDialect.ORACLE);
 
+        when(metadata.getDatabaseProductName()).thenReturn("H2");
+        assertThat(DatabaseDialect.detect(metadata)).isEqualTo(DatabaseDialect.H2);
+
         assertThat(DatabaseDialect.MARIADB.isMySqlFamily()).isTrue();
         assertThat(DatabaseDialect.MYSQL.isMySqlFamily()).isTrue();
         assertThat(DatabaseDialect.POSTGRESQL.isMySqlFamily()).isFalse();
@@ -53,6 +56,7 @@ class DatabaseDialectTest {
         assertThat(DatabaseDialect.MYSQL.maxIdentifierLength()).isEqualTo(64);
         assertThat(DatabaseDialect.SQLSERVER.maxIdentifierLength()).isEqualTo(128);
         assertThat(DatabaseDialect.ORACLE.maxIdentifierLength()).isEqualTo(128);
+        assertThat(DatabaseDialect.H2.maxIdentifierLength()).isEqualTo(256);
     }
 
     @Test
@@ -61,9 +65,10 @@ class DatabaseDialectTest {
         assertThat(DatabaseDialect.parse("mssql")).isEqualTo(DatabaseDialect.SQLSERVER);
         assertThat(DatabaseDialect.parse("sql-server")).isEqualTo(DatabaseDialect.SQLSERVER);
         assertThat(DatabaseDialect.parse("oracle")).isEqualTo(DatabaseDialect.ORACLE);
+        assertThat(DatabaseDialect.parse("h2")).isEqualTo(DatabaseDialect.H2);
 
         DatabaseMetaData metadata = mock(DatabaseMetaData.class);
-        when(metadata.getDatabaseProductName()).thenReturn("H2");
+        when(metadata.getDatabaseProductName()).thenReturn("Unknown");
 
         assertThatThrownBy(() -> DatabaseDialect.detect(metadata))
                 .isInstanceOf(SchemaSynchronizationException.class)

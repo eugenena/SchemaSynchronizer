@@ -11,7 +11,8 @@ while returning destructive or ambiguous changes as SQL for a human operator to
 review.
 
 The project and repository are named **SchemaSynchronizer**; the published Maven
-artifacts are `com.thinkaillc:schema-synchronizer` (library) and
+artifacts are `com.thinkaillc:schema-synchronizer` (library),
+`com.thinkaillc:schema-synchronizer-spring-boot4` (Boot 4 integration), and
 `com.thinkaillc:schema-synchronizer-cli` (command-line tools), and the Java package is
 `com.thinkaillc.schemasynchronizer`.
 
@@ -57,6 +58,7 @@ Upgrading from 1.2.0? Read [Upgrading from 1.2.0](CHANGELOG.md#upgrading-from-12
 | MySQL 8.0+ | Available | Separate dialect; named locking and implicit DDL commits |
 | SQL Server 2019+ | Available | Transactional DDL and `sp_getapplock` |
 | Oracle 19c+ | Available | `DBMS_LOCK`; DDL may commit implicitly. CI tests Oracle XE 21c; 19c is supported by design but not CI-tested |
+| H2 2.5+ | Available | In-memory/local engine; DDL commits implicitly and synchronization requires an H2 admin connection for exclusive locking |
 | Percona Server 8.4 | Compatible | Uses the MySQL dialect; verified with `scripts/verify-mysql-compatible.sh`, not CI-tested |
 | TiDB 8.5 LTS | Partial | Uses the MySQL dialect for tables, columns, and indexes. TiDB lacks triggers, stored functions, `INVISIBLE` columns, and other DDL the MySQL suite covers, so 2.0.0 is not verified on TiDB; not CI-tested |
 
@@ -64,7 +66,7 @@ CI runs the full integration suite on PostgreSQL 16, MariaDB 10.11, MySQL 8.4, S
 and Oracle XE 21c, plus the engine suites on the version floors MariaDB 10.3, MySQL 8.0, and
 SQL Server 2019, and on MariaDB 11.8.
 
-PostgreSQL, MariaDB, MySQL, SQL Server, and Oracle are the current dialect implementations.
+PostgreSQL, H2, MariaDB, MySQL, SQL Server, and Oracle are the current dialect implementations.
 SchemaSynchronizer is designed to add more relational database dialects, each with
 its own metadata, SQL-generation, locking, safety, and compatibility behavior.
 
@@ -129,7 +131,7 @@ operating model, not a claim that one approach is universally better.
 
 ## Quick start: Spring Boot
 
-SchemaSynchronizer requires Java 17 or later. Add the Maven Central release:
+SchemaSynchronizer requires Java 17 or later. For Spring Boot 3, add the existing Maven Central artifact:
 
 ```xml
 <dependency>
@@ -138,6 +140,20 @@ SchemaSynchronizer requires Java 17 or later. Add the Maven Central release:
   <version>2.0.0</version>
 </dependency>
 ```
+
+For Spring Boot 4, use the version-specific adapter instead. It brings in the shared library:
+
+```xml
+<dependency>
+  <groupId>com.thinkaillc</groupId>
+  <artifactId>schema-synchronizer-spring-boot4</artifactId>
+  <version>2.0.0</version>
+</dependency>
+```
+
+Keep the Boot 3 and Boot 4 adapters out of the same application. The shared Java API and
+schema definition stay the same; select the adapter that matches the application's Spring Boot
+major version.
 
 Put `schema-definition.json` in `src/main/resources`, set
 `spring.jpa.hibernate.ddl-auto=validate`, and start the application. Safe differences
@@ -154,9 +170,9 @@ boundary. Per-engine grants: [Least-privilege database account](docs/OPERATIONS.
 ## Quick start: command line
 
 The self-contained CLI requires Java 17 or later. It includes the PostgreSQL, MariaDB, MySQL,
-SQL Server, and Oracle JDBC drivers, so the standalone JAR carries their licenses as well as
+SQL Server, Oracle, and H2 JDBC drivers, so the standalone JAR carries their licenses as well as
 SchemaSynchronizer's Apache-2.0 license: MySQL Connector/J (GPLv2 with the Universal FOSS
-Exception), MariaDB Connector/J (LGPL-2.1-or-later), Oracle ojdbc11 (Oracle Free Use Terms
+Exception), MariaDB Connector/J (LGPL-2.1-or-later), H2 (MPL-2.0 or EPL-1.0), Oracle ojdbc11 (Oracle Free Use Terms
 and Conditions), PostgreSQL JDBC (BSD-2-Clause), Microsoft JDBC Driver for SQL Server (MIT),
 Protocol Buffers (BSD-3-Clause), Jackson (Apache-2.0), SLF4J (MIT), and Checker Framework
 qualifiers (MIT). The JAR contains `LICENSE`, `NOTICE`, and
@@ -277,9 +293,9 @@ Add the Maven Central release to an application:
 </dependency>
 ```
 
-The library declares PostgreSQL, MariaDB, MySQL, SQL Server, and Oracle JDBC drivers as
+The library declares PostgreSQL, MariaDB, MySQL, SQL Server, Oracle, and H2 JDBC drivers as
 **optional** dependencies. Add the driver for the engine you use (or rely on Spring Boot /
-your app's existing JDBC dependency). The standalone CLI JAR still embeds all five drivers.
+your app's existing JDBC dependency). The standalone CLI JAR embeds all six drivers.
 
 ## Release process for maintainers
 
@@ -324,7 +340,7 @@ as `****`.
 | `jdbc-url` | JDBC URL for an available dialect |
 | `user` | Database username (a least-privilege account) |
 | `-` | Required password placeholder; the password is read from `SCHEMA_DB_PASSWORD`. Literal passwords are rejected |
-| `schema` | Dialect-specific schema namespace: `public` (PostgreSQL), the login's default schema (SQL Server), the connected user (Oracle), or the database name (MySQL/MariaDB). Defaults to `public`, which is rejected on SQL Server, Oracle, MySQL, and MariaDB |
+| `schema` | Dialect-specific namespace: current schema (H2), `public` (PostgreSQL), login default (SQL Server), connected user (Oracle), or database name (MySQL/MariaDB). Defaults to `public`; rejected on SQL Server, Oracle, MySQL, and MariaDB |
 | `output-path` | Definition file to create or update (`serialize`) |
 | `schema-file` | Definition to apply, preview, or validate |
 | `history-table` | Change-set ledger table; default `schema_synchronizer_history` |

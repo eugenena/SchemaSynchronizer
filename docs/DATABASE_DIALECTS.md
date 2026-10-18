@@ -4,6 +4,21 @@ SchemaSynchronizer detects the database through JDBC and requires the definition
 declared dialect to match. A serialized definition is portable between compatible
 instances of the same dialect, not between SQL dialects.
 
+## H2
+
+- Supported baseline: H2 2.5+
+- Intended use: in-memory and local development/test databases; H2 mode is not a substitute for
+  testing against the production database engine
+- Namespace: current schema, normally `PUBLIC`; configure it to match `schema-synchronizer.schema`
+- Locking: database-wide `SET EXCLUSIVE 1` session mode, released after synchronization; this
+  requires an H2 administrator connection and pauses other database sessions while the schema is
+  changing
+- DDL: commits implicitly, so synchronization requires `autoCommit=true`; it refuses a caller-owned
+  transaction rather than committing that transaction
+- Dry run: plans changes without executing DDL; it cannot roll back catalog writes
+- Identifiers: H2 folds unquoted identifiers to upper case and declarations follow that convention
+- SQL: use H2-native syntax; a PostgreSQL definition is not an H2 definition
+
 ## PostgreSQL
 
 - Supported baseline: PostgreSQL 16+

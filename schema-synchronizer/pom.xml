@@ -3,17 +3,14 @@
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
   <modelVersion>4.0.0</modelVersion>
-
   <parent>
     <groupId>com.thinkaillc</groupId>
     <artifactId>schema-synchronizer-parent</artifactId>
     <version>2.0.0</version>
   </parent>
-
   <artifactId>schema-synchronizer</artifactId>
   <name>schema-synchronizer</name>
-  <description>Safe relational schema synchronization with PostgreSQL, MariaDB, MySQL, SQL Server, Oracle, and Spring Boot support</description>
-
+  <description>Safe relational schema synchronization with PostgreSQL, H2, MariaDB, MySQL, SQL Server, Oracle, and Spring Boot support</description>
   <dependencies>
     <dependency>
       <groupId>com.fasterxml.jackson.core</groupId>
@@ -75,6 +72,12 @@
     <dependency>
       <groupId>com.oracle.database.jdbc</groupId>
       <artifactId>ojdbc11</artifactId>
+      <scope>runtime</scope>
+      <optional>true</optional>
+    </dependency>
+    <dependency>
+      <groupId>com.h2database</groupId>
+      <artifactId>h2</artifactId>
       <scope>runtime</scope>
       <optional>true</optional>
     </dependency>

@@ -27,6 +27,11 @@ remains Apache-2.0.
     Copyright (c) Oracle and/or its affiliates.
     Oracle Free Use Terms and Conditions (FUTC).
 
+  H2 Database Engine (com.h2database:h2)
+    H2 Database Engine (https://h2database.com/), dual-licensed under the Mozilla
+    Public License, Version 2.0 or Eclipse Public License, Version 1.0. License:
+    https://h2database.com/html/license.html
+
   PostgreSQL JDBC Driver (org.postgresql:postgresql)
     Copyright (c) 1997, PostgreSQL Global Development Group.
     BSD 2-Clause License. Includes com.ongres.scram and com.ongres.stringprep

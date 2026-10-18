@@ -517,6 +517,9 @@ public class SchemaSynchronizer {
         if (dialect == DatabaseDialect.ORACLE) {
             requireOracleSchema(conn, options.schema());
         }
+        if (dialect == DatabaseDialect.H2) {
+            requireH2Schema(conn, options.schema());
+        }
         String lockToken = null;
         SchemaSynchronizationResult result;
         try {
@@ -606,7 +609,7 @@ public class SchemaSynchronizer {
     record NameRules(boolean tablesCaseSensitive, boolean columnsCaseSensitive, boolean indexesCaseSensitive) {
         static NameRules read(Connection conn, DatabaseDialect dialect) throws SQLException {
             return switch (dialect) {
-                case POSTGRESQL, ORACLE -> new NameRules(true, true, true);
+                case POSTGRESQL, H2, ORACLE -> new NameRules(true, true, true);
                 case MYSQL, MARIADB -> new NameRules(queryInt(conn, "SELECT @@lower_case_table_names") == 0,
                         false, false);
                 case SQLSERVER -> {
@@ -944,6 +947,11 @@ public class SchemaSynchronizer {
     private static ColumnSpec comparableTarget(String definition, DatabaseDialect dialect) {
         ColumnSpec target = withDefaultNumericPrecision(withDefaultFractionalPrecision(
                 foldNationalType(ColumnDefinitionParser.parse(definition), dialect), dialect), definition, dialect);
+        if (dialect == DatabaseDialect.H2 && "TEXT".equals(target.baseType())) {
+            // H2's PostgreSQL mode stores TEXT as an unbounded VARCHAR; treating the alias literally
+            // caused a redundant ALTER COLUMN TYPE TEXT on every startup.
+            target = new ColumnSpec("VARCHAR", null, target.scale(), target.notNull(), target.defaultExpr());
+        }
         if (dialect == DatabaseDialect.ORACLE) {
             target = oracleComparableTarget(target);
         }
@@ -2096,6 +2104,10 @@ public class SchemaSynchronizer {
                                   DatabaseDialect dialect, boolean applyChanges, Set<String> unaddedColumns,
                                   NameRules rules, boolean readable) throws SQLException {
         Map<String, String> live = readable ? readLiveIndexes(conn, meta, table.live, dialect, rules) : Map.of();
+        Set<String> h2UniqueConstraintIndexes = dialect == DatabaseDialect.H2 && readable
+                ? SchemaSnapshotWriter.h2UniqueConstraintIndexNames(conn,
+                        dialect.metadataSchemaPattern(options.schema()), table.live)
+                : Set.of();
         Set<String> matched = new HashSet<>();
         if (tableDef.indexes() != null) {
             for (String sql : tableDef.indexes()) {
@@ -2142,7 +2154,7 @@ public class SchemaSynchronizer {
         for (String liveName : live.keySet().stream().sorted().toList()) {
             String liveSql = live.get(liveName);
             if (matched.contains(liveName) || liveSql.startsWith(OMITTED_UNIQUE_CONSTRAINT)
-                    || liveSql.startsWith(OMITTED_COMPLEX_INDEX)) {
+                    || liveSql.startsWith(OMITTED_COMPLEX_INDEX) || h2UniqueConstraintIndexes.contains(liveName)) {
                 continue;
             }
             pendingSql.add(dropIndexSql(dialect, SqlIdentifiers.quoteExact(dialect, liveName), table.sql)
@@ -2212,7 +2224,7 @@ public class SchemaSynchronizer {
         return switch (dialect) {
             case MYSQL, MARIADB, SQLSERVER ->
                     "DROP INDEX " + indexSql + " ON " + tableSql + ";";
-            case POSTGRESQL -> "DROP INDEX IF EXISTS " + indexSql + ";";
+            case POSTGRESQL, H2 -> "DROP INDEX IF EXISTS " + indexSql + ";";
             // DROP INDEX IF EXISTS is 23ai+; 19c/21c reject it.
             case ORACLE -> "DROP INDEX " + indexSql + ";";
         };
@@ -2340,7 +2352,7 @@ public class SchemaSynchronizer {
         return switch (dialect) {
             case MYSQL, MARIADB -> Set.of("KEY", "INDEX", "FULLTEXT", "SPATIAL");
             case SQLSERVER, ORACLE -> Set.of("INDEX");
-            case POSTGRESQL -> Set.of();
+            case POSTGRESQL, H2 -> Set.of();
         };
     }
 
@@ -2562,7 +2574,8 @@ public class SchemaSynchronizer {
                         length = ColumnDefinitionParser.MAX_LENGTH;
                     }
                     // VARCHAR/CHAR with size >= 10_000 keep length=null (effectiveLength ≡ MAX).
-                } else if (ColumnDefinitionParser.isNumeric(normalized) && size > 0 && size <= 1_000) {
+                } else if (ColumnDefinitionParser.isNumeric(normalized) && size > 0
+                        && (dialect == DatabaseDialect.H2 || size <= 1_000)) {
                     length = size;
                     scale = decimalDigitsNull ? null : decimalDigits;
                 } else if (dialect == DatabaseDialect.ORACLE && "FLOAT".equals(normalized) && size > 0) {
@@ -2603,7 +2616,7 @@ public class SchemaSynchronizer {
      */
     static Integer defaultFractionalPrecision(String normalizedType, DatabaseDialect dialect) {
         return switch (dialect) {
-            case POSTGRESQL -> switch (normalizedType) {
+            case POSTGRESQL, H2 -> switch (normalizedType) {
                 case "TIMESTAMP", "TIMESTAMPTZ", "TIME", "TIMETZ" -> 6;
                 default -> null;
             };
@@ -2625,6 +2638,7 @@ public class SchemaSynchronizer {
     static int maxFractionalPrecision(DatabaseDialect dialect) {
         return switch (dialect) {
             case POSTGRESQL, MYSQL, MARIADB -> 6;
+            case H2 -> 9;
             case SQLSERVER -> 7;
             case ORACLE -> 9;
         };
@@ -2667,6 +2681,7 @@ public class SchemaSynchronizer {
             case SQLSERVER -> 18;
             case ORACLE -> 38;
             case POSTGRESQL -> null;
+            case H2 -> 100_000;
         };
         return precision == null ? spec
                 : new ColumnSpec(spec.baseType(), precision, 0, spec.notNull(), spec.defaultExpr());
@@ -2716,7 +2731,7 @@ public class SchemaSynchronizer {
     /** {@code tableName} and {@code columnName} are emitted SQL (already quoted). */
     static String addColumnSql(String tableName, String columnName, String definition, DatabaseDialect dialect) {
         return switch (dialect) {
-            case POSTGRESQL, MARIADB -> "ALTER TABLE " + tableName + " ADD COLUMN IF NOT EXISTS "
+            case POSTGRESQL, H2, MARIADB -> "ALTER TABLE " + tableName + " ADD COLUMN IF NOT EXISTS "
                     + columnName + " " + definition;
             case MYSQL -> "ALTER TABLE " + tableName + " ADD COLUMN " + columnName + " " + definition;
             case SQLSERVER -> "ALTER TABLE " + tableName + " ADD " + columnName + " " + definition;
@@ -2987,6 +3002,15 @@ public class SchemaSynchronizer {
         if (!user.equals(ChangeSetSchemaScope.canonical(schema, false, DatabaseDialect.ORACLE))) {
             throw new IllegalStateException("Connected Oracle user '" + user
                     + "' does not match configured schema '" + schema + "'");
+        }
+    }
+
+    private void requireH2Schema(Connection conn, String schema) throws SQLException {
+        String current = conn.getSchema();
+        if (current == null || !current.equalsIgnoreCase(schema)) {
+            throw new IllegalStateException("Connected H2 schema '" + current
+                    + "' does not match configured schema '" + schema
+                    + "' (compared case-insensitively); set the connection's current schema before syncing");
         }
     }
 

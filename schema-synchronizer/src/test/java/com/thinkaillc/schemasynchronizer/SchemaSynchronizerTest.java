@@ -597,12 +597,14 @@ class SchemaSynchronizerTest {
         assertThat(SchemaSynchronizer.dropIndexSql(DatabaseDialect.ORACLE, "idx", "items"))
                 .isEqualTo("DROP INDEX idx;");
         for (DatabaseDialect dialect : DatabaseDialect.values()) {
-            if (dialect != DatabaseDialect.POSTGRESQL) {
+            if (dialect != DatabaseDialect.POSTGRESQL && dialect != DatabaseDialect.H2) {
                 assertThat(SchemaSynchronizer.dropIndexSql(dialect, "idx", "items"))
                         .as("%s supported versions reject DROP INDEX IF EXISTS", dialect)
                         .doesNotContainIgnoringCase("IF EXISTS");
             }
         }
+        assertThat(SchemaSynchronizer.dropIndexSql(DatabaseDialect.H2, "idx", "items"))
+                .isEqualTo("DROP INDEX IF EXISTS idx;");
     }
 
     @Test
