@@ -13,6 +13,10 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -80,6 +84,83 @@ class SchemaSynchronizerH2IntegrationTest {
                     .isInstanceOf(SchemaDefinitionException.class)
                     .hasMessageContaining("autoCommit=true");
             connection.rollback();
+        }
+    }
+
+    @Test
+    void adoptsBareNumericWithoutPlanningRepeatedPrecisionAlter() throws Exception {
+        try (Connection connection = connection(); var statement = connection.createStatement()) {
+            statement.execute("CREATE SCHEMA APP");
+            connection.setSchema("APP");
+            statement.execute("CREATE TABLE amounts (amount_value NUMERIC)");
+
+            SchemaDefinition definition = new SchemaDefinition(2, "h2", Map.of("amounts",
+                    new SchemaDefinition.TableDef("CREATE TABLE IF NOT EXISTS amounts (amount_value NUMERIC)",
+                            List.of(new SchemaDefinition.ColumnDef("amount_value", "NUMERIC")), List.of())), List.of());
+
+            SchemaSynchronizationResult first = synchronizer().synchronizeWithResult(connection, definition);
+            assertThat(first.columnsAltered()).isZero();
+            assertThat(first.pendingSql()).isEmpty();
+
+            SchemaSynchronizationResult repeated = synchronizer().synchronizeWithResult(connection, definition);
+            assertThat(repeated.changed()).isFalse();
+            assertThat(repeated.pendingSql()).isEmpty();
+        }
+    }
+
+    @Test
+    void competingConnectionProceedsAfterExclusiveLockIsReleased() throws Exception {
+        try (Connection holder = connection()) {
+            String url = holder.getMetaData().getURL();
+            try (Connection waiter = DriverManager.getConnection(url, "sa", "")) {
+                String token = DialectSupport.acquireLock(holder, DatabaseDialect.H2, "PUBLIC",
+                        "schema_synchronizer_history", 73L);
+                ExecutorService executor = Executors.newSingleThreadExecutor();
+                try {
+                    CountDownLatch waitingStarted = new CountDownLatch(1);
+                    var waiting = executor.submit(() -> {
+                        waitingStarted.countDown();
+                        return DialectSupport.acquireLock(waiter, DatabaseDialect.H2, "PUBLIC",
+                                "schema_synchronizer_history", 73L);
+                    });
+                    assertThat(waitingStarted.await(1, TimeUnit.SECONDS)).isTrue();
+                    Thread.sleep(100);
+                    assertThat(waiting.isDone()).isFalse();
+
+                    DialectSupport.releaseLock(holder, DatabaseDialect.H2, token);
+                    String waiterToken = waiting.get(5, TimeUnit.SECONDS);
+                    DialectSupport.releaseLock(waiter, DatabaseDialect.H2, waiterToken);
+                    try (var statement = waiter.createStatement(); var rows = statement.executeQuery("SELECT 1")) {
+                        assertThat(rows.next()).isTrue();
+                        assertThat(rows.getInt(1)).isEqualTo(1);
+                    }
+                } finally {
+                    executor.shutdownNow();
+                }
+            }
+        }
+    }
+
+    @Test
+    void releasesH2ExclusiveLockWhenSynchronizationFailsAfterAcquiringIt() throws Exception {
+        try (Connection holder = connection()) {
+            String url = holder.getMetaData().getURL();
+            try (Connection observer = DriverManager.getConnection(url, "sa", "")) {
+                holder.createStatement().execute("CREATE SCHEMA APP");
+                holder.setSchema("APP");
+                observer.setSchema("APP");
+                holder.createStatement().execute(
+                        "CREATE TABLE widgets (id BIGINT NOT NULL PRIMARY KEY, name VARCHAR(100) NOT NULL)");
+
+                assertThatThrownBy(() -> synchronizer().synchronizeWithResult(holder, definition()))
+                        .isInstanceOf(SchemaDefinitionException.class)
+                        .hasMessageContaining("unsafe or destructive schema differences");
+
+                try (var statement = observer.createStatement(); var rows = statement.executeQuery("SELECT 1")) {
+                    assertThat(rows.next()).isTrue();
+                    assertThat(rows.getInt(1)).isEqualTo(1);
+                }
+            }
         }
     }
 

@@ -200,9 +200,11 @@ final class DialectSupport {
 
     /**
      * Acquires the exclusive synchronization locks for {@code (namespace, historyTable)}, waiting
-     * up to {@link #LOCK_WAIT_SECONDS} in total. Returns a token for {@link #releaseLock} ({@code null}
-     * on PostgreSQL, whose locks are transaction-scoped). Every dialect also takes the lock the
-     * previous releases took, in a fixed order after the new one, so a rolling upgrade still
+     * up to {@link #LOCK_WAIT_SECONDS} where the database exposes a timed lock attempt. H2's
+     * {@code SET EXCLUSIVE} can block inside the driver until the owning session releases it, so H2
+     * wait duration is controlled by that session rather than this polling deadline. Returns a token
+     * for {@link #releaseLock} ({@code null} on PostgreSQL, whose locks are transaction-scoped).
+     * Every dialect also takes the lock the previous releases took, in a fixed order after the new one, so a rolling upgrade still
      * excludes older peers; those older locks are what {@code advisoryLockId} still selects.
      *
      * @throws SchemaLockUnavailableException when another run holds a lock past the deadline

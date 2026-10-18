@@ -2570,7 +2570,8 @@ public class SchemaSynchronizer {
                         length = ColumnDefinitionParser.MAX_LENGTH;
                     }
                     // VARCHAR/CHAR with size >= 10_000 keep length=null (effectiveLength ≡ MAX).
-                } else if (ColumnDefinitionParser.isNumeric(normalized) && size > 0 && size <= 1_000) {
+                } else if (ColumnDefinitionParser.isNumeric(normalized) && size > 0
+                        && (dialect == DatabaseDialect.H2 || size <= 1_000)) {
                     length = size;
                     scale = decimalDigitsNull ? null : decimalDigits;
                 } else if (dialect == DatabaseDialect.ORACLE && "FLOAT".equals(normalized) && size > 0) {
