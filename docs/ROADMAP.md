@@ -22,7 +22,7 @@ Until then, create these objects outside SchemaSynchronizer, for example with yo
 database provisioning or a migration tool run by a privileged role, and reference them
 from change sets and verification SQL as needed.
 
-## LedgerPulse adoption
+## Spring Boot and H2 compatibility
 
 Spring Boot 3 and 4 are both supported through version-specific integration artifacts; the
 shared Java API and schema definition format are the same. H2 is supported for local/test use

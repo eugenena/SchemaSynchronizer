@@ -4,7 +4,7 @@ Hand-editing `schema-definition.json` is a **first-class** workflow. Serializing
 live database is optional bootstrap, not a requirement.
 
 Use this guide when an application owns its schema in source control and applies it
-on startup (the Marketworks-style path).
+on startup (the application-managed schema path).
 
 ## Mental model
 
