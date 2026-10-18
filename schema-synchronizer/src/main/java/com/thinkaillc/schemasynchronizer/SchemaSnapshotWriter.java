@@ -603,17 +603,18 @@ public class SchemaSnapshotWriter {
                 return;
             }
             indexes.add("CREATE " + (parts.unique() ? "UNIQUE " : "")
-                    + "INDEX " + naming.index(dialect, name) + " ON " + tableSql + " ("
+                    + "INDEX " + (dialect.supportsCreateIndexIfNotExists() ? "IF NOT EXISTS " : "")
+                    + naming.index(dialect, name) + " ON " + tableSql + " ("
                     + String.join(", ", parts.columns().values()) + ")");
         });
         return indexes;
     }
 
     /**
-     * Index names that back UNIQUE constraints (not free-standing CREATE UNIQUE INDEX).
-     * Excluding them avoids false "drop index" drift when the constraint is managed via CREATE TABLE
-     * or change sets. {@code tableName} and {@code schemaPattern} are exact catalog spellings, and the
-     * returned names are exact too.
+     * Constraint-backed index names that should not be separately serialized. H2 primary-key and
+     * foreign-key backing indexes are excluded, but H2 UNIQUE constraint backing indexes are safe to
+     * replay as idempotent unique indexes and therefore remain in the snapshot. {@code tableName} and
+     * {@code schemaPattern} are exact catalog spellings, and the returned names are exact too.
      */
     static Set<String> uniqueConstraintIndexNames(Connection conn, DatabaseDialect dialect, String catalog,
                                                   String schemaPattern, String tableName) throws SQLException {
@@ -623,8 +624,12 @@ public class SchemaSnapshotWriter {
         }
         Set<String> names = new HashSet<>();
         if (dialect == DatabaseDialect.H2) {
-            String sql = "SELECT index_name FROM information_schema.indexes "
-                    + "WHERE table_schema = ? AND table_name = ? AND is_generated = TRUE";
+            String sql = "SELECT i.index_name FROM information_schema.indexes i "
+                    + "INNER JOIN information_schema.table_constraints tc "
+                    + "ON tc.table_schema = i.table_schema AND tc.table_name = i.table_name "
+                    + "AND tc.index_name = i.index_name "
+                    + "WHERE i.table_schema = ? AND i.table_name = ? AND i.is_generated = TRUE "
+                    + "AND tc.constraint_type <> 'UNIQUE'";
             try (var statement = conn.prepareStatement(sql)) {
                 statement.setString(1, schemaPattern == null ? "PUBLIC" : schemaPattern);
                 statement.setString(2, tableName);

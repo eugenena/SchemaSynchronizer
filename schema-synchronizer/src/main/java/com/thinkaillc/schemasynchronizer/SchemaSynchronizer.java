@@ -947,6 +947,11 @@ public class SchemaSynchronizer {
     private static ColumnSpec comparableTarget(String definition, DatabaseDialect dialect) {
         ColumnSpec target = withDefaultNumericPrecision(withDefaultFractionalPrecision(
                 foldNationalType(ColumnDefinitionParser.parse(definition), dialect), dialect), definition, dialect);
+        if (dialect == DatabaseDialect.H2 && "TEXT".equals(target.baseType())) {
+            // H2's PostgreSQL mode stores TEXT as an unbounded VARCHAR; treating the alias literally
+            // caused a redundant ALTER COLUMN TYPE TEXT on every startup.
+            target = new ColumnSpec("VARCHAR", null, target.scale(), target.notNull(), target.defaultExpr());
+        }
         if (dialect == DatabaseDialect.ORACLE) {
             target = oracleComparableTarget(target);
         }
