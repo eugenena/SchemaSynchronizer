@@ -127,6 +127,23 @@ class ChangeSetHistoryPolicyTest {
     }
 
     @Test
+    void reviewedDynamicSqlCannotCallFunctionsOutsideConfiguredSchema() {
+        String triggerFunction = "CREATE OR REPLACE FUNCTION public.guard_row() RETURNS trigger "
+                + "LANGUAGE plpgsql AS $body$ BEGIN EXECUTE 'SELECT $1' USING new.lookup(); "
+                + "RETURN NEW; END $body$";
+        SchemaDefinition.ChangeSet reviewed = new SchemaDefinition.ChangeSet("005-reviewed-function-call",
+                "reviewed dynamic function call", List.of(triggerFunction), null,
+                SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA, true);
+
+        assertThatThrownBy(() -> new ChangeSetExecutor().validateHistory(connection(Map.of()), List.of(reviewed),
+                options(false), DatabaseDialect.POSTGRESQL))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("namespace inside routine body 'new'")
+                .hasMessageContaining("configured for 'public'");
+        assertThat(executed).isEmpty();
+    }
+
+    @Test
     void reviewedChangeSetsStillRejectUnclassifiedTopLevelStatementsAcrossEveryDialect() {
         for (DatabaseDialect dialect : DatabaseDialect.values()) {
             SchemaDefinition.ChangeSet reviewed = new SchemaDefinition.ChangeSet("001-reviewed-delete", "reviewed",

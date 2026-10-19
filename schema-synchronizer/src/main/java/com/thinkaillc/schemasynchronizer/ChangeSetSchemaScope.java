@@ -1497,6 +1497,10 @@ final class ChangeSetSchemaScope {
         if (!routine || dialect != DatabaseDialect.POSTGRESQL) {
             return false;
         }
+        Token after = SqlTokenizer.next(tokens, chain.last());
+        if (after != null && after.punct("(")) {
+            return false;
+        }
         int at = previousSignificant(tokens, chain.first());
         if (at < 0 || (!tokens.get(at).keyword("USING") && !tokens.get(at).punct(","))) {
             return false;
