@@ -1,6 +1,6 @@
 # Five-minute Spring Boot quick start
 
-This guide adds SchemaSynchronizer 2.0.0 to an existing Spring Boot 3 or 4 application.
+This guide adds SchemaSynchronizer 2.2.0 to an existing Spring Boot 3 or 4 application.
 It requires Java 17 or later and a configured JDBC `DataSource`. Supported engines are
 PostgreSQL 16+, MariaDB 10.3+, MySQL 8.0+, SQL Server 2019+, Oracle 19c+ (CI tests Oracle XE 21c),
 and H2 2.5+ for local/test use. See [Database dialects](DATABASE_DIALECTS.md) for engine-specific
@@ -18,8 +18,16 @@ For Spring Boot 3, use the original integration artifact:
 <dependency>
   <groupId>com.thinkaillc</groupId>
   <artifactId>schema-synchronizer</artifactId>
-  <version>2.0.0</version>
+  <version>2.2.0</version>
 </dependency>
+```
+
+Gradle Kotlin DSL:
+
+```kotlin
+dependencies {
+    implementation("com.thinkaillc:schema-synchronizer:2.2.0")
+}
 ```
 
 For Spring Boot 4, use the Boot 4 adapter (it brings in the shared library):
@@ -28,12 +36,24 @@ For Spring Boot 4, use the Boot 4 adapter (it brings in the shared library):
 <dependency>
   <groupId>com.thinkaillc</groupId>
   <artifactId>schema-synchronizer-spring-boot4</artifactId>
-  <version>2.0.0</version>
+  <version>2.2.0</version>
 </dependency>
+```
+
+Gradle Kotlin DSL:
+
+```kotlin
+dependencies {
+    implementation("com.thinkaillc:schema-synchronizer-spring-boot4:2.2.0")
+}
 ```
 
 Do not add both adapters to one application. The same properties and definition format work
 with either major version.
+
+For Boot 3, auto-configuration is included directly in `schema-synchronizer`; no separate
+starter is required. Boot 4 uses the `schema-synchronizer-spring-boot4` adapter, which brings
+in the shared core library.
 
 The artifact is published on Maven Central; no additional repository is required.
 

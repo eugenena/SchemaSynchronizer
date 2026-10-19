@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 2.2.0 — 2026-10-19
+
 - Add explicit per-change-set `reviewedSql` opt-in for manually reviewed SQL while retaining
   statement-shape, supported-object, and schema-scope validation, including every row argument
   in a dynamic PostgreSQL `EXECUTE ... USING` clause without treating qualified calls as row
