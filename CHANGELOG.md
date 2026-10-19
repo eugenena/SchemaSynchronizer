@@ -1,6 +1,13 @@
 # Changelog
 
-## 2.1.0 — Unreleased
+## Unreleased
+
+- Add explicit per-change-set `reviewedSql` opt-in for manually reviewed SQL while retaining
+  statement-shape, supported-object, and schema-scope validation, including every row argument
+  in a dynamic PostgreSQL `EXECUTE ... USING` clause without treating qualified calls as row
+  fields.
+
+## 2.1.0 — 2026-10-18
 
 - Add a dedicated Spring Boot 4 integration artifact while retaining the Spring Boot 3
   integration for existing applications.

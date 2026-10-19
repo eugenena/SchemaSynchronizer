@@ -56,6 +56,16 @@ class ChangeSetChecksumGoldenTest {
     }
 
     @Test
+    void reviewedSqlOptInDoesNotChangeImmutableDatabaseEffectDigest() throws Exception {
+        SchemaDefinition.ChangeSet reviewed = new SchemaDefinition.ChangeSet("001-create", "d", List.of(CREATE_ITEMS),
+                null, SchemaDefinition.ChangeSet.Phase.BEFORE_SCHEMA, true);
+
+        assertThat(checksum(new SchemaDefinition.ChangeSet("001-create", "d", List.of(CREATE_ITEMS))))
+                .isEqualTo(CREATE_ITEMS_BEFORE);
+        assertThat(checksum(reviewed)).isEqualTo(CREATE_ITEMS_BEFORE);
+    }
+
+    @Test
     void multipleStatementsWithVerification() throws Exception {
         assertThat(checksum(new SchemaDefinition.ChangeSet("002-index", "d", List.of(
                         "CREATE INDEX idx_items_note ON items (note)", "ALTER TABLE items ADD COLUMN note TEXT"),
@@ -104,9 +114,12 @@ class ChangeSetChecksumGoldenTest {
                   {"id": "003-multiline", "description": "d",
                    "statements": ["CREATE TABLE t (\\r\\n  id INT\\r\\n)"],
                    "verificationSql": "SELECT 1\\r\\nFROM t", "phase": "AFTER_SCHEMA"},
-                  {"id": "001-create", "statements": ["CREATE TABLE items (id BIGINT PRIMARY KEY)"]}
+                  {"id": "001-create", "statements": ["CREATE TABLE items (id BIGINT PRIMARY KEY)"],
+                   "reviewedSql": true}
                 ]}""", SchemaDefinition.class);
         assertThat(checksum(definition.changes().get(0))).isEqualTo(MULTILINE);
+        assertThat(definition.changes().get(0).reviewedSql()).isFalse();
+        assertThat(definition.changes().get(1).reviewedSql()).isTrue();
         assertThat(checksum(definition.changes().get(1))).isEqualTo(CREATE_ITEMS_BEFORE);
     }
 

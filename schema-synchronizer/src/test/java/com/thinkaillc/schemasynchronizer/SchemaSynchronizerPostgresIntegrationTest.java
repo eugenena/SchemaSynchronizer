@@ -628,6 +628,42 @@ class SchemaSynchronizerPostgresIntegrationTest {
     }
 
     @Test
+    void reviewedDynamicTriggerSqlAppliesAndUsesTheTriggerSchema() throws Exception {
+        DataSource dataSource = dataSource();
+        String schema = uniqueSchema("reviewed_dynamic_trigger");
+        createSchema(dataSource, schema);
+        try (Connection connection = dataSource.getConnection()) {
+            statement(connection, "CREATE TABLE " + schema + ".items (id INTEGER PRIMARY KEY)");
+            statement(connection, "CREATE TABLE " + schema + ".observations (item_id INTEGER NOT NULL)");
+            statement(connection, "INSERT INTO " + schema + ".items (id) VALUES (1)");
+        }
+
+        String function = "CREATE FUNCTION ensure_item_exists() RETURNS trigger LANGUAGE plpgsql AS $function$ "
+                + "DECLARE item_exists BOOLEAN; BEGIN EXECUTE format('"
+                + "SELECT EXISTS (SELECT 1 FROM %I.items WHERE id = $1 AND id = $2)', TG_TABLE_SCHEMA) "
+                + "INTO item_exists USING NEW.item_id, NEW.item_id; IF NOT item_exists THEN "
+                + "RAISE EXCEPTION 'item does not exist in trigger schema'; END IF; "
+                + "RETURN NEW; END $function$";
+        SchemaDefinition.ChangeSet change = new SchemaDefinition.ChangeSet("001-reviewed-dynamic-trigger",
+                "reviewed dynamic trigger query", List.of(function,
+                        "CREATE TRIGGER trg_observations_item BEFORE INSERT ON observations FOR EACH ROW "
+                                + "EXECUTE FUNCTION ensure_item_exists()"),
+                null, SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA, true);
+        SchemaDefinition definition = new SchemaDefinition(2, "postgresql", Map.of(), List.of(change));
+
+        try (Connection connection = dataSource.getConnection()) {
+            SchemaSynchronizationResult result = synchronizer(dataSource, schema, false)
+                    .synchronizeWithResult(connection, definition);
+            assertThat(result.changeSetsApplied()).isEqualTo(1);
+            statement(connection, "INSERT INTO " + schema + ".observations (item_id) VALUES (1)");
+            assertThatThrownBy(() -> statement(connection,
+                    "INSERT INTO " + schema + ".observations (item_id) VALUES (2)"))
+                    .isInstanceOf(SQLException.class)
+                    .hasMessageContaining("item does not exist in trigger schema");
+        }
+    }
+
+    @Test
     void aliasQualifiedColumnsApply() throws Exception {
         DataSource dataSource = dataSource();
         String schema = uniqueSchema("alias_columns_case");

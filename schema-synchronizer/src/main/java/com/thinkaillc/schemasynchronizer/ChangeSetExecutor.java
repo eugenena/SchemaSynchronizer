@@ -199,7 +199,11 @@ final class ChangeSetExecutor {
     static void requirePolicy(SchemaDefinition.ChangeSet change, SchemaSynchronizerOptions options,
                               DatabaseDialect dialect) {
         change.statements().forEach(statement -> {
-            NonDestructiveSqlPolicy.requireSafe(statement, dialect);
+            if (change.reviewedSql()) {
+                NonDestructiveSqlPolicy.requireReviewed(statement, dialect);
+            } else {
+                NonDestructiveSqlPolicy.requireSafe(statement, dialect);
+            }
             ChangeSetSchemaScope.requireScoped(statement, options.schema(), dialect);
         });
         if (change.verificationSql() != null) {
@@ -391,6 +395,8 @@ final class ChangeSetExecutor {
         }
         digest.update((byte) 0);
         digest.update(change.effectivePhase().name().getBytes(StandardCharsets.UTF_8));
+        // reviewedSql is an execution-policy annotation, not a database effect. Excluding it
+        // preserves every existing history checksum when a maintainer reviews an unchanged set.
         return HexFormat.of().formatHex(digest.digest());
     }
 

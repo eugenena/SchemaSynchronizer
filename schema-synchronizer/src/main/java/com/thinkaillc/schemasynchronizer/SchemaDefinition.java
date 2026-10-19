@@ -107,10 +107,14 @@ public record SchemaDefinition(Integer formatVersion, String dialect,
      *                        is already in effect (required on MySQL, MariaDB, and Oracle)
      * @param phase           when the change runs relative to the declarative tables; null means
      *                        {@link Phase#BEFORE_SCHEMA}
+     * @param reviewedSql     true only when a maintainer explicitly reviewed SQL that the automatic
+     *                        non-destructive policy cannot prove safe; schema-scope and statement
+     *                        structure checks still apply. This execution-policy annotation does not
+     *                        alter the checksum because it does not alter the SQL's database effect.
      */
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record ChangeSet(String id, String description, List<String> statements, String verificationSql,
-                            Phase phase) {
+                            Phase phase, boolean reviewedSql) {
         /** When a change set runs relative to the declarative table reconciliation. */
         public enum Phase {
             /** Before tables, columns, and indexes are reconciled. */
@@ -124,14 +128,20 @@ public record SchemaDefinition(Integer formatVersion, String dialect,
             statements = copy(statements);
         }
 
+        /** Existing source-compatible constructor; ordinary change sets remain policy-checked. */
+        public ChangeSet(String id, String description, List<String> statements, String verificationSql,
+                         Phase phase) {
+            this(id, description, statements, verificationSql, phase, false);
+        }
+
         /** A {@link Phase#BEFORE_SCHEMA} change set. */
         public ChangeSet(String id, String description, List<String> statements, String verificationSql) {
-            this(id, description, statements, verificationSql, Phase.BEFORE_SCHEMA);
+            this(id, description, statements, verificationSql, Phase.BEFORE_SCHEMA, false);
         }
 
         /** A {@link Phase#BEFORE_SCHEMA} change set without verification SQL. */
         public ChangeSet(String id, String description, List<String> statements) {
-            this(id, description, statements, null, Phase.BEFORE_SCHEMA);
+            this(id, description, statements, null, Phase.BEFORE_SCHEMA, false);
         }
 
         /** {@link #phase()}, or {@link Phase#BEFORE_SCHEMA} when it is absent. */

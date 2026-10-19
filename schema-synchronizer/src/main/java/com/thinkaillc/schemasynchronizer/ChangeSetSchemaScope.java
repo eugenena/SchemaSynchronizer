@@ -425,8 +425,12 @@ final class ChangeSetSchemaScope {
             if (parts == 2 && anchor) {
                 continue;
             }
-            if (!typed && parts == 2 && columnExpression(tokens, chain, objectLists)
-                    && (correlations.pseudoRow(chain) || correlations.declares(chain.first(), schema))) {
+            boolean pseudoRowExpression = correlations.pseudoRow(chain)
+                    && (columnExpression(tokens, chain, objectLists)
+                            || postgresExecuteUsingOperand(tokens, chain, dialect, routine));
+            if (!typed && parts == 2 && (pseudoRowExpression
+                    || (columnExpression(tokens, chain, objectLists)
+                            && correlations.declares(chain.first(), schema)))) {
                 continue;
             }
             if (!typed && routine && correlations.routineItemChain(chain, objectLists)) {
@@ -1485,6 +1489,49 @@ final class ChangeSetSchemaScope {
             return after == null || !after.punct("(");
         }
         return !objectPosition(tokens, chain, lists);
+    }
+
+    /** PostgreSQL {@code EXECUTE ... USING NEW.column} is a trigger-row expression, not an object. */
+    private static boolean postgresExecuteUsingOperand(List<Token> tokens, Chain chain, DatabaseDialect dialect,
+                                                       boolean routine) {
+        if (!routine || dialect != DatabaseDialect.POSTGRESQL) {
+            return false;
+        }
+        Token after = SqlTokenizer.next(tokens, chain.last());
+        if (after != null && after.punct("(")) {
+            return false;
+        }
+        int at = previousSignificant(tokens, chain.first());
+        if (at < 0 || (!tokens.get(at).keyword("USING") && !tokens.get(at).punct(","))) {
+            return false;
+        }
+        int usingAt = at;
+        if (tokens.get(at).punct(",")) {
+            usingAt = -1;
+            for (int index = at - 1; index >= 0; index--) {
+                Token token = tokens.get(index);
+                if (token.punct(";") || token.keyword("THEN") || token.keyword("ELSE")) {
+                    return false;
+                }
+                if (token.keyword("USING")) {
+                    usingAt = index;
+                    break;
+                }
+            }
+            if (usingAt < 0) {
+                return false;
+            }
+        }
+        for (int index = usingAt - 1; index >= 0; index--) {
+            Token token = tokens.get(index);
+            if (token.punct(";") || token.keyword("THEN") || token.keyword("ELSE")) {
+                return false;
+            }
+            if (token.keyword("EXECUTE")) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

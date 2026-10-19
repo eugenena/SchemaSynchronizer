@@ -127,6 +127,11 @@ Rules:
   engines without a boolean type). Additional columns are ignored. Zero rows, more than one
   row, or `NULL` fails the sync.
 - Verification queries must be read-only and must not call side-effecting functions.
+- `reviewedSql: true` is a per-change-set opt-in for SQL a maintainer has manually reviewed
+  but the automatic non-destructive policy cannot prove safe (such as dynamic SQL in a
+  trigger function). It bypasses that effect policy only; single-statement, supported-object,
+  and configured-schema checks remain active. The marker does not alter the database-effect
+  checksum, preserving existing history rows when only the review annotation is added.
 - Change-set statements must target the configured schema namespace (or system
   catalogs such as `information_schema` / `pg_catalog` / `sys`). Any `other.object`
   reference is rejected. The exceptions are two-part `q.column` references in an
