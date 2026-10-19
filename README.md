@@ -137,7 +137,7 @@ SchemaSynchronizer requires Java 17 or later. For Spring Boot 3, add the existin
 <dependency>
   <groupId>com.thinkaillc</groupId>
   <artifactId>schema-synchronizer</artifactId>
-  <version>2.0.0</version>
+  <version>2.1.0</version>
 </dependency>
 ```
 
@@ -147,7 +147,7 @@ For Spring Boot 4, use the version-specific adapter instead. It brings in the sh
 <dependency>
   <groupId>com.thinkaillc</groupId>
   <artifactId>schema-synchronizer-spring-boot4</artifactId>
-  <version>2.0.0</version>
+  <version>2.1.0</version>
 </dependency>
 ```
 
