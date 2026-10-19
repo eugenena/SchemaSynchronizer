@@ -98,6 +98,55 @@ class ChangeSetHistoryPolicyTest {
     }
 
     @Test
+    void reviewedSqlIsExplicitPerChangeSetAndStillEnforcesSchemaScope() throws Exception {
+        String triggerFunction = "CREATE OR REPLACE FUNCTION public.guard_row() RETURNS trigger "
+                + "LANGUAGE plpgsql AS $body$ BEGIN EXECUTE format('"
+                + "SELECT EXISTS (SELECT 1 FROM %I.items WHERE id = $1)', TG_TABLE_SCHEMA) "
+                + "INTO found USING NEW.id; RETURN NEW; END $body$";
+        SchemaDefinition.ChangeSet reviewed = new SchemaDefinition.ChangeSet("003-reviewed-function", "reviewed",
+                List.of(triggerFunction), null, SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA, true);
+        SchemaDefinition.ChangeSet ordinary = new SchemaDefinition.ChangeSet("003-ordinary-function", "ordinary",
+                List.of(triggerFunction), null, SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA);
+
+        assertThatCode(() -> new ChangeSetExecutor().validateHistory(connection(Map.of()), List.of(reviewed),
+                options(false), DatabaseDialect.POSTGRESQL)).doesNotThrowAnyException();
+        assertThatThrownBy(() -> new ChangeSetExecutor().validateHistory(connection(Map.of()), List.of(ordinary),
+                options(false), DatabaseDialect.POSTGRESQL))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("not allowed");
+
+        SchemaDefinition.ChangeSet crossSchema = new SchemaDefinition.ChangeSet("004-cross-schema", "reviewed",
+                List.of("CREATE TRIGGER trg_items BEFORE INSERT ON other.items FOR EACH ROW "
+                        + "EXECUTE FUNCTION public.guard_row()"), null,
+                SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA, true);
+        assertThatThrownBy(() -> new ChangeSetExecutor().validateHistory(connection(Map.of()), List.of(crossSchema),
+                options(false), DatabaseDialect.POSTGRESQL))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("schema");
+        assertThat(executed).isEmpty();
+    }
+
+    @Test
+    void reviewedChangeSetsStillRejectUnclassifiedTopLevelStatementsAcrossEveryDialect() {
+        for (DatabaseDialect dialect : DatabaseDialect.values()) {
+            SchemaDefinition.ChangeSet reviewed = new SchemaDefinition.ChangeSet("001-reviewed-delete", "reviewed",
+                    List.of("DELETE FROM items"), null, SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA, true);
+            SchemaDefinition definition = new SchemaDefinition(2, dialect.id(), Map.of(), List.of(reviewed));
+            String schema = switch (dialect) {
+                case MYSQL, MARIADB -> "appdb";
+                case SQLSERVER -> "dbo";
+                case ORACLE -> "APP";
+                case POSTGRESQL, H2 -> "public";
+            };
+
+            assertThatThrownBy(() -> SchemaDefinitionValidator.validate(definition, schema))
+                    .as("reviewed change set in %s", dialect)
+                    .isInstanceOf(SchemaDefinitionException.class)
+                    .hasMessageContaining("unsupported schema change SQL");
+        }
+    }
+
+    @Test
     void checksumMismatchFailsBeforeThePolicy() throws Exception {
         Map<String, String> history = history(LEGACY_DROP.id(), "0".repeat(64));
 

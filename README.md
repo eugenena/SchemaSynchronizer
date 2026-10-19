@@ -602,6 +602,15 @@ rows, or `NULL` fail the sync. It verifies a fresh application and can adopt an
 already-existing change only when the database proves the expected object or state exists.
 Any function called by a verification query must be side-effect-free.
 
+Set `"reviewedSql": true` only when a maintainer has manually reviewed a change set whose
+SQL is intentionally outside the automatic non-destructive policy (for example, a trigger
+function using dynamic SQL). This is a per-change-set opt-in: the single-statement,
+supported-object, and configured-schema scope checks still run, but the policy that blocks
+destructive or otherwise manually-reviewed operations is bypassed for that change set.
+Treat this SQL like production code and use a schema-scoped least-privilege database account.
+The annotation is execution-policy metadata and does not change the database-effect checksum,
+so it can be added to an unchanged applied change set without invalidating its history row.
+
 Each item in `statements` must contain exactly one JDBC statement. Definitions are
 trusted application artifacts, not untrusted user input: the SQL checks catch accidental
 destructive DDL, but they are not a security boundary. A change-set author can reach

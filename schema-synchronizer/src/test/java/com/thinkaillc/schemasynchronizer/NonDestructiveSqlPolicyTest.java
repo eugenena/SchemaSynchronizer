@@ -56,6 +56,29 @@ class NonDestructiveSqlPolicyTest {
     }
 
     @Test
+    void reviewedSqlAllowsManualOperationsButKeepsStatementShapeAndSupportedObjectChecks() {
+        String triggerFunction = "CREATE OR REPLACE FUNCTION public.guard_row() RETURNS trigger "
+                + "LANGUAGE plpgsql AS $body$ BEGIN EXECUTE format('"
+                + "SELECT EXISTS (SELECT 1 FROM %I.items WHERE id = $1)', TG_TABLE_SCHEMA) "
+                + "INTO found USING NEW.id; RETURN NEW; END $body$";
+
+        assertThatThrownBy(() -> NonDestructiveSqlPolicy.requireSafe(triggerFunction, DatabaseDialect.POSTGRESQL))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("not allowed");
+        assertThatCode(() -> NonDestructiveSqlPolicy.requireReviewed(triggerFunction, DatabaseDialect.POSTGRESQL))
+                .doesNotThrowAnyException();
+        assertThatThrownBy(() -> NonDestructiveSqlPolicy.requireReviewed(
+                "CREATE VIEW items_view AS SELECT * FROM items", DatabaseDialect.POSTGRESQL))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("not yet supported");
+        assertThatThrownBy(() -> NonDestructiveSqlPolicy.requireReviewed(
+                "CREATE FUNCTION f() RETURNS void LANGUAGE sql AS $$ SELECT 1 $$; DROP TABLE items",
+                DatabaseDialect.POSTGRESQL))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("exactly one statement");
+    }
+
+    @Test
     void rejectsDestructiveAndUnclassifiedOperations() {
         assertThatThrownBy(() -> NonDestructiveSqlPolicy.requireSafe("DROP TABLE customers"))
                 .isInstanceOf(IllegalArgumentException.class);

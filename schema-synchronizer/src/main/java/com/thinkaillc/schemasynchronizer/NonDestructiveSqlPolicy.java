@@ -163,6 +163,26 @@ final class NonDestructiveSqlPolicy {
     }
 
     /**
+     * Validates a statement whose author has explicitly reviewed its effects. It preserves the
+     * statement-shape and supported-object checks, while allowing operations that the automatic
+     * non-destructive policy deliberately cannot prove safe. Callers must still enforce namespace
+     * scope separately; this method is not a trust or authorization boundary.
+     */
+    static void requireReviewed(String sql, DatabaseDialect dialect) {
+        if (sql == null || sql.isBlank()) {
+            throw new IllegalArgumentException("schema change statement is blank");
+        }
+        SqlLexer.Mode mode = SqlLexer.mode(dialect);
+        String normalized = executableSql(sql, mode).toUpperCase(Locale.ROOT);
+        List<Token> tokens = SqlTokenizer.tokenize(sql, mode);
+        rejectObjectTypeNotYetSupported(tokens, sql);
+        requireSingleStatement(tokens, mode, sql, "schema change SQL");
+        if (!matchesAllowedStatement(normalized, tokens) && !allowedCteStatement(tokens, dialect)) {
+            throw new IllegalArgumentException("unsupported schema change SQL: " + summarize(sql));
+        }
+    }
+
+    /**
      * {@code WITH … SELECT|UPDATE|INSERT INTO …} where the engine accepts that main statement
      * after a {@code WITH} list: PostgreSQL and SQL Server take {@code UPDATE} and
      * {@code INSERT}, MySQL takes {@code UPDATE}, and MariaDB and Oracle take neither. The CTE
