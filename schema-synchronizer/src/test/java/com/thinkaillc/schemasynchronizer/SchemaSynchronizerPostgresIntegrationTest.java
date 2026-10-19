@@ -640,8 +640,8 @@ class SchemaSynchronizerPostgresIntegrationTest {
 
         String function = "CREATE FUNCTION ensure_item_exists() RETURNS trigger LANGUAGE plpgsql AS $function$ "
                 + "DECLARE item_exists BOOLEAN; BEGIN EXECUTE format('"
-                + "SELECT EXISTS (SELECT 1 FROM %I.items WHERE id = $1)', TG_TABLE_SCHEMA) "
-                + "INTO item_exists USING NEW.item_id; IF NOT item_exists THEN "
+                + "SELECT EXISTS (SELECT 1 FROM %I.items WHERE id = $1 AND id = $2)', TG_TABLE_SCHEMA) "
+                + "INTO item_exists USING NEW.item_id, NEW.item_id; IF NOT item_exists THEN "
                 + "RAISE EXCEPTION 'item does not exist in trigger schema'; END IF; "
                 + "RETURN NEW; END $function$";
         SchemaDefinition.ChangeSet change = new SchemaDefinition.ChangeSet("001-reviewed-dynamic-trigger",

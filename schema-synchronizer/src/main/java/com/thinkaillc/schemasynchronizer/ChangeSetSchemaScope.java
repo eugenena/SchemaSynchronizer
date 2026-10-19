@@ -1498,10 +1498,27 @@ final class ChangeSetSchemaScope {
             return false;
         }
         int at = previousSignificant(tokens, chain.first());
-        if (at < 0 || !tokens.get(at).keyword("USING")) {
+        if (at < 0 || (!tokens.get(at).keyword("USING") && !tokens.get(at).punct(","))) {
             return false;
         }
-        for (int index = at - 1; index >= 0; index--) {
+        int usingAt = at;
+        if (tokens.get(at).punct(",")) {
+            usingAt = -1;
+            for (int index = at - 1; index >= 0; index--) {
+                Token token = tokens.get(index);
+                if (token.punct(";") || token.keyword("THEN") || token.keyword("ELSE")) {
+                    return false;
+                }
+                if (token.keyword("USING")) {
+                    usingAt = index;
+                    break;
+                }
+            }
+            if (usingAt < 0) {
+                return false;
+            }
+        }
+        for (int index = usingAt - 1; index >= 0; index--) {
             Token token = tokens.get(index);
             if (token.punct(";") || token.keyword("THEN") || token.keyword("ELSE")) {
                 return false;

@@ -101,8 +101,8 @@ class ChangeSetHistoryPolicyTest {
     void reviewedSqlIsExplicitPerChangeSetAndStillEnforcesSchemaScope() throws Exception {
         String triggerFunction = "CREATE OR REPLACE FUNCTION public.guard_row() RETURNS trigger "
                 + "LANGUAGE plpgsql AS $body$ BEGIN EXECUTE format('"
-                + "SELECT EXISTS (SELECT 1 FROM %I.items WHERE id = $1)', TG_TABLE_SCHEMA) "
-                + "INTO found USING NEW.id; RETURN NEW; END $body$";
+                + "SELECT EXISTS (SELECT 1 FROM %I.items WHERE id = $1 OR id = $2)', TG_TABLE_SCHEMA) "
+                + "INTO found USING NEW.id, OLD.id; RETURN NEW; END $body$";
         SchemaDefinition.ChangeSet reviewed = new SchemaDefinition.ChangeSet("003-reviewed-function", "reviewed",
                 List.of(triggerFunction), null, SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA, true);
         SchemaDefinition.ChangeSet ordinary = new SchemaDefinition.ChangeSet("003-ordinary-function", "ordinary",
