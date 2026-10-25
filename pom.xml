@@ -61,8 +61,8 @@
 
     <!-- JDBC drivers (bundled in the -standalone CLI jar; optional for the library). -->
     <postgresql.version>42.7.14</postgresql.version>
-    <mariadb-java-client.version>3.5.10</mariadb-java-client.version>
-    <mysql-connector-j.version>26.7.0</mysql-connector-j.version>
+    <mariadb-java-client.version>4.0.0</mariadb-java-client.version>
+    <mysql-connector-j.version>26.10.0</mysql-connector-j.version>
     <mssql-jdbc.version>13.6.1.jre11</mssql-jdbc.version>
     <ojdbc11.version>23.26.3.0.0</ojdbc11.version>
 
