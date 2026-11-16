@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Dependency and plugin upgrades (dependabot): Spring Boot 4 integration baseline 4.1.2,
+  Jackson 2.23.0, the JDBC drivers (MariaDB 4.0.0, MySQL Connector/J 26.10.0,
+  MS JDBC 13.6.2, Oracle ojdbc11 23.26.4.0.0), the surefire/enforcer/license Maven plugins,
+  and actions/setup-java 6.2.0.
 - Oracle scripts keep local procedure and function declarations inside their parent routine:
   the splitter no longer ends the parent at a local body's `END q;`, and nested locals are
   skipped recursively.
