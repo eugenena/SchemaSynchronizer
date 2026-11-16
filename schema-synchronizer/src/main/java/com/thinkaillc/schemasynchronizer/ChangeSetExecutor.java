@@ -27,14 +27,18 @@ import java.util.Set;
 final class ChangeSetExecutor {
     private static final Logger log = LoggerFactory.getLogger(ChangeSetExecutor.class);
 
-    record Result(int applied, List<String> plannedSql) {}
+    record Result(int applied, List<String> plannedSql, List<ChangeSetOutcome> outcomes) {
+        Result(int applied, List<String> plannedSql) {
+            this(applied, plannedSql, List.of());
+        }
+    }
 
     Result apply(Connection conn, List<SchemaDefinition.ChangeSet> changes, SchemaSynchronizerOptions options,
                  DatabaseDialect dialect)
             throws SQLException {
         List<SchemaDefinition.ChangeSet> safeChanges = validateStructure(changes);
         if (safeChanges.isEmpty()) {
-            return new Result(0, List.of());
+            return new Result(0, List.of(), List.of());
         }
 
         String history = dialect.qualifyHistoryTable(options.schema(), options.historyTable());
@@ -42,6 +46,7 @@ final class ChangeSetExecutor {
         List<String> planned = new ArrayList<>();
         int appliedCount = 0;
         int unrecordedCount = 0;
+        List<ChangeSetOutcome> outcomes = new ArrayList<>();
 
         for (SchemaDefinition.ChangeSet change : safeChanges) {
             String checksum = checksum(change);
@@ -51,6 +56,7 @@ final class ChangeSetExecutor {
                     throw new IllegalStateException("checksum mismatch for applied schema change '"
                             + change.id() + "': committed changes are immutable");
                 }
+                outcomes.add(ChangeSetOutcome.alreadyRecorded(change.id()));
                 continue;
             }
             unrecordedCount++;
@@ -58,12 +64,13 @@ final class ChangeSetExecutor {
             // Dry-run must not execute verificationSql (UDFs / admin SELECT side effects).
             if (options.dryRun()) {
                 planned.addAll(change.statements());
+                outcomes.add(ChangeSetOutcome.skippedDryRun(change.id()));
             } else if (!isVerified(conn, change)) {
                 planned.addAll(change.statements());
             }
         }
         if (options.dryRun() || unrecordedCount == 0) {
-            return new Result(0, List.copyOf(planned));
+            return new Result(0, List.copyOf(planned), List.copyOf(outcomes));
         }
 
         createHistory(conn, history, dialect);
@@ -81,14 +88,26 @@ final class ChangeSetExecutor {
             if (isVerified(conn, change)) {
                 insertHistory(conn, history, dialect, change, checksum, 0);
                 appliedCount++;
+                outcomes.add(ChangeSetOutcome.verifiedAdopted(change.id()));
                 continue;
             }
             Instant started = Instant.now();
+            int executedStatements = 0;
             int skippedDuplicates = 0;
-            for (String sql : change.statements()) {
-                if (executeAllowingAlreadyExists(conn, dialect.executableSql(sql), change.id(), dialect)) {
-                    skippedDuplicates++;
+            try {
+                for (String sql : change.statements()) {
+                    if (executeAllowingAlreadyExists(conn, dialect.executableSql(sql), change.id(), dialect)) {
+                        skippedDuplicates++;
+                    } else {
+                        executedStatements++;
+                    }
                 }
+            } catch (SQLException failure) {
+                outcomes.add(ChangeSetOutcome.failed(change.id(), executedStatements,
+                        Duration.between(started, Instant.now()).toMillis()));
+                throw new ChangeSetExecutionException(
+                        "schema change '" + change.id() + "' failed: " + failure.getMessage(),
+                        outcomes, failure);
             }
             long elapsed = Duration.between(started, Instant.now()).toMillis();
             if (skippedDuplicates > 0
@@ -107,8 +126,9 @@ final class ChangeSetExecutor {
             }
             insertHistory(conn, history, dialect, change, checksum, elapsed);
             appliedCount++;
+            outcomes.add(ChangeSetOutcome.executed(change.id(), executedStatements, elapsed));
         }
-        return new Result(appliedCount, List.copyOf(planned));
+        return new Result(appliedCount, List.copyOf(planned), List.copyOf(outcomes));
     }
 
     /**

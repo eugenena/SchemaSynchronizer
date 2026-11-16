@@ -433,7 +433,8 @@ public class SchemaSynchronizer {
             result = new SchemaSynchronizationResult(beforeChanges.applied() + afterChanges.applied(),
                     declarative.tablesCreated(),
                     declarative.columnsAdded(), declarative.columnsAltered(), List.copyOf(plannedSql.get()),
-                    declarative.pendingSql(), options.dryRun(), true, List.of());
+                    declarative.pendingSql(), options.dryRun(), true, List.of(),
+                    concatOutcomes(beforeChanges, afterChanges));
         } catch (Exception exception) {
             try {
                 rollback(conn, ownsTransaction, savepoint);
@@ -449,6 +450,14 @@ public class SchemaSynchronizer {
     }
 
     /** What releasing the lock and restoring the connection left behind. */
+
+    /** Owner-visible per change-set outcomes, before-phase first, aggregated across phases. */
+    private static List<ChangeSetOutcome> concatOutcomes(ChangeSetExecutor.Result before,
+                                                          ChangeSetExecutor.Result after) {
+        List<ChangeSetOutcome> out = new ArrayList<>(before.outcomes());
+        out.addAll(after.outcomes());
+        return List.copyOf(out);
+    }
     private record Cleanup(boolean lockReleased, List<Exception> failures) {
         void attachTo(Exception primary) {
             failures.forEach(failure -> SchemaExceptions.suppress(primary, failure));
@@ -468,7 +477,7 @@ public class SchemaSynchronizer {
             }
             return new SchemaSynchronizationResult(result.changeSetsApplied(), result.tablesCreated(),
                     result.columnsAdded(), result.columnsAltered(), result.plannedSql(), result.pendingSql(),
-                    result.dryRun(), lockReleased, warnings);
+                    result.dryRun(), lockReleased, warnings, result.changeSets());
         }
     }
 
@@ -560,7 +569,8 @@ public class SchemaSynchronizer {
             }
             result = new SchemaSynchronizationResult(before.applied() + after.applied(), declarative.tablesCreated(),
                     declarative.columnsAdded(), declarative.columnsAltered(), List.copyOf(plannedSql.get()),
-                    declarative.pendingSql(), options.dryRun(), true, List.of());
+                    declarative.pendingSql(), options.dryRun(), true, List.of(),
+                    concatOutcomes(before, after));
         } catch (Exception failure) {
             cleanUp(conn, dialect, lockToken, false, true).attachTo(failure);
             throw failure;

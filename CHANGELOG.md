@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+## 2.3.0 — adoption observability and profile tooling
+
+- Per change-set outcomes: every synchronization records how each change set was resolved
+  (executed / verified-adopted / already-recorded / skipped in dry runs / failed), exposed
+  through the new ChangeSetOutcome record on SchemaSynchronizationResult — binary-compatible
+  constructors keep 2.2 call sites compiling — and through AdoptionReport for assertions.
+- ChangeSetExecutionException carries the outcomes recorded before a change set failed, so
+  adoption reports survive failed runs.
+- SchemaFingerprints: stable structural fingerprints for parsed definitions and live schemas
+  via JDBC metadata (history table excluded), enabling adopted-vs-fresh schema equality
+  assertions.
+- ConstraintInventory: foreign-key and primary-key inventory through JDBC metadata with
+  case-insensitive schema matching and delete-rule names.
+- SqlScriptSplitter: statement splitting for plain SQL scripts (routines intact), the basis
+  for versioned adoption baselines.
+- SchemaDefinitionValidator: FK preservation coverage findings (inline FOREIGN KEY
+  declarations without a verificationSql-bearing change set) and a two-profile structural
+  compare for dual-dialect definitions; the CLI gains compare and fingerprint commands.
+
 ## 2.2.0 — 2026-10-19
 
 - Add explicit per-change-set `reviewedSql` opt-in for manually reviewed SQL while retaining
@@ -476,3 +495,4 @@ First public release.
 - Standalone schema serialization and synchronization CLIs.
 - Spring Boot auto-configuration with configurable startup policy.
 - Apache-2.0 licensing and Maven Central release packaging.
+
