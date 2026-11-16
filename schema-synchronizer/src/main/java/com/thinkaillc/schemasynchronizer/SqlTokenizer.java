@@ -579,7 +579,10 @@ final class SqlTokenizer {
         while (index < tokens.size()) {
             if (!opened && open.isEmpty() && isLocalDeclaration(tokens, index, start, routine)) {
                 // A local procedure or function balances itself: skip its whole declaration so
-                // its END name; cannot close the parent.
+                // its END name; cannot close the parent. Reusing the parent routine is safe:
+                // only package and type-body heads consult its kind, and those open their block
+                // at the header, before any local declaration, so this skip runs only for kinds
+                // whose IS/AS never opens a block.
                 index = oracleRoutineEnd(tokens, index + 1, routine);
                 continue;
             }
