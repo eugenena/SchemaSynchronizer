@@ -48,7 +48,24 @@ On existing databases, SchemaSynchronizer 1.2.0+ will:
 - when verification is false, skip individual statements that fail only because the
   object already exists, then require verification to succeed.
 
-Compare the resulting schemas. Both must converge before cutover.
+Compare the resulting schemas — both must converge before cutover. Since 2.3.0 the
+comparison is mechanical instead of a manual checklist:
+
+- Assert `SchemaFingerprints.liveSchemaFingerprint(connection, options)` equal on the
+  fresh and the adopted database: the hash covers tables, columns (name, type,
+  nullability), and foreign keys, and excludes the history table, row data, and catalog
+  ordering.
+- Assert the foreign-key inventory and delete rules with `ConstraintInventory`, and
+  primary keys in declaration order for composite keys.
+- Assert what each run did with `AdoptionReport.from(result)`: an existing database
+  resolves change sets as `VERIFIED_ADOPTED` or `ALREADY_RECORDED` (or `EXECUTED` with
+  skipped statements), an empty database as `EXECUTED`, and `failed()` must be empty.
+- Build the production-shaped legacy database by replaying a versioned SQL baseline
+  statement by statement with `SqlScriptSplitter.split(baseline, dialectId)`.
+- Run `SchemaDefinitionValidator.preservationFindings(definition)` in CI so every inline
+  `FOREIGN KEY` stays claimed by a preserving change set.
+
+The full walkthrough is in [ADOPTION_TESTING.md](ADOPTION_TESTING.md).
 
 ## 5. Rehearse pending SQL
 

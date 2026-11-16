@@ -27,14 +27,14 @@ applications normally sync the committed file onto their single datasource.
 2. Offline check:
 
    ```bash
-   java -jar schema-synchronizer-cli-2.2.0-standalone.jar validate schema-definition.json
+   java -jar schema-synchronizer-cli-2.3.0-standalone.jar validate schema-definition.json
    ```
 
 3. Preview against a disposable database:
 
    ```bash
    export SCHEMA_DB_PASSWORD='…'
-   java -jar schema-synchronizer-cli-2.2.0-standalone.jar dry-run \
+   java -jar schema-synchronizer-cli-2.3.0-standalone.jar dry-run \
      jdbc:postgresql://localhost:5432/app_scratch app_user - \
      schema-definition.json public
    ```
@@ -59,6 +59,29 @@ Change sets may encounter databases where **some** statements already succeeded
 Always give multi-statement change sets a verification query that proves the full
 postcondition.
 
+## Keep every foreign key covered
+
+An inline `FOREIGN KEY` in a table's `createSql` is created by the declarative planner
+when the table is created. On a database where the table already exists, that DDL never
+runs — adoption relies on a change set whose `verificationSql` proves the constraint is
+present. Keep every inline foreign key claimed by such a change set:
+
+```bash
+java -jar schema-synchronizer-cli-2.3.0-standalone.jar validate schema-definition.json
+```
+
+fails on structure and policy but not on coverage, so run the coverage check explicitly:
+
+```bash
+java -jar schema-synchronizer-cli-2.3.0-standalone.jar compare \
+  schema-definition.json schema-definition.json
+```
+
+(an empty diff prints only `preservation: …` findings, one per uncovered table). The
+Java entry point is `SchemaDefinitionValidator.preservationFindings`; an empty list
+means covered. See
+[ADOPTION_TESTING.md](ADOPTION_TESTING.md#offline-profile-tooling).
+
 ## When to serialize instead
 
 Use `serialize` when:
@@ -71,6 +94,7 @@ If the output file already exists, serialization preserves the hand-authored
 
 ## Related guides
 
+- [Adoption testing and observability](ADOPTION_TESTING.md)
 - [Schema definition reference](SCHEMA_DEFINITION.md)
 - [Migrating from Flyway or another migration tool](MIGRATING_FROM_MIGRATIONS.md)
 - [CLI guide](CLI.md)
