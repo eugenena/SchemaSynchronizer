@@ -1,22 +1,20 @@
 # Roadmap
 
-Planned work for releases after 2.2.0. Items are tracked as GitHub issues; this page
+Planned work for releases after 2.3.0. Items are tracked as GitHub issues; this page
 summarizes them and their intended order. Nothing here is a commitment to a date.
 
-## 2.3.0 — adoption observability and profile tooling
+## 2.3.0 — adoption observability and profile tooling (shipped)
 
-- Per change-set outcomes: ChangeSetOutcome with executed / verified-adopted / already-recorded /
-  skipped / failed states, aggregated on SchemaSynchronizationResult and wrapped by
-  AdoptionReport; ChangeSetExecutionException carries partial outcomes.
-- SchemaFingerprints for parsed definitions and live schemas; ConstraintInventory for foreign
-  key and primary key inventories through JDBC metadata.
-- SqlScriptSplitter for plain SQL scripts (routines intact).
-- SchemaDefinitionValidator: FK preservation coverage findings and a two-profile structural
-  compare; CLI compare and fingerprint commands.
+Delivered with per change-set outcomes, SchemaFingerprints and ConstraintInventory,
+SqlScriptSplitter, and the offline profile tooling with the CLI compare and fingerprint
+commands. See the [changelog](../CHANGELOG.md).
 
-Next: an adoption test kit with versioned baselines so consumer test suites can retire their
-migration-tool test dependencies, single-canonical-definition tooling, and Spring Test
-ergonomics.
+## 2.4.0 and later — planned
+
+- An adoption test kit with versioned baselines so consumer test suites can retire their
+  migration-tool test dependencies.
+- Single-canonical-definition tooling.
+- Spring Test ergonomics.
 
 
 ## Change-set support for more object types

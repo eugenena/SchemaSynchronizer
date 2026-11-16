@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+## 2.3.0 — 2026-11-16 — adoption observability and profile tooling
+
+- Per change-set outcomes: every synchronization records how each change set was resolved
+  (executed / verified-adopted / already-recorded / skipped in dry runs / failed), exposed
+  through the new ChangeSetOutcome record on SchemaSynchronizationResult — binary-compatible
+  constructors keep 2.2 call sites compiling — and through AdoptionReport for assertions.
+- ChangeSetExecutionException carries the outcomes recorded before a change set failed, so
+  adoption reports survive failed runs.
+- SchemaFingerprints: stable structural fingerprints for parsed definitions and live schemas
+  via JDBC metadata (history table excluded), enabling adopted-vs-fresh schema equality
+  assertions.
+- ConstraintInventory: foreign-key and primary-key inventory through JDBC metadata with
+  case-insensitive schema matching and delete-rule names.
+- SqlScriptSplitter: statement splitting for plain SQL scripts (routines intact), the basis
+  for versioned adoption baselines.
+- SchemaDefinitionValidator: FK preservation coverage findings (inline FOREIGN KEY
+  declarations without a verificationSql-bearing change set) and a two-profile structural
+  compare for dual-dialect definitions; the CLI gains compare and fingerprint commands.
 - Dependency and plugin upgrades (dependabot): Spring Boot 4 integration baseline 4.1.2,
   Jackson 2.23.0, the JDBC drivers (MariaDB 4.0.0, MySQL Connector/J 26.10.0,
   MS JDBC 13.6.2, Oracle ojdbc11 23.26.4.0.0), the surefire/enforcer/license Maven plugins,
@@ -36,25 +54,6 @@
   `END [name];` so a script can continue with further statements.
 - The CLI `compare` command reports preservation findings for both profiles, labeled with the
   file each finding belongs to.
-
-## 2.3.0 — adoption observability and profile tooling
-
-- Per change-set outcomes: every synchronization records how each change set was resolved
-  (executed / verified-adopted / already-recorded / skipped in dry runs / failed), exposed
-  through the new ChangeSetOutcome record on SchemaSynchronizationResult — binary-compatible
-  constructors keep 2.2 call sites compiling — and through AdoptionReport for assertions.
-- ChangeSetExecutionException carries the outcomes recorded before a change set failed, so
-  adoption reports survive failed runs.
-- SchemaFingerprints: stable structural fingerprints for parsed definitions and live schemas
-  via JDBC metadata (history table excluded), enabling adopted-vs-fresh schema equality
-  assertions.
-- ConstraintInventory: foreign-key and primary-key inventory through JDBC metadata with
-  case-insensitive schema matching and delete-rule names.
-- SqlScriptSplitter: statement splitting for plain SQL scripts (routines intact), the basis
-  for versioned adoption baselines.
-- SchemaDefinitionValidator: FK preservation coverage findings (inline FOREIGN KEY
-  declarations without a verificationSql-bearing change set) and a two-profile structural
-  compare for dual-dialect definitions; the CLI gains compare and fingerprint commands.
 
 ## 2.2.0 — 2026-10-19
 
