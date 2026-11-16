@@ -32,6 +32,16 @@ public enum DatabaseDialect {
         return id;
     }
 
+    /** The SQL-lexer mode whose statement-boundary rules this dialect follows (2.3.0+). */
+    SqlLexer.Mode lexerMode() {
+        return switch (this) {
+            case POSTGRESQL, H2 -> SqlLexer.Mode.POSTGRES;
+            case MARIADB, MYSQL -> SqlLexer.Mode.MYSQL;
+            case SQLSERVER -> SqlLexer.Mode.SQLSERVER;
+            case ORACLE -> SqlLexer.Mode.ORACLE;
+        };
+    }
+
     boolean isMySqlFamily() {
         return this == MARIADB || this == MYSQL;
     }

@@ -6,7 +6,7 @@ package com.thinkaillc.schemasynchronizer;
 import java.util.List;
 
 /**
- * Outcome of one synchronization, for deployment logs, dry runs, and tests.
+ * Outcome of one synchronization, for deployment logs, dry runs, adoption reports, and tests.
  *
  * @param changeSetsApplied change sets executed (or adopted through verificationSql) and recorded in
  *                          history; 0 in a dry run
@@ -25,6 +25,8 @@ import java.util.List;
  * @param cleanupWarnings   failures while releasing the lock or restoring the connection's auto-commit
  *                          mode after the outcome was decided, as {@code "ExceptionType: message"}; a
  *                          failed auto-commit restore is reported here with {@code lockReleased} true
+ * @param changeSets        per change-set outcomes (2.3.0+); empty in a dry run's executed sense — see
+ *                          {@link ChangeSetOutcome.Status} for the adopted/recorded/skipped distinction
  */
 public record SchemaSynchronizationResult(
         int changeSetsApplied,
@@ -35,20 +37,30 @@ public record SchemaSynchronizationResult(
         List<String> pendingSql,
         boolean dryRun,
         boolean lockReleased,
-        List<String> cleanupWarnings
+        List<String> cleanupWarnings,
+        List<ChangeSetOutcome> changeSets
 ) {
     /** Copies the lists; a null list is empty. */
     public SchemaSynchronizationResult {
         plannedSql = plannedSql == null ? List.of() : List.copyOf(plannedSql);
         pendingSql = pendingSql == null ? List.of() : List.copyOf(pendingSql);
         cleanupWarnings = cleanupWarnings == null ? List.of() : List.copyOf(cleanupWarnings);
+        changeSets = changeSets == null ? List.of() : List.copyOf(changeSets);
     }
 
-    /** A result of a run that was not a dry run and cleaned up normally. */
+    /** A result of a run that was not a dry run and cleaned up normally (2.2 call shape). */
     public SchemaSynchronizationResult(int changeSetsApplied, int tablesCreated, int columnsAdded,
                                        int columnsAltered, List<String> plannedSql, List<String> pendingSql) {
         this(changeSetsApplied, tablesCreated, columnsAdded, columnsAltered, plannedSql, pendingSql,
-                false, true, List.of());
+                false, true, List.of(), List.of());
+    }
+
+    /** The 2.2 canonical shape without per-change-set outcomes; outcomes are empty. */
+    public SchemaSynchronizationResult(int changeSetsApplied, int tablesCreated, int columnsAdded,
+                                       int columnsAltered, List<String> plannedSql, List<String> pendingSql,
+                                       boolean dryRun, boolean lockReleased, List<String> cleanupWarnings) {
+        this(changeSetsApplied, tablesCreated, columnsAdded, columnsAltered, plannedSql, pendingSql,
+                dryRun, lockReleased, cleanupWarnings, List.of());
     }
 
     /**

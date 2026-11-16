@@ -7,13 +7,16 @@ import org.junit.jupiter.api.Test;
 
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
+import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.Statement;
 import java.util.List;
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.groups.Tuple.tuple;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -122,6 +125,130 @@ class ChangeSetExecutorTest {
                 DatabaseDialect.MARIADB)).containsExactly(change, twoStatements);
         new ChangeSetExecutor().validateHistory(connection, List.of(twoStatements), dryRun, DatabaseDialect.MARIADB);
         assertThat(verificationCalls.get()).isZero();
+    }
+
+    /** A real in-memory H2 connection, so history, verification, and duplicate skips all behave. */
+    private Connection h2() throws Exception {
+        return DriverManager.getConnection("jdbc:h2:mem:cse_" + UUID.randomUUID() + ";DB_CLOSE_DELAY=-1", "sa", "");
+    }
+
+    /** H2's default schema exists without setup, unlike the MariaDB test options. */
+    private SchemaSynchronizerOptions h2Options() {
+        return new SchemaSynchronizerOptions(
+                "public", "schema_synchronizer_history", 7_249_031_147L, false, true, true);
+    }
+
+    private static void execute(Connection connection, String... sql) throws Exception {
+        try (Statement statement = connection.createStatement()) {
+            for (String one : sql) {
+                statement.execute(one);
+            }
+        }
+    }
+
+    @Test
+    void outcomesKeepApplicationOrderWhenRecordedChangeSetsInterleave() throws Exception {
+        SchemaDefinition.ChangeSet recorded = new SchemaDefinition.ChangeSet(
+                "recorded", "applied by an earlier run", List.of("CREATE TABLE items_recorded (id INT)"));
+        SchemaDefinition.ChangeSet fresh = new SchemaDefinition.ChangeSet(
+                "fresh", "applied now", List.of("CREATE TABLE items_fresh (id INT)"));
+        ChangeSetExecutor executor = new ChangeSetExecutor();
+        try (Connection connection = h2()) {
+            executor.apply(connection, List.of(recorded), h2Options(), DatabaseDialect.H2);
+
+            ChangeSetExecutor.Result result = executor.apply(connection,
+                    List.of(fresh, recorded), h2Options(), DatabaseDialect.H2);
+
+            assertThat(result.outcomes())
+                    .extracting(ChangeSetOutcome::changeSetId, ChangeSetOutcome::status)
+                    .containsExactly(
+                            tuple("fresh", ChangeSetOutcome.Status.EXECUTED),
+                            tuple("recorded", ChangeSetOutcome.Status.ALREADY_RECORDED));
+        }
+    }
+
+    @Test
+    void dryRunOutcomesAlsoKeepApplicationOrder() throws Exception {
+        SchemaDefinition.ChangeSet recorded = new SchemaDefinition.ChangeSet(
+                "recorded", "applied by an earlier run", List.of("CREATE TABLE items_recorded (id INT)"));
+        SchemaDefinition.ChangeSet planned = new SchemaDefinition.ChangeSet(
+                "planned", "previewed", List.of("CREATE TABLE items_planned (id INT)"));
+        ChangeSetExecutor executor = new ChangeSetExecutor();
+        SchemaSynchronizerOptions dryRun = new SchemaSynchronizerOptions(
+                "public", "schema_synchronizer_history", 7_249_031_147L, true, true, true);
+        try (Connection connection = h2()) {
+            executor.apply(connection, List.of(recorded), h2Options(), DatabaseDialect.H2);
+
+            ChangeSetExecutor.Result result = executor.apply(connection,
+                    List.of(planned, recorded), dryRun, DatabaseDialect.H2);
+
+            assertThat(result.outcomes())
+                    .extracting(ChangeSetOutcome::changeSetId, ChangeSetOutcome::status)
+                    .containsExactly(
+                            tuple("planned", ChangeSetOutcome.Status.SKIPPED_DRY_RUN),
+                            tuple("recorded", ChangeSetOutcome.Status.ALREADY_RECORDED));
+        }
+    }
+
+    @Test
+    void verificationFailureCarriesTheOutcomesRecordedSoFar() throws Exception {
+        SchemaDefinition.ChangeSet recorded = new SchemaDefinition.ChangeSet(
+                "recorded", "applied by an earlier run", List.of("CREATE TABLE items_recorded (id INT)"));
+        SchemaDefinition.ChangeSet failing = new SchemaDefinition.ChangeSet(
+                "failing", "verification fails afterwards",
+                List.of("CREATE TABLE items_failing (id INT)"), "SELECT FALSE");
+        ChangeSetExecutor executor = new ChangeSetExecutor();
+        try (Connection connection = h2()) {
+            executor.apply(connection, List.of(recorded), h2Options(), DatabaseDialect.H2);
+
+            assertThatThrownBy(() -> executor.apply(connection, List.of(recorded, failing),
+                    h2Options(), DatabaseDialect.H2))
+                    .isInstanceOf(ChangeSetExecutionException.class)
+                    .hasMessageContaining("verification failed after schema change 'failing'")
+                    .satisfies(failure -> assertThat(((ChangeSetExecutionException) failure).outcomes())
+                            .extracting(ChangeSetOutcome::changeSetId, ChangeSetOutcome::status)
+                            .containsExactly(
+                                    tuple("recorded", ChangeSetOutcome.Status.ALREADY_RECORDED),
+                                    tuple("failing", ChangeSetOutcome.Status.FAILED)));
+        }
+    }
+
+    @Test
+    void skippedDuplicatesAreReportedOnExecutedAndFailedOutcomes() throws Exception {
+        SchemaSynchronizerOptions options = h2Options();
+        ChangeSetExecutor executor = new ChangeSetExecutor();
+        try (Connection connection = h2()) {
+            execute(connection, "CREATE TABLE items_partial (id INT)");
+            SchemaDefinition.ChangeSet partial = new SchemaDefinition.ChangeSet(
+                    "partial", "halfway adopted",
+                    List.of("CREATE TABLE items_partial (id INT)", "CREATE TABLE items_rest (id INT)"),
+                    "SELECT (SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES"
+                            + " WHERE TABLE_NAME IN ('ITEMS_PARTIAL', 'ITEMS_REST')) >= 2");
+
+            ChangeSetExecutor.Result result = executor.apply(connection, List.of(partial), options,
+                    DatabaseDialect.H2);
+
+            assertThat(result.outcomes()).singleElement().satisfies(outcome -> {
+                assertThat(outcome.status()).isEqualTo(ChangeSetOutcome.Status.EXECUTED);
+                assertThat(outcome.executedStatements()).isEqualTo(1);
+                assertThat(outcome.skippedStatements()).isEqualTo(1);
+            });
+
+            SchemaDefinition.ChangeSet broken = new SchemaDefinition.ChangeSet(
+                    "broken", "fails after a skipped statement",
+                    List.of("CREATE TABLE items_partial (id INT)", "CREATE TABLE items_broken (id BAD_TYPE)"),
+                    "SELECT FALSE");
+
+            assertThatThrownBy(() -> executor.apply(connection, List.of(broken), options, DatabaseDialect.H2))
+                    .isInstanceOf(ChangeSetExecutionException.class)
+                    .satisfies(failure -> assertThat(((ChangeSetExecutionException) failure).outcomes())
+                            .singleElement()
+                            .satisfies(outcome -> {
+                                assertThat(outcome.status()).isEqualTo(ChangeSetOutcome.Status.FAILED);
+                                assertThat(outcome.executedStatements()).isZero();
+                                assertThat(outcome.skippedStatements()).isEqualTo(1);
+                            }));
+        }
     }
 
     private Connection connectionWithoutHistory() throws Exception {

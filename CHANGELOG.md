@@ -2,6 +2,56 @@
 
 ## Unreleased
 
+- Oracle scripts keep local procedure and function declarations inside their parent routine:
+  the splitter no longer ends the parent at a local body's `END q;`, and nested locals are
+  skipped recursively.
+- `ChangeSetExecutionException.withPriorOutcomes` keeps the original failure as its cause and
+  re-attaches its suppressed errors, so rollback, lock-release, and connection-restore
+  failures survive when a failed AFTER_SCHEMA phase is merged with the completed
+  BEFORE_SCHEMA phase's outcomes.
+- The profile commands and fingerprints read keywords and table references as SQL tokens: an
+  inline `FOREIGN\nKEY` in createSql is now found, a mention of a longer name (`order_items`)
+  no longer counts as coverage for `items`, and whitespace inside string literals and quoted
+  identifiers no longer collapses — `'a  b'` and `'a b'` hash differently again.
+- `SchemaFingerprints` folds names with `Locale.ROOT` (a Turkish default locale no longer
+  changes fingerprints), sorts live column entries before hashing so physical column order
+  never participates, maps the configured schema through the dialect's stored spelling, keeps
+  exact catalog table names for JDBC lookups (live foreign keys are in the hash again), and
+  excludes rows a wildcard pattern merely admitted (`app_db` no longer picks up `app1db`).
+  Absent `tables`/`columns`/`indexes` count as empty, matching synchronization, so profile
+  commands accept definitions that omit them.
+- `ConstraintInventory` maps the schema argument through the dialect, filters wildcard-match
+  siblings, and reports composite primary keys in `KEY_SEQ` order.
+- Change-set outcomes are recorded in application order (recorded change sets interleaved
+  with new ones no longer sort to the front), include skipped-statement counts on executed
+  and failed outcomes, and verification or history-record failures now throw
+  `ChangeSetExecutionException` with the outcomes recorded so far. On dialects whose DDL
+  commits implicitly, a failed AFTER_SCHEMA phase keeps the BEFORE_SCHEMA outcomes.
+- `SqlScriptSplitter` returns statements as the original script slices (an internal `--`
+  comment keeps its newline) and, on Oracle, ends a block or routine at its closing
+  `END [name];` so a script can continue with further statements.
+- The CLI `compare` command reports preservation findings for both profiles, labeled with the
+  file each finding belongs to.
+
+## 2.3.0 — adoption observability and profile tooling
+
+- Per change-set outcomes: every synchronization records how each change set was resolved
+  (executed / verified-adopted / already-recorded / skipped in dry runs / failed), exposed
+  through the new ChangeSetOutcome record on SchemaSynchronizationResult — binary-compatible
+  constructors keep 2.2 call sites compiling — and through AdoptionReport for assertions.
+- ChangeSetExecutionException carries the outcomes recorded before a change set failed, so
+  adoption reports survive failed runs.
+- SchemaFingerprints: stable structural fingerprints for parsed definitions and live schemas
+  via JDBC metadata (history table excluded), enabling adopted-vs-fresh schema equality
+  assertions.
+- ConstraintInventory: foreign-key and primary-key inventory through JDBC metadata with
+  case-insensitive schema matching and delete-rule names.
+- SqlScriptSplitter: statement splitting for plain SQL scripts (routines intact), the basis
+  for versioned adoption baselines.
+- SchemaDefinitionValidator: FK preservation coverage findings (inline FOREIGN KEY
+  declarations without a verificationSql-bearing change set) and a two-profile structural
+  compare for dual-dialect definitions; the CLI gains compare and fingerprint commands.
+
 ## 2.2.0 — 2026-10-19
 
 - Add explicit per-change-set `reviewedSql` opt-in for manually reviewed SQL while retaining
@@ -476,3 +526,4 @@ First public release.
 - Standalone schema serialization and synchronization CLIs.
 - Spring Boot auto-configuration with configurable startup policy.
 - Apache-2.0 licensing and Maven Central release packaging.
+

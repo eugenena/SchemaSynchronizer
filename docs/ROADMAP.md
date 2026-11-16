@@ -3,6 +3,22 @@
 Planned work for releases after 2.2.0. Items are tracked as GitHub issues; this page
 summarizes them and their intended order. Nothing here is a commitment to a date.
 
+## 2.3.0 — adoption observability and profile tooling
+
+- Per change-set outcomes: ChangeSetOutcome with executed / verified-adopted / already-recorded /
+  skipped / failed states, aggregated on SchemaSynchronizationResult and wrapped by
+  AdoptionReport; ChangeSetExecutionException carries partial outcomes.
+- SchemaFingerprints for parsed definitions and live schemas; ConstraintInventory for foreign
+  key and primary key inventories through JDBC metadata.
+- SqlScriptSplitter for plain SQL scripts (routines intact).
+- SchemaDefinitionValidator: FK preservation coverage findings and a two-profile structural
+  compare; CLI compare and fingerprint commands.
+
+Next: an adoption test kit with versioned baselines so consumer test suites can retire their
+migration-tool test dependencies, single-canonical-definition tooling, and Spring Test
+ergonomics.
+
+
 ## Change-set support for more object types
 
 Tracked in [#16](https://github.com/eugenena/SchemaSynchronizer/issues/16).

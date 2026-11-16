@@ -527,6 +527,98 @@ final class SqlTokenizer {
     }
 
     /**
+     * Splits a whole script's tokens into statements. Identical to {@link #statements}, except
+     * on Oracle, where a routine or PL/SQL block ends at the {@code END} closing its outermost
+     * block (plus an optional {@code END name} and the terminating {@code ;}) instead of running
+     * to the end of the input: that is the single-change-set rule, and a script continues with
+     * further statements after a block.
+     */
+    static List<List<Token>> scriptStatements(List<Token> tokens, SqlLexer.Mode mode, String sql) {
+        if (mode != SqlLexer.Mode.ORACLE) {
+            return statements(tokens, mode, sql);
+        }
+        List<List<Token>> result = new ArrayList<>();
+        int start = 0;
+        while (start < tokens.size()) {
+            Routine routine = routine(tokens.subList(start, tokens.size()), mode);
+            int end;
+            if (routine != null) {
+                requireBalanced(tokens, start, routine, mode, sql);
+                end = oracleRoutineEnd(tokens, start, routine);
+            } else {
+                end = oracleSimpleStatementEnd(tokens, start);
+            }
+            result.add(tokens.subList(start, end));
+            start = end;
+        }
+        return result;
+    }
+
+    /** The index just past the first top-level {@code ;} at or after {@code start}, or the token count. */
+    private static int oracleSimpleStatementEnd(List<Token> tokens, int start) {
+        for (int index = start; index < tokens.size(); index++) {
+            if (tokens.get(index).punct(";")) {
+                return index + 1;
+            }
+        }
+        return tokens.size();
+    }
+
+    /**
+     * The index just past the {@code END} (plus an {@code END name} and the terminating
+     * {@code ;}) that closes the outermost block of the Oracle routine or PL/SQL block starting
+     * at {@code start}. Local procedure and function declarations open and close a block of
+     * their own before the parent's body opens, so they are skipped (recursively) instead of
+     * being mistaken for the parent's end. {@link #requireBalanced} must have accepted the
+     * tokens first.
+     */
+    private static int oracleRoutineEnd(List<Token> tokens, int start, Routine routine) {
+        Deque<Boolean> open = new ArrayDeque<>();
+        boolean opened = false;
+        int index = start;
+        while (index < tokens.size()) {
+            if (!opened && open.isEmpty() && isLocalDeclaration(tokens, index, start, routine)) {
+                // A local procedure or function balances itself: skip its whole declaration so
+                // its END name; cannot close the parent. Reusing the parent routine is safe:
+                // only package and type-body heads consult its kind, and those open their block
+                // at the header, before any local declaration, so this skip runs only for kinds
+                // whose IS/AS never opens a block.
+                index = oracleRoutineEnd(tokens, index + 1, routine);
+                continue;
+            }
+            int consumed = trackBlock(tokens, index, start, routine, SqlLexer.Mode.ORACLE, open, "");
+            if (!open.isEmpty()) {
+                opened = true;
+            } else if (opened) {
+                int end = consumed + 1;
+                if (end + 1 < tokens.size() && tokens.get(end).name() && tokens.get(end + 1).punct(";")) {
+                    // Oracle closes a named routine with END name;
+                    end++;
+                }
+                if (end < tokens.size() && tokens.get(end).punct(";")) {
+                    end++;
+                }
+                return end;
+            }
+            index = consumed + 1;
+        }
+        return tokens.size();
+    }
+
+    /**
+     * Whether the token at {@code index} heads a local procedure or function declared in the
+     * routine's declaration section: past the routine's own kind keyword, before any block has
+     * opened. {@code FUNCTION} and {@code PROCEDURE} are reserved words, so no other construct
+     * puts them at that position.
+     */
+    private static boolean isLocalDeclaration(List<Token> tokens, int index, int start, Routine routine) {
+        if (index <= start + routine.kindIndex()) {
+            return false;
+        }
+        return tokens.get(index).keyword("PROCEDURE") || tokens.get(index).keyword("FUNCTION");
+    }
+
+    /**
      * Recognizes {@code CREATE [OR REPLACE | OR ALTER] [DEFINER = …] [EDITIONABLE …]
      * FUNCTION|PROCEDURE|TRIGGER|…} and, on Oracle, anonymous {@code BEGIN}/{@code DECLARE} blocks.
      */

@@ -35,6 +35,13 @@ public final class SchemaSynchronizerCli {
     }
 
     public static void main(String[] args) {
+        if (args.length > 0 && ("compare".equals(args[0]) || "fingerprint".equals(args[0]))) {
+            int profilesStatus = SchemaDefinitionProfilesCli.run(args, System.out, System.err);
+            if (profilesStatus != 0) {
+                System.exit(profilesStatus);
+            }
+            return;
+        }
         int status = run(args, System.out, System.err,
                 SchemaSerializer::main,
                 SchemaSynchronizer::main,
@@ -145,7 +152,7 @@ public final class SchemaSynchronizerCli {
         stream.println();
         stream.println("Password argument must be '-'; set SCHEMA_DB_PASSWORD in the environment.");
         stream.println("Optional SCHEMA_SYNCHRONIZER_ACTOR is recorded in schema history.");
-        stream.println("Commands: serialize, sync, dry-run, validate, help, version");
+        stream.println("Commands: serialize, sync, dry-run, validate, compare, fingerprint, help, version");
         stream.println();
         stream.println("Hand-authoring: edit schema-definition.json, run validate, then dry-run/sync.");
         stream.println("Serialize is optional bootstrap from a known-good live database.");

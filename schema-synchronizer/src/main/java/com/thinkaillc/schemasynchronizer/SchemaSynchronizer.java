@@ -384,6 +384,7 @@ public class SchemaSynchronizer {
         plannedSql.set(new ArrayList<>());
         String lockToken = null;
         SchemaSynchronizationResult result;
+        List<ChangeSetOutcome> completedOutcomes = List.of();
         try {
             if (ownsTransaction) {
                 conn.setAutoCommit(false);
@@ -407,6 +408,7 @@ public class SchemaSynchronizer {
                     changesForPhase(allChanges, SchemaDefinition.ChangeSet.Phase.BEFORE_SCHEMA), options,
                     dialect);
             plannedSql.get().addAll(beforeChanges.plannedSql());
+            completedOutcomes = beforeChanges.outcomes();
             DeclarativeResult declarative = applyDeclarativeSchema(conn, def, dialect, true);
             ChangeSetExecutor.Result afterChanges = executor.apply(conn,
                     changesForPhase(allChanges, SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA), options,
@@ -433,7 +435,8 @@ public class SchemaSynchronizer {
             result = new SchemaSynchronizationResult(beforeChanges.applied() + afterChanges.applied(),
                     declarative.tablesCreated(),
                     declarative.columnsAdded(), declarative.columnsAltered(), List.copyOf(plannedSql.get()),
-                    declarative.pendingSql(), options.dryRun(), true, List.of());
+                    declarative.pendingSql(), options.dryRun(), true, List.of(),
+                    concatOutcomes(beforeChanges, afterChanges));
         } catch (Exception exception) {
             try {
                 rollback(conn, ownsTransaction, savepoint);
@@ -441,7 +444,7 @@ public class SchemaSynchronizer {
                 SchemaExceptions.suppress(exception, rollbackFailure);
             }
             cleanUp(conn, dialect, lockToken, ownsTransaction, previousAutoCommit).attachTo(exception);
-            throw exception;
+            throw withCompletedOutcomes(exception, completedOutcomes);
         } finally {
             plannedSql.remove();
         }
@@ -449,6 +452,27 @@ public class SchemaSynchronizer {
     }
 
     /** What releasing the lock and restoring the connection left behind. */
+
+    /** Owner-visible per change-set outcomes, before-phase first, aggregated across phases. */
+    private static List<ChangeSetOutcome> concatOutcomes(ChangeSetExecutor.Result before,
+                                                          ChangeSetExecutor.Result after) {
+        List<ChangeSetOutcome> out = new ArrayList<>(before.outcomes());
+        out.addAll(after.outcomes());
+        return List.copyOf(out);
+    }
+
+    /**
+     * A failed AFTER_SCHEMA phase must not drop the BEFORE_SCHEMA outcomes: on dialects whose DDL
+     * commits implicitly that earlier work may already be committed, so the exception a caller
+     * turns into an adoption report keeps the completed phase's entries first.
+     */
+    private static Exception withCompletedOutcomes(Exception failure, List<ChangeSetOutcome> completed) {
+        if (completed.isEmpty() || !(failure instanceof ChangeSetExecutionException changeSetFailure)
+                || changeSetFailure.outcomes().containsAll(completed)) {
+            return failure;
+        }
+        return changeSetFailure.withPriorOutcomes(completed);
+    }
     private record Cleanup(boolean lockReleased, List<Exception> failures) {
         void attachTo(Exception primary) {
             failures.forEach(failure -> SchemaExceptions.suppress(primary, failure));
@@ -468,7 +492,7 @@ public class SchemaSynchronizer {
             }
             return new SchemaSynchronizationResult(result.changeSetsApplied(), result.tablesCreated(),
                     result.columnsAdded(), result.columnsAltered(), result.plannedSql(), result.pendingSql(),
-                    result.dryRun(), lockReleased, warnings);
+                    result.dryRun(), lockReleased, warnings, result.changeSets());
         }
     }
 
@@ -522,6 +546,7 @@ public class SchemaSynchronizer {
         }
         String lockToken = null;
         SchemaSynchronizationResult result;
+        List<ChangeSetOutcome> completedOutcomes = List.of();
         try {
             lockToken = DialectSupport.acquireLock(conn, dialect, options.schema(), options.historyTable(),
                     options.advisoryLockId());
@@ -550,6 +575,7 @@ public class SchemaSynchronizer {
             }
             ChangeSetExecutor.Result before = executor.apply(conn, beforeSchema, options, dialect);
             plannedSql.get().addAll(before.plannedSql());
+            completedOutcomes = before.outcomes();
             DeclarativeResult declarative = applyDeclarativeSchema(conn, def, dialect, true);
             ChangeSetExecutor.Result after = executor.apply(conn,
                     changesForPhase(allChanges, SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA), options, dialect);
@@ -560,10 +586,11 @@ public class SchemaSynchronizer {
             }
             result = new SchemaSynchronizationResult(before.applied() + after.applied(), declarative.tablesCreated(),
                     declarative.columnsAdded(), declarative.columnsAltered(), List.copyOf(plannedSql.get()),
-                    declarative.pendingSql(), options.dryRun(), true, List.of());
+                    declarative.pendingSql(), options.dryRun(), true, List.of(),
+                    concatOutcomes(before, after));
         } catch (Exception failure) {
             cleanUp(conn, dialect, lockToken, false, true).attachTo(failure);
-            throw failure;
+            throw withCompletedOutcomes(failure, completedOutcomes);
         } finally {
             plannedSql.remove();
         }
