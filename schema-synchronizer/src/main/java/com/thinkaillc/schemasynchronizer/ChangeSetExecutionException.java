@@ -32,14 +32,20 @@ public class ChangeSetExecutionException extends SchemaSynchronizationException 
     /**
      * A copy of this failure whose outcomes are prefixed by an earlier phase's outcomes, for
      * dialects where that phase's work is already committed when a later phase aborts (2.3.0+).
+     * The copy keeps this exception as its cause and re-attaches its suppressed errors, so
+     * rollback, lock-release, and connection-restore failures reported on the original survive
+     * the merge.
      */
     public ChangeSetExecutionException withPriorOutcomes(List<ChangeSetOutcome> prior) {
         if (prior == null || prior.isEmpty()) {
             return this;
         }
-        List<ChangeSetOutcome> merged = new ArrayList<>(prior);
-        merged.addAll(outcomes);
-        return new ChangeSetExecutionException(getMessage(), merged,
-                getCause() != null ? getCause() : this);
+        List<ChangeSetOutcome> combined = new ArrayList<>(prior);
+        combined.addAll(outcomes);
+        ChangeSetExecutionException merged = new ChangeSetExecutionException(getMessage(), combined, this);
+        for (Throwable suppressed : getSuppressed()) {
+            SchemaExceptions.suppress(merged, suppressed);
+        }
+        return merged;
     }
 }

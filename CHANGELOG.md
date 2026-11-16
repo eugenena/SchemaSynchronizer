@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Oracle scripts keep local procedure and function declarations inside their parent routine:
+  the splitter no longer ends the parent at a local body's `END q;`, and nested locals are
+  skipped recursively.
+- `ChangeSetExecutionException.withPriorOutcomes` keeps the original failure as its cause and
+  re-attaches its suppressed errors, so rollback, lock-release, and connection-restore
+  failures survive when a failed AFTER_SCHEMA phase is merged with the completed
+  BEFORE_SCHEMA phase's outcomes.
 - The profile commands and fingerprints read keywords and table references as SQL tokens: an
   inline `FOREIGN\nKEY` in createSql is now found, a mention of a longer name (`order_items`)
   no longer counts as coverage for `items`, and whitespace inside string literals and quoted

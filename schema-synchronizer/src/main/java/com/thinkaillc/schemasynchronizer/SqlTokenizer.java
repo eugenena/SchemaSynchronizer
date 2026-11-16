@@ -567,12 +567,22 @@ final class SqlTokenizer {
     /**
      * The index just past the {@code END} (plus an {@code END name} and the terminating
      * {@code ;}) that closes the outermost block of the Oracle routine or PL/SQL block starting
-     * at {@code start}. {@link #requireBalanced} must have accepted the tokens first.
+     * at {@code start}. Local procedure and function declarations open and close a block of
+     * their own before the parent's body opens, so they are skipped (recursively) instead of
+     * being mistaken for the parent's end. {@link #requireBalanced} must have accepted the
+     * tokens first.
      */
     private static int oracleRoutineEnd(List<Token> tokens, int start, Routine routine) {
         Deque<Boolean> open = new ArrayDeque<>();
         boolean opened = false;
-        for (int index = start; index < tokens.size(); index++) {
+        int index = start;
+        while (index < tokens.size()) {
+            if (!opened && open.isEmpty() && isLocalDeclaration(tokens, index, start, routine)) {
+                // A local procedure or function balances itself: skip its whole declaration so
+                // its END name; cannot close the parent.
+                index = oracleRoutineEnd(tokens, index + 1, routine);
+                continue;
+            }
             int consumed = trackBlock(tokens, index, start, routine, SqlLexer.Mode.ORACLE, open, "");
             if (!open.isEmpty()) {
                 opened = true;
@@ -587,9 +597,22 @@ final class SqlTokenizer {
                 }
                 return end;
             }
-            index = consumed;
+            index = consumed + 1;
         }
         return tokens.size();
+    }
+
+    /**
+     * Whether the token at {@code index} heads a local procedure or function declared in the
+     * routine's declaration section: past the routine's own kind keyword, before any block has
+     * opened. {@code FUNCTION} and {@code PROCEDURE} are reserved words, so no other construct
+     * puts them at that position.
+     */
+    private static boolean isLocalDeclaration(List<Token> tokens, int index, int start, Routine routine) {
+        if (index <= start + routine.kindIndex()) {
+            return false;
+        }
+        return tokens.get(index).keyword("PROCEDURE") || tokens.get(index).keyword("FUNCTION");
     }
 
     /**

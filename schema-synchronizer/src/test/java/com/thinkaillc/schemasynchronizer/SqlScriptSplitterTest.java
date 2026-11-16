@@ -73,4 +73,41 @@ class SqlScriptSplitterTest {
 
         assertThat(statements).containsExactly("BEGIN NULL; END;");
     }
+
+    @Test
+    void oracleLocalProceduresStayInsideTheirParent() {
+        List<String> statements = SqlScriptSplitter.split(
+                "CREATE PROCEDURE p IS PROCEDURE q IS BEGIN NULL; END q; BEGIN NULL; END p;\n"
+                        + "CREATE TABLE items (id INT);",
+                "oracle");
+
+        assertThat(statements).containsExactly(
+                "CREATE PROCEDURE p IS PROCEDURE q IS BEGIN NULL; END q; BEGIN NULL; END p;",
+                "CREATE TABLE items (id INT);");
+    }
+
+    @Test
+    void oracleLocalFunctionsAndNestedLocalsStayInsideTheirParent() {
+        List<String> statements = SqlScriptSplitter.split(
+                "DECLARE PROCEDURE q IS FUNCTION f RETURN INT IS BEGIN NULL; END f; BEGIN NULL; END q;\n"
+                        + "BEGIN NULL; END;\nCREATE TABLE items (id INT);",
+                "oracle");
+
+        assertThat(statements).containsExactly(
+                "DECLARE PROCEDURE q IS FUNCTION f RETURN INT IS BEGIN NULL; END f;"
+                        + " BEGIN NULL; END q;\nBEGIN NULL; END;",
+                "CREATE TABLE items (id INT);");
+    }
+
+    @Test
+    void oraclePackageBodyWithLocalProceduresStaysIntact() {
+        List<String> statements = SqlScriptSplitter.split(
+                "CREATE PACKAGE BODY pkg AS PROCEDURE p IS BEGIN NULL; END p; END pkg;\n"
+                        + "CREATE TABLE items (id INT);",
+                "oracle");
+
+        assertThat(statements).containsExactly(
+                "CREATE PACKAGE BODY pkg AS PROCEDURE p IS BEGIN NULL; END p; END pkg;",
+                "CREATE TABLE items (id INT);");
+    }
 }
