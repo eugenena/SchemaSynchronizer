@@ -43,9 +43,13 @@ public final class SchemaDefinitionProfilesCli {
                 SchemaDefinition left = mapper.readValue(Path.of(args[1]).toFile(), SchemaDefinition.class);
                 SchemaDefinition right = mapper.readValue(Path.of(args[2]).toFile(), SchemaDefinition.class);
                 List<String> differences = SchemaDefinitionValidator.compare(left, right);
-                List<String> findings = SchemaDefinitionValidator.preservationFindings(left);
                 differences.forEach(diff -> out.println("diff: " + diff));
-                findings.forEach(finding -> out.println("preservation: " + finding));
+                // Findings are per profile: the second profile's uncovered foreign keys must be
+                // reported even when the first profile is fully covered, and vice versa.
+                SchemaDefinitionValidator.preservationFindings(left)
+                        .forEach(finding -> out.println("preservation: " + args[1] + ": " + finding));
+                SchemaDefinitionValidator.preservationFindings(right)
+                        .forEach(finding -> out.println("preservation: " + args[2] + ": " + finding));
                 return differences.isEmpty() ? 0 : 1;
             }
             err.println("Unknown profiles command: " + command);

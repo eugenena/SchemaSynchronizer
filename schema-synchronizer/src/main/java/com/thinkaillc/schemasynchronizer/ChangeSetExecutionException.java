@@ -3,6 +3,7 @@
 
 package com.thinkaillc.schemasynchronizer;
 
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -26,5 +27,19 @@ public class ChangeSetExecutionException extends SchemaSynchronizationException 
     /** Outcomes for every change set handled before the run aborted, newest last. */
     public List<ChangeSetOutcome> outcomes() {
         return outcomes;
+    }
+
+    /**
+     * A copy of this failure whose outcomes are prefixed by an earlier phase's outcomes, for
+     * dialects where that phase's work is already committed when a later phase aborts (2.3.0+).
+     */
+    public ChangeSetExecutionException withPriorOutcomes(List<ChangeSetOutcome> prior) {
+        if (prior == null || prior.isEmpty()) {
+            return this;
+        }
+        List<ChangeSetOutcome> merged = new ArrayList<>(prior);
+        merged.addAll(outcomes);
+        return new ChangeSetExecutionException(getMessage(), merged,
+                getCause() != null ? getCause() : this);
     }
 }

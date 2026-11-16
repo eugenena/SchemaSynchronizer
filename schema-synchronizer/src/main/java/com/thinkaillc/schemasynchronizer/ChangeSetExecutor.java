@@ -44,10 +44,48 @@ final class ChangeSetExecutor {
         String history = dialect.qualifyHistoryTable(options.schema(), options.historyTable());
         Map<String, String> applied = historyExists(conn, options, dialect) ? readHistory(conn, history, dialect) : Map.of();
         List<String> planned = new ArrayList<>();
-        int appliedCount = 0;
         int unrecordedCount = 0;
+        // First pass: checksum immutability, policy, and planning only. Outcomes are recorded by
+        // the pass that handles each change, so the report keeps application order even when
+        // recorded change sets interleave with new ones.
+        for (SchemaDefinition.ChangeSet change : safeChanges) {
+            String checksum = checksum(change);
+            String previous = applied.get(change.id());
+            if (previous != null) {
+                if (!previous.equals(checksum)) {
+                    throw new IllegalStateException("checksum mismatch for applied schema change '"
+                            + change.id() + "': committed changes are immutable");
+                }
+                continue;
+            }
+            unrecordedCount++;
+            requirePolicy(change, options, dialect);
+            // Dry-run must not execute verificationSql (UDFs / admin SELECT side effects).
+            if (options.dryRun()) {
+                planned.addAll(change.statements());
+            } else if (!isVerified(conn, change)) {
+                planned.addAll(change.statements());
+            }
+        }
         List<ChangeSetOutcome> outcomes = new ArrayList<>();
+        if (options.dryRun()) {
+            for (SchemaDefinition.ChangeSet change : safeChanges) {
+                outcomes.add(applied.containsKey(change.id())
+                        ? ChangeSetOutcome.alreadyRecorded(change.id())
+                        : ChangeSetOutcome.skippedDryRun(change.id()));
+            }
+            return new Result(0, List.copyOf(planned), List.copyOf(outcomes));
+        }
+        if (unrecordedCount == 0) {
+            for (SchemaDefinition.ChangeSet change : safeChanges) {
+                outcomes.add(ChangeSetOutcome.alreadyRecorded(change.id()));
+            }
+            return new Result(0, List.copyOf(planned), List.copyOf(outcomes));
+        }
 
+        createHistory(conn, history, dialect);
+        applied = readHistory(conn, history, dialect);
+        int appliedCount = 0;
         for (SchemaDefinition.ChangeSet change : safeChanges) {
             String checksum = checksum(change);
             String previous = applied.get(change.id());
@@ -59,32 +97,6 @@ final class ChangeSetExecutor {
                 outcomes.add(ChangeSetOutcome.alreadyRecorded(change.id()));
                 continue;
             }
-            unrecordedCount++;
-            requirePolicy(change, options, dialect);
-            // Dry-run must not execute verificationSql (UDFs / admin SELECT side effects).
-            if (options.dryRun()) {
-                planned.addAll(change.statements());
-                outcomes.add(ChangeSetOutcome.skippedDryRun(change.id()));
-            } else if (!isVerified(conn, change)) {
-                planned.addAll(change.statements());
-            }
-        }
-        if (options.dryRun() || unrecordedCount == 0) {
-            return new Result(0, List.copyOf(planned), List.copyOf(outcomes));
-        }
-
-        createHistory(conn, history, dialect);
-        applied = readHistory(conn, history, dialect);
-        for (SchemaDefinition.ChangeSet change : safeChanges) {
-            String checksum = checksum(change);
-            String previous = applied.get(change.id());
-            if (previous != null) {
-                if (!previous.equals(checksum)) {
-                    throw new IllegalStateException("checksum mismatch for applied schema change '"
-                            + change.id() + "': committed changes are immutable");
-                }
-                continue;
-            }
             if (isVerified(conn, change)) {
                 insertHistory(conn, history, dialect, change, checksum, 0);
                 appliedCount++;
@@ -94,6 +106,7 @@ final class ChangeSetExecutor {
             Instant started = Instant.now();
             int executedStatements = 0;
             int skippedDuplicates = 0;
+            long elapsed;
             try {
                 for (String sql : change.statements()) {
                     if (executeAllowingAlreadyExists(conn, dialect.executableSql(sql), change.id(), dialect)) {
@@ -102,31 +115,35 @@ final class ChangeSetExecutor {
                         executedStatements++;
                     }
                 }
-            } catch (SQLException failure) {
-                outcomes.add(ChangeSetOutcome.failed(change.id(), executedStatements,
+                elapsed = Duration.between(started, Instant.now()).toMillis();
+                if (skippedDuplicates > 0
+                        && (change.verificationSql() == null || change.verificationSql().isBlank())) {
+                    throw new IllegalStateException("schema change '" + change.id()
+                            + "' skipped already-present statement(s) but has no verificationSql; "
+                            + "add a verification query so partial adoption cannot ledger an incomplete effect");
+                }
+                if (change.verificationSql() != null && !isVerified(conn, change)) {
+                    throw new IllegalStateException("verification failed after schema change '" + change.id() + "'");
+                }
+                if (skippedDuplicates > 0) {
+                    log.info("[SchemaSynchronizer] Change '{}' adopted {} already-present statement(s) and "
+                                    + "applied the remainder",
+                            change.id(), skippedDuplicates);
+                }
+                insertHistory(conn, history, dialect, change, checksum, elapsed);
+            } catch (SQLException | RuntimeException failure) {
+                // Verification and history recording stay inside the reported scope: the statements
+                // may already have committed (implicit-DDL dialects), so the caller can still build
+                // an adoption report from the outcomes recorded up to the failure.
+                outcomes.add(ChangeSetOutcome.failed(change.id(), executedStatements, skippedDuplicates,
                         Duration.between(started, Instant.now()).toMillis()));
-                throw new ChangeSetExecutionException(
-                        "schema change '" + change.id() + "' failed: " + failure.getMessage(),
-                        outcomes, failure);
+                String message = failure instanceof SQLException
+                        ? "schema change '" + change.id() + "' failed: " + failure.getMessage()
+                        : failure.getMessage();
+                throw new ChangeSetExecutionException(message, outcomes, failure);
             }
-            long elapsed = Duration.between(started, Instant.now()).toMillis();
-            if (skippedDuplicates > 0
-                    && (change.verificationSql() == null || change.verificationSql().isBlank())) {
-                throw new IllegalStateException("schema change '" + change.id()
-                        + "' skipped already-present statement(s) but has no verificationSql; "
-                        + "add a verification query so partial adoption cannot ledger an incomplete effect");
-            }
-            if (change.verificationSql() != null && !isVerified(conn, change)) {
-                throw new IllegalStateException("verification failed after schema change '" + change.id() + "'");
-            }
-            if (skippedDuplicates > 0) {
-                log.info("[SchemaSynchronizer] Change '{}' adopted {} already-present statement(s) and "
-                                + "applied the remainder",
-                        change.id(), skippedDuplicates);
-            }
-            insertHistory(conn, history, dialect, change, checksum, elapsed);
             appliedCount++;
-            outcomes.add(ChangeSetOutcome.executed(change.id(), executedStatements, elapsed));
+            outcomes.add(ChangeSetOutcome.executed(change.id(), executedStatements, skippedDuplicates, elapsed));
         }
         return new Result(appliedCount, List.copyOf(planned), List.copyOf(outcomes));
     }

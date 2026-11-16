@@ -101,27 +101,32 @@ public final class SchemaDefinitionValidator {
      * mentions the same table, so a legacy database can adopt the constraint through
      * verification instead of re-executing DDL that may already exist. Returns one human
      * readable finding per uncovered table; empty when coverage is complete.
+     *
+     * <p>Keywords and table references are read as SQL tokens, so a line break inside
+     * {@code FOREIGN KEY} is still found and a mention of a longer name ({@code order_items})
+     * does not cover {@code items}. Absent {@code tables} or {@code changes} count as empty,
+     * matching synchronization.
      */
     public static java.util.List<String> preservationFindings(SchemaDefinition definition) {
         java.util.List<String> findings = new java.util.ArrayList<>();
         if (definition == null) {
             return findings;
         }
-        String marker = "FOREIGN KEY";
+        SqlLexer.Mode mode = lexerMode(definition);
         java.util.Set<String> verifiedTables = new java.util.HashSet<>();
-        for (SchemaDefinition.ChangeSet change : definition.changes()) {
-            if (change.verificationSql() != null && !change.verificationSql().isBlank()) {
-                String haystack = change.verificationSql().toLowerCase(Locale.ROOT);
-                definition.tables().keySet().forEach(table -> {
-                    if (haystack.contains(table.toLowerCase(Locale.ROOT))) {
-                        verifiedTables.add(table.toLowerCase(Locale.ROOT));
-                    }
-                });
+        for (SchemaDefinition.ChangeSet change : nullToEmpty(definition.changes())) {
+            if (change == null || change.verificationSql() == null || change.verificationSql().isBlank()) {
+                continue;
+            }
+            for (String table : nullToEmpty(definition.tables()).keySet()) {
+                if (referencesTable(change.verificationSql(), table, mode)) {
+                    verifiedTables.add(table.toLowerCase(Locale.ROOT));
+                }
             }
         }
-        for (var entry : definition.tables().entrySet()) {
+        for (var entry : nullToEmpty(definition.tables()).entrySet()) {
             String createSql = entry.getValue().createSql();
-            if (createSql != null && createSql.toUpperCase(Locale.ROOT).contains(marker)
+            if (createSql != null && declaresForeignKey(createSql, mode)
                     && !verifiedTables.contains(entry.getKey().toLowerCase(Locale.ROOT))) {
                 findings.add("table " + entry.getKey()
                         + " declares a FOREIGN KEY in createSql but no change set with"
@@ -130,6 +135,69 @@ public final class SchemaDefinitionValidator {
             }
         }
         return findings;
+    }
+
+    private static SqlLexer.Mode lexerMode(SchemaDefinition definition) {
+        try {
+            return definition.declaredDialect().lexerMode();
+        } catch (RuntimeException unknownDialect) {
+            // The dialect itself is rejected by validation; profile reporting stays usable.
+            return SqlLexer.Mode.POSTGRES;
+        }
+    }
+
+    /** Absent collections are empty, consistently with synchronization. */
+    private static <T> java.util.List<T> nullToEmpty(java.util.List<T> list) {
+        return list == null ? java.util.List.of() : list;
+    }
+
+    private static java.util.Map<String, SchemaDefinition.TableDef> nullToEmpty(
+            java.util.Map<String, SchemaDefinition.TableDef> tables) {
+        return tables == null ? java.util.Map.of() : tables;
+    }
+
+    /**
+     * Whether {@code sql} references {@code table} as a whole SQL token: a bare or quoted
+     * identifier, or a string literal naming it (PostgreSQL catalog queries pass the table
+     * name as text). A longer name ({@code order_items}) is one token and never covers
+     * {@code items}.
+     */
+    private static boolean referencesTable(String sql, String table, SqlLexer.Mode mode) {
+        String folded = table.toLowerCase(Locale.ROOT);
+        try {
+            for (SqlTokenizer.Token token : SqlTokenizer.tokenize(sql, mode)) {
+                if (token.type() == SqlTokenizer.Type.WORD
+                        && token.text().toLowerCase(Locale.ROOT).equals(folded)) {
+                    return true;
+                }
+                if ((token.type() == SqlTokenizer.Type.QUOTED || token.type() == SqlTokenizer.Type.STRING)
+                        && token.value() != null
+                        && token.value().toLowerCase(Locale.ROOT).equals(folded)) {
+                    return true;
+                }
+            }
+            return false;
+        } catch (RuntimeException unlexable) {
+            // The SQL cannot be tokenized (it would also fail synchronization); keep the
+            // legacy whole-text match so offline reporting still works.
+            return sql.toLowerCase(Locale.ROOT).contains(folded);
+        }
+    }
+
+    /** Whether {@code createSql} declares FOREIGN KEY as two adjacent keyword tokens. */
+    private static boolean declaresForeignKey(String createSql, SqlLexer.Mode mode) {
+        try {
+            java.util.List<SqlTokenizer.Token> tokens = SqlTokenizer.tokenize(createSql, mode);
+            for (int index = 0; index + 1 < tokens.size(); index++) {
+                if (tokens.get(index).keyword("FOREIGN") && tokens.get(index + 1).keyword("KEY")) {
+                    return true;
+                }
+            }
+            return false;
+        } catch (RuntimeException unlexable) {
+            // Unlexable SQL keeps a whitespace-tolerant whole-text match.
+            return createSql.toUpperCase(Locale.ROOT).replaceAll("\\s+", " ").contains("FOREIGN KEY");
+        }
     }
 
     /**
@@ -178,17 +246,33 @@ public final class SchemaDefinitionValidator {
 
     private static java.util.Set<String> lowerKeys(SchemaDefinition definition) {
         java.util.Set<String> names = new java.util.HashSet<>();
-        definition.tables().keySet().forEach(name -> names.add(name.toLowerCase(Locale.ROOT)));
+        java.util.Map<String, SchemaDefinition.TableDef> tables = definition.tables();
+        if (tables != null) {
+            tables.keySet().forEach(name -> names.add(name.toLowerCase(Locale.ROOT)));
+        }
         return names;
     }
 
     private static java.util.Set<String> columnNames(SchemaDefinition definition, String table) {
         java.util.Set<String> names = new java.util.HashSet<>();
-        definition.tables().entrySet().stream()
+        java.util.Map<String, SchemaDefinition.TableDef> tables = definition.tables();
+        if (tables == null) {
+            return names;
+        }
+        tables.entrySet().stream()
                 .filter(entry -> entry.getKey().toLowerCase(Locale.ROOT).equals(table))
                 .findFirst()
-                .ifPresent(entry -> entry.getValue().columns().forEach(column ->
-                        names.add(column.name().toLowerCase(Locale.ROOT))));
+                .ifPresent(entry -> {
+                    java.util.List<SchemaDefinition.ColumnDef> columns = entry.getValue().columns();
+                    if (columns == null) {
+                        return;
+                    }
+                    columns.forEach(column -> {
+                        if (column != null && column.name() != null) {
+                            names.add(column.name().toLowerCase(Locale.ROOT));
+                        }
+                    });
+                });
         return names;
     }
 }

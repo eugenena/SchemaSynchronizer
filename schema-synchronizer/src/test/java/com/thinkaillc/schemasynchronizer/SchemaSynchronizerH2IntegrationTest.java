@@ -247,4 +247,35 @@ class SchemaSynchronizerH2IntegrationTest {
                     .hasMessageContaining("replace index definition drift");
         }
     }
+
+    @Test
+    void failedAfterSchemaPhaseKeepsTheBeforeSchemaOutcomes() throws Exception {
+        try (Connection connection = connection(); var statement = connection.createStatement()) {
+            statement.execute("CREATE SCHEMA APP");
+            connection.setSchema("APP");
+            SchemaDefinition definition = new SchemaDefinition(2, "h2", Map.of(), List.of(
+                    new SchemaDefinition.ChangeSet("before", "applies before the schema",
+                            List.of("CREATE TABLE before_table (id INT)"),
+                            "SELECT (SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES"
+                                    + " WHERE TABLE_NAME = 'BEFORE_TABLE') >= 1",
+                            SchemaDefinition.ChangeSet.Phase.BEFORE_SCHEMA),
+                    new SchemaDefinition.ChangeSet("after", "fails after the schema",
+                            List.of("CREATE INDEX after_broken_idx ON before_table (no_such_column)"),
+                            "SELECT FALSE",
+                            SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA)));
+
+            // H2 commits the BEFORE_SCHEMA work implicitly: its outcome must survive the failure.
+            assertThatThrownBy(() -> synchronizer().synchronizeWithResult(connection, definition))
+                    .isInstanceOf(ChangeSetExecutionException.class)
+                    .satisfies(failure -> {
+                        assertThat(((ChangeSetExecutionException) failure).outcomes())
+                                .extracting(ChangeSetOutcome::changeSetId, ChangeSetOutcome::status)
+                                .containsExactly(
+                                        org.assertj.core.groups.Tuple.tuple(
+                                                "before", ChangeSetOutcome.Status.EXECUTED),
+                                        org.assertj.core.groups.Tuple.tuple(
+                                                "after", ChangeSetOutcome.Status.FAILED));
+                    });
+        }
+    }
 }

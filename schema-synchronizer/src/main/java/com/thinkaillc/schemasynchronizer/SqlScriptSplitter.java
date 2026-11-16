@@ -9,8 +9,11 @@ import java.util.List;
 /**
  * Splits a plain SQL script into executable statements, using the same tokenizer the
  * synchronizer applies to change-set SQL. Routines (functions, procedures, triggers) stay
- * intact, strings and quoted identifiers never end a statement, and comments between
- * statements are dropped.
+ * intact — on Oracle a block or routine ends at the {@code END} closing its outermost block,
+ * so the script continues with the statements after it — strings and quoted identifiers never
+ * end a statement, and comments between statements are dropped. Statements are returned as the
+ * original script slices: whitespace inside strings and the newlines after {@code --} comments
+ * are part of the statement's meaning and must not change.
  *
  * <p>Used by adoption baselines: a versioned SQL snapshot of an existing database is applied
  * statement by statement before the schema is synchronized.
@@ -34,13 +37,13 @@ public final class SqlScriptSplitter {
         SqlLexer.Mode mode = modeFor(dialectId);
         List<SqlTokenizer.Token> tokens = SqlTokenizer.tokenize(script, mode);
         List<String> statements = new ArrayList<>();
-        for (List<SqlTokenizer.Token> group : SqlTokenizer.statements(tokens, mode, script)) {
+        for (List<SqlTokenizer.Token> group : SqlTokenizer.scriptStatements(tokens, mode, script)) {
             if (group.isEmpty()) {
                 continue;
             }
-            String statement = script.substring(group.get(0).start(), group.get(group.size() - 1).end())
-                    .replaceAll("\\s+", " ")
-                    .trim();
+            // The statement is the original slice: collapsing its whitespace would change string
+            // contents and would join a -- comment with the code it precedes.
+            String statement = script.substring(group.get(0).start(), group.get(group.size() - 1).end()).trim();
             if (statement.isEmpty() || statement.startsWith("--")) {
                 continue;
             }

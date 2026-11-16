@@ -44,7 +44,13 @@ public record ChangeSetOutcome(
 
     /** Convenience factory for runs that executed statements. */
     public static ChangeSetOutcome executed(String changeSetId, int executedStatements, long durationMs) {
-        return new ChangeSetOutcome(changeSetId, Status.EXECUTED, executedStatements, 0, durationMs);
+        return executed(changeSetId, executedStatements, 0, durationMs);
+    }
+
+    /** Convenience factory for runs that executed statements and skipped already-present ones (2.3.0+). */
+    public static ChangeSetOutcome executed(String changeSetId, int executedStatements,
+                                            int skippedStatements, long durationMs) {
+        return new ChangeSetOutcome(changeSetId, Status.EXECUTED, executedStatements, skippedStatements, durationMs);
     }
 
     /** Convenience factory for the verification-adoption path. */
@@ -64,7 +70,13 @@ public record ChangeSetOutcome(
 
     /** Convenience factory for a failed change set. */
     public static ChangeSetOutcome failed(String changeSetId, int executedStatements, long durationMs) {
-        return new ChangeSetOutcome(changeSetId, Status.FAILED, executedStatements, 0, durationMs);
+        return failed(changeSetId, executedStatements, 0, durationMs);
+    }
+
+    /** Convenience factory for a failed change set that had already skipped statements (2.3.0+). */
+    public static ChangeSetOutcome failed(String changeSetId, int executedStatements,
+                                          int skippedStatements, long durationMs) {
+        return new ChangeSetOutcome(changeSetId, Status.FAILED, executedStatements, skippedStatements, durationMs);
     }
 
     /** Execution time as a duration, for logs. */
