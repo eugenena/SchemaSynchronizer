@@ -152,7 +152,7 @@ SchemaSynchronizer requires Java 17 or later. For Spring Boot 3, add the existin
 <dependency>
   <groupId>com.thinkaillc</groupId>
   <artifactId>schema-synchronizer</artifactId>
-  <version>2.2.0</version>
+  <version>2.3.0</version>
 </dependency>
 ```
 
@@ -162,7 +162,7 @@ For Spring Boot 4, use the version-specific adapter instead. It brings in the sh
 <dependency>
   <groupId>com.thinkaillc</groupId>
   <artifactId>schema-synchronizer-spring-boot4</artifactId>
-  <version>2.2.0</version>
+  <version>2.3.0</version>
 </dependency>
 ```
 
@@ -186,7 +186,7 @@ Gradle Kotlin DSL, Spring Boot 3:
 
 ```kotlin
 dependencies {
-    implementation("com.thinkaillc:schema-synchronizer:2.2.0")
+    implementation("com.thinkaillc:schema-synchronizer:2.3.0")
 }
 ```
 
@@ -194,7 +194,7 @@ Gradle Kotlin DSL, Spring Boot 4:
 
 ```kotlin
 dependencies {
-    implementation("com.thinkaillc:schema-synchronizer-spring-boot4:2.2.0")
+    implementation("com.thinkaillc:schema-synchronizer-spring-boot4:2.3.0")
 }
 ```
 
@@ -221,8 +221,8 @@ Connect as a schema-scoped, least-privilege account; see
 ### 1. Download the executable JAR
 
 ```bash
-curl -fLO https://repo1.maven.org/maven2/com/thinkaillc/schema-synchronizer-cli/2.2.0/schema-synchronizer-cli-2.2.0-standalone.jar
-java -jar schema-synchronizer-cli-2.2.0-standalone.jar --version
+curl -fLO https://repo1.maven.org/maven2/com/thinkaillc/schema-synchronizer-cli/2.3.0/schema-synchronizer-cli-2.3.0-standalone.jar
+java -jar schema-synchronizer-cli-2.3.0-standalone.jar --version
 ```
 
 Maven Central publishes `.sha256` and `.sha512` files beside the JAR for integrity
@@ -240,14 +240,14 @@ export SCHEMA_DB_PASSWORD='source-password'
 PostgreSQL example:
 
 ```bash
-java -jar schema-synchronizer-cli-2.2.0-standalone.jar serialize \
+java -jar schema-synchronizer-cli-2.3.0-standalone.jar serialize \
   jdbc:postgresql://localhost:5432/source_app app_user - public schema-definition.json
 ```
 
 MariaDB example (the schema argument is the database/catalog name):
 
 ```bash
-java -jar schema-synchronizer-cli-2.2.0-standalone.jar serialize \
+java -jar schema-synchronizer-cli-2.3.0-standalone.jar serialize \
   jdbc:mariadb://localhost:3306/source_app app_user - source_app schema-definition.json
 ```
 
@@ -259,7 +259,7 @@ SQL Server example (the schema argument must be the login's `DEFAULT_SCHEMA`, he
 use a dedicated login, never `sa`):
 
 ```bash
-java -jar schema-synchronizer-cli-2.2.0-standalone.jar serialize \
+java -jar schema-synchronizer-cli-2.3.0-standalone.jar serialize \
   "jdbc:sqlserver://localhost:1433;databaseName=app;encrypt=true;trustServerCertificate=true" \
   schema_sync - app schema-definition.json
 ```
@@ -271,7 +271,7 @@ certificate (for example with `trustStore=` or a CA-issued certificate) and drop
 Oracle example (schema argument is the Oracle user/schema):
 
 ```bash
-java -jar schema-synchronizer-cli-2.2.0-standalone.jar serialize \
+java -jar schema-synchronizer-cli-2.3.0-standalone.jar serialize \
   jdbc:oracle:thin:@localhost:1521/XEPDB1 \
   app_user - app_user schema-definition.json
 ```
@@ -294,7 +294,7 @@ export SCHEMA_DB_PASSWORD='target-password'
 PostgreSQL example:
 
 ```bash
-java -jar schema-synchronizer-cli-2.2.0-standalone.jar sync \
+java -jar schema-synchronizer-cli-2.3.0-standalone.jar sync \
   jdbc:postgresql://localhost:5432/target_app app_user - \
   schema-definition.json public schema_synchronizer_history
 ```
@@ -302,7 +302,7 @@ java -jar schema-synchronizer-cli-2.2.0-standalone.jar sync \
 MariaDB example:
 
 ```bash
-java -jar schema-synchronizer-cli-2.2.0-standalone.jar sync \
+java -jar schema-synchronizer-cli-2.3.0-standalone.jar sync \
   jdbc:mariadb://localhost:3306/target_app app_user - \
   schema-definition.json target_app schema_synchronizer_history
 ```
@@ -324,7 +324,7 @@ Add the Maven Central release to an application:
 <dependency>
   <groupId>com.thinkaillc</groupId>
   <artifactId>schema-synchronizer</artifactId>
-  <version>2.2.0</version>
+  <version>2.3.0</version>
 </dependency>
 ```
 
@@ -354,15 +354,17 @@ bundle. Central releases are immutable; never reuse a published version number.
 
 ## CLI reference
 
-The standalone JAR has one entry point with six commands:
+The standalone JAR has one entry point with eight commands:
 
 ```text
-java -jar schema-synchronizer-cli-2.2.0-standalone.jar serialize <jdbc-url> <user> - <schema> <output-path>
-java -jar schema-synchronizer-cli-2.2.0-standalone.jar sync      <jdbc-url> <user> - <schema-file> [schema] [history-table]
-java -jar schema-synchronizer-cli-2.2.0-standalone.jar dry-run   <jdbc-url> <user> - <schema-file> [schema] [history-table]
-java -jar schema-synchronizer-cli-2.2.0-standalone.jar validate  <schema-file> [schema]
-java -jar schema-synchronizer-cli-2.2.0-standalone.jar help      (also --help, -h)
-java -jar schema-synchronizer-cli-2.2.0-standalone.jar version   (also --version, -V)
+java -jar schema-synchronizer-cli-2.3.0-standalone.jar serialize <jdbc-url> <user> - <schema> <output-path>
+java -jar schema-synchronizer-cli-2.3.0-standalone.jar sync      <jdbc-url> <user> - <schema-file> [schema] [history-table]
+java -jar schema-synchronizer-cli-2.3.0-standalone.jar dry-run   <jdbc-url> <user> - <schema-file> [schema] [history-table]
+java -jar schema-synchronizer-cli-2.3.0-standalone.jar validate  <schema-file> [schema]
+java -jar schema-synchronizer-cli-2.3.0-standalone.jar compare   <schema-file-a> <schema-file-b>
+java -jar schema-synchronizer-cli-2.3.0-standalone.jar fingerprint <schema-file>
+java -jar schema-synchronizer-cli-2.3.0-standalone.jar help      (also --help, -h)
+java -jar schema-synchronizer-cli-2.3.0-standalone.jar version   (also --version, -V)
 ```
 
 Exit codes: `0` success, `1` the command failed (including pending manual SQL), `2` unknown
@@ -408,6 +410,44 @@ execution. It still connects, reads history, and runs the change-set checks.
 
 Checks a definition offline (no database connection): structure, identifiers, dialect, and the
 change-set SQL checks, applied to every change set as for an empty database.
+
+### compare
+
+Diffs two definition profiles of the same schema offline (no database connection): `diff: …`
+lines for tables or columns that exist on only one side, and `preservation: <file>: …` lines
+for each profile's inline foreign keys that no change set's `verificationSql` claims — both
+files are checked and labeled. Exits `0` when the profiles agree, `1` when they differ, `2`
+for usage errors.
+
+### fingerprint
+
+Prints a stable `sha256:…` structural hash of a definition offline. JSON ordering and
+formatting do not participate; equal structures hash equally on every machine and locale.
+Use it to detect drift between profile files or across branches.
+
+## Adoption testing and observability
+
+New in 2.3.0, supporting the cutover proof in
+[MIGRATING_FROM_MIGRATIONS.md](docs/MIGRATING_FROM_MIGRATIONS.md):
+
+- **Per change-set outcomes** — `SchemaSynchronizationResult.changeSets()` and the
+  `AdoptionReport` wrapper report how every change set was resolved (executed,
+  verified-adopted, already-recorded, skipped in a dry run, failed) with executed and
+  skipped statement counts, in application order. A failed run keeps the outcomes
+  recorded so far on `ChangeSetExecutionException`.
+- **Structural fingerprints** — `SchemaFingerprints` hashes a parsed definition and a
+  live schema (through JDBC metadata, history table excluded), so an adopted legacy
+  database and a fresh one can be asserted equal in one line.
+- **Constraint inventory** — `ConstraintInventory` reads foreign keys (with delete
+  rules) and primary keys (in declaration order) through JDBC metadata.
+- **SQL baseline splitter** — `SqlScriptSplitter` turns a versioned SQL snapshot into
+  executable statements (routines intact, string contents preserved) to build a
+  production-shaped legacy database for adoption tests.
+- **Offline profile tooling** — `SchemaDefinitionValidator.preservationFindings` and
+  `compare`, plus the `compare` and `fingerprint` CLI commands above, keep
+  dual-dialect definition profiles in lockstep.
+
+See [docs/ADOPTION_TESTING.md](docs/ADOPTION_TESTING.md) for the detailed guide.
 
 ## Spring Boot usage
 
