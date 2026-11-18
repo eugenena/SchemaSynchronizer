@@ -15,6 +15,12 @@ commands. See the [changelog](../CHANGELOG.md).
   migration-tool test dependencies.
 - Single-canonical-definition tooling.
 - Spring Test ergonomics.
+- Safer DDL execution: lock and statement timeout guardrails, concurrent index builds,
+  and a complete dry-run SQL export for DBA review.
+- A migration risk report classifying every planned change (destructive, lock/rewrite,
+  data-loss risk).
+- Placeholders for environment-specific values, and callbacks/hooks for integrations.
+- Repeatable change sets and batched backfills for large data updates.
 
 
 ## Change-set support for more object types
