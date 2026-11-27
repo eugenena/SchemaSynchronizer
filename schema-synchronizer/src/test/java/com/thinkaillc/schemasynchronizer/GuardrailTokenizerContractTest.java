@@ -2609,6 +2609,8 @@ class GuardrailTokenizerContractTest {
                     + "UPDATE items SET qty = r.id WHERE id = r.id; END LOOP; END; END util;");
             accepted(ORACLE, "CREATE OR REPLACE PACKAGE BODY util AS PROCEDURE p IS BEGIN NULL; END; "
                     + "BEGIN NULL; END util;");
+            accepted(ORACLE, "CREATE PACKAGE BODY util AS PROCEDURE p IS BEGIN NULL; END; "
+                    + "BEGIN NULL; END util;");
             accepted(ORACLE, "CREATE OR REPLACE PACKAGE BODY util AS PROCEDURE p IS "
                     + "FUNCTION q RETURN NUMBER IS BEGIN RETURN 1; END q; BEGIN NULL; END p; "
                     + "BEGIN NULL; END util;");
