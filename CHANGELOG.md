@@ -2,6 +2,41 @@
 
 ## Unreleased
 
+- Change sets create sequences, views, stored procedures, and Oracle packages and types
+  ([#16](https://github.com/eugenena/SchemaSynchronizer/issues/16)):
+  - Sequences: `CREATE SEQUENCE [IF NOT EXISTS]` on PostgreSQL, SQL Server, Oracle, and
+    MariaDB. The sequence name and PostgreSQL's `OWNED BY table.column` destination are
+    schema-scoped (`OWNED BY schema.table.column` checks the schema). MySQL and H2 keep
+    rejecting `CREATE SEQUENCE` — MySQL has none and H2 keeps identity columns.
+  - Views: `CREATE [OR REPLACE] VIEW` (`CREATE OR ALTER VIEW` on SQL Server) on every
+    dialect. The view's query goes through the verification-SQL checks: a read-only,
+    schema-scoped `SELECT`/`WITH` query with no side-effecting calls. A data-modifying
+    CTE, `SELECT … FOR UPDATE`, a locking hint, or a sequence-advancing function is
+    rejected. `CREATE MATERIALIZED VIEW` is still rejected everywhere.
+  - Stored procedures: `CREATE [OR REPLACE] PROCEDURE` (`CREATE OR ALTER PROCEDURE` on
+    SQL Server, and `PROC` alias) on every dialect except H2. A procedure body is scanned
+    like a function body (no DDL, grants, role changes, dynamic SQL, or file/network
+    access), and on PostgreSQL it must declare `LANGUAGE sql` or `plpgsql`.
+  - Oracle packages and types: `CREATE [OR REPLACE] PACKAGE` / `PACKAGE BODY` and
+    `TYPE` / `TYPE BODY`; a spec and a body are separate change-set statements, every
+    routine in a body is checked individually, and package variables, cursors, and loop
+    records resolve inside the body like a function's locals.
+  - Ownership elevation stays behind review: `DEFINER = …`, MySQL/MariaDB
+    `SQL SECURITY DEFINER`, PostgreSQL `SECURITY DEFINER`, Oracle `AUTHID …`, and SQL
+    Server `WITH EXECUTE AS` are rejected in unreviewed change sets. The existing
+    per-change-set `reviewedSql: true` flag is the documented opt-in after maintainer
+    review. Functions keep their existing behavior.
+  - These kinds stay change-set only: they are not added to the declarative `tables`
+    model, and `ALTER SEQUENCE` / `ALTER VIEW` remain rejected (only additive
+    `ALTER TABLE` is allowed).
+- SQL Server statement splitting no longer ends a batch at the `OR ALTER` of
+  `CREATE OR ALTER VIEW|PROCEDURE` or at the `SELECT` of a `CREATE|ALTER VIEW` head, and
+  MySQL `DEFINER = user@host` heads with dotted or `%`-wildcard hosts no longer break
+  routine detection (a body like that was previously misreported as two statements).
+- Adoption recognizes more duplicate-object codes: PostgreSQL SQLSTATE `42723` (a
+  procedure/function of that signature already exists) and MySQL/MariaDB `1304` (routine
+  exists) and `1359` (trigger exists).
+
 ## 2.3.0 — 2026-11-16 — adoption observability and profile tooling
 
 - Per change-set outcomes: every synchronization records how each change set was resolved

@@ -83,6 +83,9 @@ class GuardrailTokenizerContractTest {
     private static final String ONE_STATEMENT = "must contain exactly one statement";
     private static final String UNTERMINATED_BODY = "unterminated routine body (missing END)";
     private static final String UNSUPPORTED = "unsupported schema change SQL";
+    private static final String NAMESPACED = "targets namespace";
+    private static final String READ_ONLY_VIEW = "view query must";
+    private static final String OWNERSHIP = "DEFINER, SQL SECURITY DEFINER, or AUTHID";
 
     private static final String PG_FUNCTION = "CREATE FUNCTION f() RETURNS void AS $$ BEGIN ";
     private static final String PG_FUNCTION_END = " END $$ LANGUAGE plpgsql";
@@ -1080,7 +1083,7 @@ class GuardrailTokenizerContractTest {
             policyRejects(PG, "CREATE FUNCTION f() RETURNS int AS 'SELECT 1'", "must declare LANGUAGE");
             policyRejects(PG, "CREATE FUNCTION f() RETURNS int AS $$ SELECT 1 $$", "must declare LANGUAGE");
             policyRejects(PG, "CREATE PROCEDURE p() AS $$ UPDATE items SET qty = 1 $$",
-                    "CREATE PROCEDURE is not yet supported");
+                    "must declare LANGUAGE");
             accepted(PG, "CREATE FUNCTION f() RETURNS int RETURN 1");
             accepted(PG, "CREATE FUNCTION f() RETURNS int BEGIN ATOMIC SELECT 1; END");
             accepted(PG, "CREATE FUNCTION f() RETURNS int AS $$ SELECT 1 $$ LANGUAGE sql");
@@ -2390,48 +2393,47 @@ class GuardrailTokenizerContractTest {
         }
     }
 
-    /** Documented 2.0.0 limitation: these object types are created outside change sets (docs/ROADMAP.md). */
+    /** The kinds change sets still reject by object type on every dialect (docs/ROADMAP.md). */
     @Nested
-    class ObjectTypesNotYetSupported {
+    class ObjectTypesStillUnsupported {
         private static final String NOT_YET = "is not yet supported in change sets";
 
         @Test
-        void sequencesViewsProceduresPackagesAndTypesAreRejectedByObjectTypeOnEveryDialect() {
+        void materializedViewsAndKindsAnEngineLacksAreRejectedOnEveryDialect() {
             for (DatabaseDialect dialect : List.of(PG, MYSQL, MARIADB, MSSQL, ORACLE)) {
-                policyRejects(dialect, "CREATE SEQUENCE items_seq", "CREATE SEQUENCE " + NOT_YET);
-                policyRejects(dialect, "CREATE VIEW items_v AS SELECT id FROM items", "CREATE VIEW " + NOT_YET);
-                policyRejects(dialect, "create view items_v as select id from items", "CREATE VIEW " + NOT_YET);
-                policyRejects(dialect, "CREATE PROCEDURE p() BEGIN UPDATE items SET qty = 1; END",
-                        "CREATE PROCEDURE " + NOT_YET);
-                policyRejects(dialect, "CREATE VIEW items_v AS SELECT id FROM items", UNSUPPORTED);
+                policyRejects(dialect, "CREATE MATERIALIZED VIEW items_mv AS SELECT id FROM items",
+                        "CREATE MATERIALIZED VIEW " + NOT_YET);
+                policyRejects(dialect, "create materialized view items_mv as select id from items",
+                        "CREATE MATERIALIZED VIEW " + NOT_YET);
+                // The object-type gate precedes the reviewedSql opt-in and statement splitting.
+                assertThatThrownBy(() -> NonDestructiveSqlPolicy.requireReviewed(
+                        "CREATE MATERIALIZED VIEW items_mv AS SELECT id FROM items", dialect))
+                        .isInstanceOf(IllegalArgumentException.class)
+                        .hasMessageContaining("CREATE MATERIALIZED VIEW " + NOT_YET);
             }
-            policyRejects(PG, "CREATE OR REPLACE VIEW items_v AS SELECT id FROM items", "CREATE VIEW " + NOT_YET);
-            policyRejects(PG, "CREATE MATERIALIZED VIEW items_mv AS SELECT id FROM items", "CREATE VIEW " + NOT_YET);
-            policyRejects(PG, "CREATE OR REPLACE PROCEDURE p() LANGUAGE sql AS 'UPDATE items SET qty = 1'",
-                    "CREATE PROCEDURE " + NOT_YET);
+            policyRejects(PG, "CREATE OR REPLACE MATERIALIZED VIEW items_mv AS SELECT id FROM items",
+                    "CREATE MATERIALIZED VIEW " + NOT_YET);
+            policyRejects(MYSQL, "CREATE SEQUENCE items_seq", "CREATE SEQUENCE " + NOT_YET);
             policyRejects(PG, "CREATE TYPE mood AS ENUM ('ok', 'sad')", "CREATE TYPE " + NOT_YET);
-            policyRejects(MSSQL, "CREATE OR ALTER VIEW dbo.items_v AS SELECT id FROM dbo.items", "CREATE VIEW " + NOT_YET);
-            policyRejects(MSSQL, "CREATE VIEW dbo.items_v WITH SCHEMABINDING AS SELECT id FROM dbo.items",
-                    "CREATE VIEW " + NOT_YET);
-            policyRejects(MSSQL, "CREATE PROCEDURE dbo.p AS UPDATE dbo.items SET qty = 1", "CREATE PROCEDURE " + NOT_YET);
-            policyRejects(MYSQL, "CREATE ALGORITHM = MERGE SQL SECURITY INVOKER VIEW items_v AS SELECT id FROM items",
-                    "CREATE VIEW " + NOT_YET);
-            policyRejects(MYSQL, "CREATE DEFINER = CURRENT_USER PROCEDURE p() BEGIN UPDATE items SET qty = 1; END",
-                    "CREATE PROCEDURE " + NOT_YET);
-            policyRejects(ORACLE, "CREATE OR REPLACE PACKAGE util_pkg AS FUNCTION f RETURN NUMBER; END util_pkg;",
+            policyRejects(MARIADB, "CREATE TYPE mood AS ENUM ('ok', 'sad')", "CREATE TYPE " + NOT_YET);
+            policyRejects(MSSQL, "CREATE PACKAGE util_pkg AS FUNCTION f RETURN NUMBER; END util_pkg;",
                     "CREATE PACKAGE " + NOT_YET);
-            policyRejects(ORACLE, "CREATE OR REPLACE FORCE EDITIONABLE VIEW items_v AS SELECT id FROM items",
-                    "CREATE VIEW " + NOT_YET);
-            policyRejects(ORACLE, "CREATE OR REPLACE TYPE item_t AS OBJECT (id NUMBER)", "CREATE TYPE " + NOT_YET);
-            policyRejects(MARIADB, "CREATE SEQUENCE IF NOT EXISTS items_seq", "CREATE SEQUENCE " + NOT_YET);
+            policyRejects(MYSQL, "CREATE PACKAGE util_pkg AS BEGIN NULL; END", "CREATE PACKAGE " + NOT_YET);
+            policyRejects(DatabaseDialect.H2, "CREATE OR REPLACE PACKAGE util_pkg AS BEGIN NULL; END",
+                    "CREATE PACKAGE " + NOT_YET);
+            policyRejects(DatabaseDialect.H2, "CREATE SEQUENCE items_seq", "CREATE SEQUENCE " + NOT_YET);
+            policyRejects(DatabaseDialect.H2, "CREATE PROCEDURE p() AS $$ BEGIN NULL; END $$",
+                    "CREATE PROCEDURE " + NOT_YET);
         }
 
         @Test
         void supportedCreatesThatMentionTheseWordsAreNotMistakenForThem() {
-            for (DatabaseDialect dialect : List.of(PG, MYSQL, MARIADB, MSSQL, ORACLE)) {
+            for (DatabaseDialect dialect : List.of(PG, MYSQL, MARIADB, MSSQL, ORACLE, DatabaseDialect.H2)) {
                 String type = dialect == ORACLE ? "VARCHAR2(10)" : "VARCHAR(10)";
                 assertThatCode(() -> NonDestructiveSqlPolicy.requireSafe(
-                        "CREATE TABLE views (sequence " + type + ", procedure_name " + type + ")", dialect))
+                        "CREATE TABLE views (sequence " + type + ", procedure_name " + type
+                                + ", package " + type + ", view " + type + ", item_type " + type + ")",
+                        dialect))
                         .as("%s", dialect).doesNotThrowAnyException();
                 assertThatCode(() -> NonDestructiveSqlPolicy.requireSafe(
                         "CREATE INDEX idx_view_type ON items (qty)", dialect))
@@ -2439,6 +2441,194 @@ class GuardrailTokenizerContractTest {
             }
             // Multi-statement input that is not a CREATE of these types keeps the statement-count message.
             policyRejects(MSSQL, "UPDATE items SET qty = 1 CREATE VIEW v AS SELECT 1", ONE_STATEMENT);
+            policyRejects(MSSQL, "CREATE VIEW v AS SELECT 1 CREATE TABLE t (id INT)", ONE_STATEMENT);
+        }
+    }
+
+    /** Sequences (#16): the name and the OWNED BY destination stay inside the synchronized namespace. */
+    @Nested
+    class ChangeSetSequences {
+
+        @Test
+        void allowedFormsOnEverySupportingEngine() {
+            accepted(PG, "CREATE SEQUENCE items_seq");
+            accepted(PG, "CREATE SEQUENCE IF NOT EXISTS items_seq INCREMENT BY 5 MINVALUE 1 MAXVALUE 100 "
+                    + "START WITH 10 CACHE 20 NO CYCLE");
+            accepted(PG, "CREATE SEQUENCE public.items_seq OWNED BY items.id");
+            accepted(PG, "CREATE SEQUENCE items_seq OWNED BY NONE");
+            accepted(MARIADB, "CREATE SEQUENCE IF NOT EXISTS items_seq INCREMENT BY 5 START WITH 10 CACHE 20 CYCLE");
+            accepted(MSSQL, "CREATE SEQUENCE dbo.items_seq START WITH 10 INCREMENT BY 5 MINVALUE 1 "
+                    + "MAXVALUE 100 CYCLE");
+            accepted(ORACLE, "CREATE SEQUENCE items_seq START WITH 10 INCREMENT BY 5 NOCACHE NOCYCLE ORDER");
+        }
+
+        @Test
+        void crossSchemaNamesAndOwnersAreScopeRejected() {
+            scopeRejects(PG, "CREATE SEQUENCE other.items_seq", NAMESPACED);
+            scopeRejects(PG, "CREATE SEQUENCE public.items_seq OWNED BY other.items.id", NAMESPACED);
+            scopeRejects(PG, "CREATE SEQUENCE items_seq OWNED BY other_schema.items.id", NAMESPACED);
+            scopeRejects(MSSQL, "CREATE SEQUENCE other.items_seq", NAMESPACED);
+            scopeRejects(MARIADB, "CREATE SEQUENCE other.items_seq", NAMESPACED);
+            scopeRejects(ORACLE, "CREATE SEQUENCE other.items_seq", NAMESPACED);
+        }
+    }
+
+    /** Views (#16): the query is schema-scoped and read-only, exactly like verification SQL. */
+    @Nested
+    class ChangeSetViews {
+
+        @Test
+        void supportedFormsOnEveryEngine() {
+            accepted(PG, "CREATE VIEW items_v AS SELECT id, qty FROM items");
+            accepted(PG, "CREATE OR REPLACE VIEW public.items_v (id, note) AS SELECT i.id, i.note FROM items i "
+                    + "WHERE i.qty > 0");
+            accepted(MYSQL, "CREATE ALGORITHM = MERGE VIEW items_v AS SELECT id FROM items");
+            accepted(MARIADB, "CREATE OR REPLACE SQL SECURITY INVOKER VIEW items_v AS SELECT id FROM items "
+                    + "WITH CASCADED CHECK OPTION");
+            accepted(MSSQL, "CREATE OR ALTER VIEW dbo.items_v WITH SCHEMABINDING AS SELECT id, qty FROM dbo.items");
+            accepted(MSSQL, "CREATE VIEW dbo.items_v AS WITH recent AS "
+                    + "(SELECT id FROM dbo.items WHERE qty > 0) SELECT id FROM recent");
+            accepted(ORACLE, "CREATE OR REPLACE FORCE EDITIONABLE VIEW items_v AS SELECT id FROM items");
+            accepted(DatabaseDialect.H2, "CREATE OR REPLACE VIEW items_v AS SELECT id FROM items");
+        }
+
+        @Test
+        void theQueryIsScopeCheckedAndReadOnly() {
+            scopeRejects(PG, "CREATE VIEW items_v AS SELECT id FROM other.items", NAMESPACED);
+            scopeRejects(MSSQL, "CREATE OR ALTER VIEW dbo.items_v AS SELECT id FROM other.items", NAMESPACED);
+            scopeRejects(ORACLE, "CREATE OR REPLACE VIEW items_v AS SELECT id FROM other.items", NAMESPACED);
+            policyRejects(PG, "CREATE VIEW items_v AS SELECT id FROM items FOR UPDATE", READ_ONLY_VIEW);
+            policyRejects(ORACLE, "CREATE OR REPLACE VIEW items_v AS SELECT id FROM items FOR UPDATE",
+                    READ_ONLY_VIEW);
+            policyRejects(MYSQL, "CREATE VIEW items_v AS SELECT id INTO OUTFILE '/tmp/x' FROM items", DESTRUCTIVE);
+            policyRejects(PG, "CREATE VIEW items_v AS WITH moved AS (UPDATE items SET qty = 1 RETURNING *) "
+                    + "SELECT id FROM moved", READ_ONLY_VIEW);
+            policyRejects(PG, "CREATE VIEW items_v AS SELECT nextval('items_seq') AS next_id",
+                    READ_ONLY_VIEW);
+            policyRejects(MSSQL, "CREATE OR ALTER VIEW dbo.items_v AS SELECT id FROM dbo.items WITH (UPDLOCK)",
+                    READ_ONLY_VIEW);
+            policyRejects(PG, "CREATE VIEW items_v AS INSERT INTO items VALUES (1)", "view query must be a SELECT");
+        }
+
+        @Test
+        void ownershipElevationStaysBehindReviewedSql() {
+            policyRejects(MYSQL, "CREATE DEFINER = root@% VIEW items_v AS SELECT id FROM items", OWNERSHIP);
+            policyRejects(MARIADB, "CREATE OR REPLACE SQL SECURITY DEFINER VIEW items_v AS SELECT id FROM items",
+                    OWNERSHIP);
+            for (DatabaseDialect dialect : List.of(PG, MYSQL, MARIADB, MSSQL, ORACLE)) {
+                assertThatCode(() -> NonDestructiveSqlPolicy.requireReviewed(
+                        "CREATE OR REPLACE DEFINER = root@% VIEW items_v AS SELECT id FROM items", dialect))
+                        .as("%s", dialect).doesNotThrowAnyException();
+            }
+        }
+    }
+
+    /** Stored procedures (#16): the body goes through the same scanner as function bodies. */
+    @Nested
+    class ChangeSetProcedures {
+
+        @Test
+        void supportedFormsOnEveryEngine() {
+            accepted(PG, "CREATE PROCEDURE set_qty(target BIGINT) LANGUAGE plpgsql AS $$ BEGIN "
+                    + "UPDATE items SET qty = 2 WHERE id = target; END $$");
+            accepted(PG, "CREATE OR REPLACE PROCEDURE set_qty() LANGUAGE sql BEGIN ATOMIC "
+                    + "UPDATE items SET qty = 3 WHERE id = 1; END");
+            accepted(MYSQL, "CREATE PROCEDURE set_qty() BEGIN UPDATE items SET qty = 2 WHERE id = 1; END");
+            accepted(MARIADB, "CREATE OR REPLACE PROCEDURE set_qty() DETERMINISTIC MODIFIES SQL DATA BEGIN "
+                    + "UPDATE items SET qty = 2 WHERE id = 1; END");
+            accepted(MSSQL, "CREATE PROCEDURE dbo.set_qty @target INT AS BEGIN "
+                    + "UPDATE dbo.items SET qty = @target WHERE id = 1; END");
+            accepted(MSSQL, "CREATE OR ALTER PROC dbo.set_qty AS UPDATE dbo.items SET qty = 2 WHERE id = 1");
+            accepted(ORACLE, "CREATE OR REPLACE PROCEDURE set_qty(target NUMBER) IS BEGIN "
+                    + "UPDATE items SET qty = target WHERE id = 1; END set_qty;");
+        }
+
+        @Test
+        void bodiesRunThroughTheRoutineBodyChecks() {
+            policyRejects(PG, "CREATE PROCEDURE p() LANGUAGE plpgsql AS $$ BEGIN "
+                    + "ALTER TABLE items ADD COLUMN extra VARCHAR(10); END $$", BODY_DDL);
+            policyRejects(PG, "CREATE PROCEDURE p() LANGUAGE sql AS $$ SELECT * INTO copy FROM items $$",
+                    BODY_DDL);
+            policyRejects(MYSQL, "CREATE PROCEDURE p() BEGIN SET ROLE admin; END", BODY_STATEMENT);
+            policyRejects(MSSQL, "CREATE PROCEDURE dbo.p AS BEGIN DENY SELECT ON dbo.items TO app; END",
+                    BODY_STATEMENT);
+            policyRejects(ORACLE, "CREATE OR REPLACE PROCEDURE p IS BEGIN "
+                    + "GRANT SELECT ON items TO app_user; END;", BODY_DDL);
+            scopeRejects(ORACLE, "CREATE OR REPLACE PROCEDURE p IS BEGIN UPDATE other.items SET qty = 1; END;",
+                    NAMESPACED);
+            scopeRejects(PG, "CREATE PROCEDURE p() LANGUAGE sql AS $$ UPDATE other.items SET qty = 1 $$",
+                    NAMESPACED);
+            scopeRejects(MYSQL, "CREATE PROCEDURE p() BEGIN UPDATE other.items SET qty = 1; END", NAMESPACED);
+            scopeRejects(MSSQL, "CREATE PROCEDURE dbo.p AS UPDATE other.items SET qty = 1", NAMESPACED);
+        }
+
+        @Test
+        void ownershipElevationStaysBehindReviewedSql() {
+            policyRejects(MYSQL, "CREATE DEFINER = root@% PROCEDURE p() BEGIN UPDATE items SET qty = 1; END",
+                    OWNERSHIP);
+            policyRejects(MARIADB, "CREATE OR REPLACE PROCEDURE p() SQL SECURITY DEFINER BEGIN "
+                    + "UPDATE items SET qty = 1; END", OWNERSHIP);
+            policyRejects(PG, "CREATE PROCEDURE p() LANGUAGE sql SECURITY DEFINER AS "
+                    + "$$ UPDATE items SET qty = 1 $$", OWNERSHIP);
+            policyRejects(PG, "CREATE PROCEDURE p() AS $$ UPDATE items SET qty = 1 $$ "
+                    + "LANGUAGE sql SECURITY DEFINER", OWNERSHIP);
+            accepted(PG, "CREATE PROCEDURE p() AS $$ SELECT 'SECURITY DEFINER' FROM items $$ LANGUAGE sql");
+            policyRejects(PG, "CREATE PROCEDURE p() LANGUAGE plpgsql SECURITY DEFINER AS "
+                    + "$$ BEGIN UPDATE items SET qty = 1; END $$", OWNERSHIP);
+            policyRejects(ORACLE, "CREATE OR REPLACE PROCEDURE p AUTHID DEFINER IS BEGIN NULL; END;", OWNERSHIP);
+            policyRejects(ORACLE, "CREATE OR REPLACE PROCEDURE p AUTHID CURRENT_USER IS BEGIN NULL; END;",
+                    OWNERSHIP);
+            policyRejects(MSSQL, "CREATE PROCEDURE dbo.p WITH EXECUTE AS OWNER AS BEGIN SELECT 1; END", DESTRUCTIVE);
+            assertThatCode(() -> NonDestructiveSqlPolicy.requireReviewed(
+                    "CREATE OR REPLACE PROCEDURE p AUTHID DEFINER IS BEGIN NULL; END;", ORACLE))
+                    .doesNotThrowAnyException();
+            assertThatCode(() -> NonDestructiveSqlPolicy.requireReviewed(
+                    "CREATE PROCEDURE dbo.p WITH EXECUTE AS OWNER AS BEGIN SELECT 1; END", MSSQL))
+                    .doesNotThrowAnyException();
+        }
+    }
+
+    /** Oracle packages and types (#16): a spec and a body are separate, individually checked statements. */
+    @Nested
+    class ChangeSetOraclePackagesAndTypes {
+
+        @Test
+        void specsBodiesAndTypesAreSingleCheckedStatements() {
+            accepted(ORACLE, "CREATE OR REPLACE PACKAGE util AS FUNCTION next_sum(p NUMBER) RETURN NUMBER; "
+                    + "PROCEDURE bump(target NUMBER); END util;");
+            accepted(ORACLE, "CREATE OR REPLACE PACKAGE BODY util AS count_base NUMBER := 0; "
+                    + "FUNCTION next_sum(p NUMBER) RETURN NUMBER IS BEGIN RETURN p + items_seq.NEXTVAL; END; "
+                    + "PROCEDURE bump(target NUMBER) IS BEGIN "
+                    + "UPDATE items SET qty = qty + target WHERE id = 1; END; END util;");
+            accepted(ORACLE, "CREATE OR REPLACE PACKAGE BODY util AS TYPE addr_t IS RECORD (city VARCHAR2(30)); "
+                    + "TYPE holder_t IS RECORD (note addr_t); h holder_t; FUNCTION describe RETURN VARCHAR2 IS "
+                    + "BEGIN RETURN h.note.city; END; END util;");
+            accepted(ORACLE, "CREATE OR REPLACE TYPE item_t AS OBJECT (id NUMBER, note VARCHAR2(50))");
+            accepted(ORACLE, "CREATE OR REPLACE TYPE BODY item_t AS MAP MEMBER FUNCTION key RETURN NUMBER IS "
+                    + "BEGIN RETURN id; END; END;");
+            // A package body's loop records resolve in every one of its routines.
+            accepted(ORACLE, "CREATE OR REPLACE PACKAGE BODY util AS PROCEDURE retitle IS "
+                    + "BEGIN FOR r IN (SELECT id FROM items) LOOP "
+                    + "UPDATE items SET qty = r.id WHERE id = r.id; END LOOP; END; END util;");
+            accepted(ORACLE, "CREATE OR REPLACE PACKAGE BODY util AS PROCEDURE p IS BEGIN NULL; END; "
+                    + "BEGIN NULL; END util;");
+            accepted(ORACLE, "CREATE PACKAGE BODY util AS PROCEDURE p IS BEGIN NULL; END; "
+                    + "BEGIN NULL; END util;");
+            accepted(ORACLE, "CREATE OR REPLACE PACKAGE BODY util AS PROCEDURE p IS "
+                    + "FUNCTION q RETURN NUMBER IS BEGIN RETURN 1; END q; BEGIN NULL; END p; "
+                    + "BEGIN NULL; END util;");
+        }
+
+        @Test
+        void everyRoutineInABodyIsChecked() {
+            policyRejects(ORACLE, "CREATE OR REPLACE PACKAGE BODY util AS PROCEDURE bump IS BEGIN "
+                    + "ALTER TABLE items ADD COLUMN extra NUMBER; END; END util;", BODY_DDL);
+            policyRejects(ORACLE, "CREATE OR REPLACE PACKAGE BODY util AS FUNCTION f RETURN NUMBER IS BEGIN "
+                    + "GRANT SELECT ON items TO app_user; RETURN 1; END; END util;", BODY_DDL);
+            policyRejects(ORACLE, "CREATE OR REPLACE PACKAGE BODY util AS PROCEDURE scheduled IS BEGIN "
+                    + "DBMS_SCHEDULER.CREATE_JOB('j'); END; END util;", DESTRUCTIVE);
+            scopeRejects(ORACLE, "CREATE OR REPLACE PACKAGE BODY util AS FUNCTION f RETURN NUMBER IS BEGIN "
+                    + "UPDATE other.items SET qty = 1; RETURN 1; END; END util;", NAMESPACED);
         }
     }
 }

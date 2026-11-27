@@ -41,13 +41,20 @@ final class DuplicateObjectSql {
             if ("42710".equals(state) || "42P07".equals(state) || "42701".equals(state)) {
                 return true;
             }
+            // PostgreSQL: duplicate_function (a procedure, function, or aggregate by that name)
+            if ("42723".equals(state)) {
+                return true;
+            }
             // SQL/MySQL family sometimes surface 42S01 (base table/view already exists)
             if ("42S01".equals(state) || "42S21".equals(state)) {
                 return true;
             }
         }
-        // MySQL / MariaDB vendor codes for existing DDL objects (not 1062 duplicate row)
-        if (code == 1050 || code == 1060 || code == 1061 || code == 1068 || code == 1826) {
+        // MySQL / MariaDB vendor codes for existing DDL objects (not 1062 duplicate row):
+        // 1050 table/view (and MariaDB sequence), 1060 index, 1061 default, 1068 multiple PK,
+        // 1304 procedure/function, 1359 trigger, 1826 named restore point
+        if (code == 1050 || code == 1060 || code == 1061 || code == 1068 || code == 1304 || code == 1359
+                || code == 1826) {
             return true;
         }
         // SQL Server: object/index/column already present (not 1911 missing-column / 1758 online-DDL)

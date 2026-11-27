@@ -27,20 +27,28 @@ commands. See the [changelog](../CHANGELOG.md).
 
 Tracked in [#16](https://github.com/eugenena/SchemaSynchronizer/issues/16).
 
-Today, change sets can create tables, indexes, functions, and table triggers, and can run
-additive `ALTER TABLE`, `INSERT`, `UPDATE`, `COMMENT ON`, and object-level `GRANT`.
-They reject:
+Change sets create (in addition to tables, indexes, functions, and table triggers, and
+running additive `ALTER TABLE`, `INSERT`, `UPDATE`, `COMMENT ON`, and object-level
+`GRANT`):
 
-| Object | Current state | Planned |
-|---|---|---|
-| Sequences | `CREATE SEQUENCE` rejected; identity columns (`GENERATED … AS IDENTITY`, `BIGSERIAL`, `AUTO_INCREMENT`, `IDENTITY(1,1)`) work in column definitions | `CREATE SEQUENCE` with schema-scope checks |
-| Views | `CREATE VIEW` rejected | `CREATE [OR REPLACE] VIEW` with its query checked as read-only and schema-scoped |
-| Stored procedures | `CREATE PROCEDURE` rejected | `CREATE [OR REPLACE] PROCEDURE` with the same body checks as functions |
-| Oracle packages and types | Rejected | Package spec and body as separate statements, with each routine body checked |
+| Object | State |
+|---|---|
+| Sequences | `CREATE SEQUENCE [IF NOT EXISTS]` on PostgreSQL, SQL Server, Oracle, and MariaDB. The name and `OWNED BY` destination are schema-scoped. MySQL has no sequences (rejected), and H2 keeps using identity columns |
+| Views | `CREATE [OR REPLACE] VIEW` (`CREATE OR ALTER VIEW` on SQL Server) on every supported dialect. The view's query goes through the same schema-scope and read-only checks as verification SQL |
+| Stored procedures | `CREATE [OR REPLACE] PROCEDURE` (`CREATE OR ALTER PROCEDURE` on SQL Server) on every dialect except H2. The body goes through the same routine-body scanner as functions |
+| Oracle packages and types | `CREATE [OR REPLACE] PACKAGE` and `PACKAGE BODY` (spec and body are separate change-set statements), `TYPE`, and `TYPE BODY`. Every routine in a body is checked; package variables, cursors, and loop records resolve like a function's locals |
+| Ownership elevation | `DEFINER`, `SQL SECURITY DEFINER`, Oracle `AUTHID`, and SQL Server `WITH EXECUTE AS` are rejected by the automatic policy; record the statement in a change set with `reviewedSql: true` after review |
 
-Until then, create these objects outside SchemaSynchronizer, for example with your
-database provisioning or a migration tool run by a privileged role, and reference them
-from change sets and verification SQL as needed.
+Views and sequences stay change-set only for now: they are not part of the declarative
+`tables` model that is compared against metadata, so a fresh database and an adopted one
+converge only through ordered, checksummed change sets.
+
+Still rejected (fail-closed, kept for later releases): materialized views on every
+dialect, `CREATE TYPE` and `CREATE PACKAGE` outside Oracle, sequences and stored
+procedures on H2, and `ALTER SEQUENCE` / `ALTER VIEW` (only additive `ALTER TABLE` is
+allowed). Create those outside SchemaSynchronizer — for example with your database
+provisioning or a migration tool run by a privileged role — and reference them from
+change sets and verification SQL as needed.
 
 ## Spring Boot and H2 compatibility
 

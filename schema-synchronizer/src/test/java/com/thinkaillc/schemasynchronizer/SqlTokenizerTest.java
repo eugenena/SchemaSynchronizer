@@ -143,6 +143,25 @@ class SqlTokenizerTest {
     }
 
     @Test
+    void sqlServerViewHeadsExtendAcrossTheirQueryAndOrAlterContinuesTheHead() {
+        assertThat(statementCount("CREATE VIEW dbo.v AS SELECT id FROM dbo.items", Mode.SQLSERVER)).isEqualTo(1);
+        assertThat(statementCount("CREATE OR ALTER VIEW dbo.v AS SELECT id FROM dbo.items", Mode.SQLSERVER))
+                .isEqualTo(1);
+        assertThat(statementCount("ALTER VIEW dbo.v AS SELECT id FROM dbo.items", Mode.SQLSERVER)).isEqualTo(1);
+        assertThat(statementCount("CREATE VIEW dbo.v AS WITH recent AS "
+                + "(SELECT id FROM dbo.items) SELECT id FROM recent", Mode.SQLSERVER)).isEqualTo(1);
+        assertThat(statementCount("CREATE VIEW dbo.v AS SELECT id FROM dbo.items UNION ALL "
+                + "SELECT id FROM dbo.items", Mode.SQLSERVER)).isEqualTo(1);
+        // A batch that is not a view head still ends at the next statement.
+        assertThat(statementCount("UPDATE dbo.items SET qty = 1 CREATE VIEW v AS SELECT 1", Mode.SQLSERVER))
+                .isEqualTo(2);
+        assertThat(statementCount("ALTER ROLE db_owner ADD MEMBER bob CREATE OR ALTER VIEW dbo.v AS SELECT 1",
+                Mode.SQLSERVER)).isEqualTo(2);
+        assertThat(statementCount("CREATE OR ALTER PROC dbo.p AS BEGIN UPDATE dbo.items SET qty = 1; END",
+                Mode.SQLSERVER)).isEqualTo(1);
+    }
+
+    @Test
     void sqlServerStatementWithoutSemicolonStartsANewStatement() {
         for (String batch : List.of(
                 "INSERT INTO dbo.t (a) VALUES (1) ALTER ROLE db_owner ADD MEMBER bob",

@@ -109,6 +109,32 @@ class SchemaSynchronizerH2IntegrationTest {
     }
 
     @Test
+    void changeSetCreatesAViewTheNextSyncRecordsAsApplied() throws Exception {
+        try (Connection connection = connection(); var statement = connection.createStatement()) {
+            statement.execute("CREATE SCHEMA APP");
+            connection.setSchema("APP");
+            SchemaDefinition definition = new SchemaDefinition(2, "h2", definition().tables(), List.of(
+                    new SchemaDefinition.ChangeSet("001-widgets-view", "a change-set view over the declared table",
+                            List.of("CREATE VIEW widgets_view AS SELECT id, name FROM widgets"),
+                            "SELECT COUNT(*) = 1 FROM INFORMATION_SCHEMA.VIEWS "
+                                    + "WHERE TABLE_SCHEMA = 'APP' AND TABLE_NAME = 'WIDGETS_VIEW'",
+                            SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA)));
+
+            assertThat(synchronizer().synchronizeWithResult(connection, definition).changeSetsApplied())
+                    .isEqualTo(1);
+            statement.execute("INSERT INTO widgets (id, name) VALUES (1, 'first')");
+            try (var rows = statement.executeQuery("SELECT name FROM widgets_view WHERE id = 1")) {
+                assertThat(rows.next()).isTrue();
+                assertThat(rows.getString(1)).isEqualTo("first");
+            }
+
+            SchemaSynchronizationResult second = synchronizer().synchronizeWithResult(connection, definition);
+            assertThat(second.changeSetsApplied()).isZero();
+            assertThat(second.changed()).isFalse();
+        }
+    }
+
+    @Test
     void competingConnectionProceedsAfterExclusiveLockIsReleased() throws Exception {
         try (Connection holder = connection()) {
             String url = holder.getMetaData().getURL();

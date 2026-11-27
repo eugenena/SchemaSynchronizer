@@ -66,6 +66,11 @@ final class SqlTokenizer {
     /** A routine body scanned as code, with its text for the lexical checks that still run on masked text. */
     record Body(String text, List<Token> tokens) {}
 
+    /** Tracks package subprograms so the package initializer BEGIN is not mistaken for a nested block. */
+    private static final class OraclePackageBodyState {
+        private final Deque<Boolean> members = new ArrayDeque<>();
+    }
+
     private static final Set<String> ROUTINE_KINDS =
             Set.of("FUNCTION", "PROCEDURE", "PROC", "TRIGGER", "PACKAGE", "TYPE", "EVENT");
 
@@ -574,6 +579,8 @@ final class SqlTokenizer {
      */
     private static int oracleRoutineEnd(List<Token> tokens, int start, Routine routine) {
         Deque<Boolean> open = new ArrayDeque<>();
+        OraclePackageBodyState packageState = oraclePackageBody(routine, tokens, start)
+                ? new OraclePackageBodyState() : null;
         boolean opened = false;
         int index = start;
         while (index < tokens.size()) {
@@ -586,7 +593,7 @@ final class SqlTokenizer {
                 index = oracleRoutineEnd(tokens, index + 1, routine);
                 continue;
             }
-            int consumed = trackBlock(tokens, index, start, routine, SqlLexer.Mode.ORACLE, open, "");
+            int consumed = trackBlock(tokens, index, start, routine, SqlLexer.Mode.ORACLE, open, "", packageState);
             if (!open.isEmpty()) {
                 opened = true;
             } else if (opened) {
@@ -659,7 +666,11 @@ final class SqlTokenizer {
         return null;
     }
 
-    /** Skips {@code = principal}, where the principal is a name, string, or {@code user@host} form. */
+    /**
+     * Skips {@code = principal}, where the principal is a name, string, or MySQL
+     * {@code user@host} form — the host can be unquoted and dotted with a {@code %} wildcard
+     * ({@code root@10.0.%}, {@code app@%}).
+     */
     private static int skipDefiner(List<Token> tokens, int index) {
         if (index < tokens.size() && tokens.get(index).punct("=")) {
             index++;
@@ -668,7 +679,9 @@ final class SqlTokenizer {
                 && !tokens.get(index).keyword("SQL") && !tokens.get(index).keyword(ROUTINE_HEAD_MODIFIERS)) {
             Token token = tokens.get(index);
             if (!(token.name() || token.type() == Type.STRING || token.type() == Type.VARIABLE
-                    || token.punct("@") || token.punct("(") || token.punct(")"))) {
+                    || token.type() == Type.NUMBER
+                    || token.punct("@") || token.punct("%") || token.punct(".")
+                    || token.punct("(") || token.punct(")"))) {
                 break;
             }
             index++;
@@ -690,6 +703,9 @@ final class SqlTokenizer {
         boolean updateSet = lead.keyword("UPDATE") && start + 1 < tokens.size()
                 && tokens.get(start + 1).keyword("STATISTICS");
         boolean privilegeTarget = false;
+        // A CREATE|ALTER VIEW's single query follows its head AS; without this, the batch
+        // would end at the SELECT and report the view as two statements.
+        boolean view = false;
         int cases = 0;
         for (int index = start; index < tokens.size(); index++) {
             Token token = tokens.get(index);
@@ -697,6 +713,10 @@ final class SqlTokenizer {
                 return index + 1;
             }
             if (index == start || token.type() != Type.WORD || token.depth() != 0) {
+                continue;
+            }
+            if ((lead.keyword("CREATE") || lead.keyword("ALTER")) && token.keyword("VIEW")) {
+                view = true;
                 continue;
             }
             if (token.keyword("CASE")) {
@@ -729,7 +749,9 @@ final class SqlTokenizer {
             }
             String word = token.text().toUpperCase(Locale.ROOT);
             boolean continues = switch (word) {
-                case "SELECT" -> previous.keyword(TSQL_SET_OPERATORS) || privilegeList
+                // In a view query, a depth-zero SELECT or WITH belongs to that query — the
+                // head one follows the head AS and a CTE's main query follows its parenthesis.
+                case "SELECT" -> previous.keyword(TSQL_SET_OPERATORS) || privilegeList || view
                         || ("INSERT".equals(main) && !rowSource);
                 case "INSERT", "UPDATE", "DELETE" -> privilegeList
                         || (word.equals("INSERT") && index - 1 == start && lead.keyword("BULK"))
@@ -739,11 +761,12 @@ final class SqlTokenizer {
                         || ("MERGE".equals(main) && previous.keyword("UPDATE"))
                         || ((previous.keyword("DELETE") || previous.keyword("UPDATE")) && index - 2 > start
                         && tokens.get(index - 2).keyword("ON"));
-                case "ALTER" -> privilegeList || (next != null && next.keyword("COLUMN"));
+                case "ALTER" -> privilegeList || (next != null && next.keyword("COLUMN"))
+                        || (previous.keyword("OR") && lead.keyword("CREATE"));
                 case "CREATE", "EXEC", "EXECUTE" -> privilegeList;
                 case "GRANT" -> (previous.keyword("WITH") && next != null && next.keyword("OPTION"))
                         || (index - 1 == start && lead.keyword("REVOKE"));
-                case "WITH" -> !cteShaped(tokens, index);
+                case "WITH" -> view || !cteShaped(tokens, index);
                 case "IF" -> previous.keyword(TSQL_IF_OBJECTS);
                 case "FETCH" -> previous.keyword("ROWS") || previous.keyword("ROW");
                 default -> false;
@@ -837,8 +860,10 @@ final class SqlTokenizer {
     private static void requireBalanced(List<Token> tokens, int start, Routine routine, SqlLexer.Mode mode,
                                         String sql) {
         Deque<Boolean> open = new ArrayDeque<>();
+        OraclePackageBodyState packageState = mode == SqlLexer.Mode.ORACLE && oraclePackageBody(routine, tokens, start)
+                ? new OraclePackageBodyState() : null;
         for (int index = start; index < tokens.size(); index++) {
-            index = trackBlock(tokens, index, start, routine, mode, open, sql);
+            index = trackBlock(tokens, index, start, routine, mode, open, sql, packageState);
         }
         if (!open.isEmpty()) {
             throw unterminatedBody(sql);
@@ -853,7 +878,28 @@ final class SqlTokenizer {
      */
     private static int trackBlock(List<Token> tokens, int index, int start, Routine routine, SqlLexer.Mode mode,
                                   Deque<Boolean> open, String sql) {
+        return trackBlock(tokens, index, start, routine, mode, open, sql, null);
+    }
+
+    private static int trackBlock(List<Token> tokens, int index, int start, Routine routine, SqlLexer.Mode mode,
+                                  Deque<Boolean> open, String sql, OraclePackageBodyState packageState) {
         Token token = tokens.get(index);
+        if (packageState != null && token.depth() == 0) {
+            if (token.keyword("PROCEDURE") || token.keyword("FUNCTION")) {
+                packageState.members.push(false);
+            }
+            if (token.keyword("BEGIN") && open.size() == 1) {
+                if (packageState.members.isEmpty()) {
+                    // In a package body this is the initializer's executable section. Its END
+                    // also closes the package body itself, so it reuses the AS/IS package block.
+                    return index;
+                }
+                if (!packageState.members.peek()) {
+                    packageState.members.pop();
+                    packageState.members.push(true);
+                }
+            }
+        }
         boolean inExpression = !open.isEmpty() && open.peek();
         if (opensBlock(tokens, index, start, routine, mode, inExpression)) {
             open.push(token.keyword("CASE") && (mode == SqlLexer.Mode.POSTGRES
@@ -866,7 +912,12 @@ final class SqlTokenizer {
         if (open.isEmpty()) {
             throw unbalanced(sql);
         }
+        boolean closesPackageMember = packageState != null && open.size() == 2
+                && !packageState.members.isEmpty() && packageState.members.peek();
         boolean expression = open.pop();
+        if (closesPackageMember) {
+            packageState.members.pop();
+        }
         if (!expression && index + 1 < tokens.size() && tokens.get(index + 1).keyword(BLOCK_SUFFIXES)) {
             return index + 1;
         }
@@ -925,6 +976,14 @@ final class SqlTokenizer {
             }
         }
         return true;
+    }
+
+    private static boolean oraclePackageBody(Routine routine, List<Token> tokens, int start) {
+        if (routine == null || !routine.kind().equals("PACKAGE")) {
+            return false;
+        }
+        int kindIndex = start + routine.kindIndex();
+        return kindIndex + 1 < tokens.size() && tokens.get(kindIndex + 1).keyword("BODY");
     }
 
     /** Whether the token at {@code index} starts a statement inside a MySQL or PL/SQL routine; never inside a CASE expression. */

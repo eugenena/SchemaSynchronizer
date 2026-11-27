@@ -68,9 +68,18 @@ class NonDestructiveSqlPolicyTest {
         assertThatCode(() -> NonDestructiveSqlPolicy.requireReviewed(triggerFunction, DatabaseDialect.POSTGRESQL))
                 .doesNotThrowAnyException();
         assertThatThrownBy(() -> NonDestructiveSqlPolicy.requireReviewed(
-                "CREATE VIEW items_view AS SELECT * FROM items", DatabaseDialect.POSTGRESQL))
+                "CREATE MATERIALIZED VIEW items_mv AS SELECT id FROM items", DatabaseDialect.POSTGRESQL))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("not yet supported");
+        assertThatThrownBy(() -> NonDestructiveSqlPolicy.requireReviewed(
+                "CREATE VIEW items_view AS SELECT * FROM items; DROP TABLE items",
+                DatabaseDialect.POSTGRESQL))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("exactly one statement");
+        assertThatCode(() -> NonDestructiveSqlPolicy.requireReviewed(
+                "CREATE OR REPLACE DEFINER = root@% VIEW items_view AS SELECT id FROM other.items",
+                DatabaseDialect.POSTGRESQL))
+                .doesNotThrowAnyException();
         assertThatThrownBy(() -> NonDestructiveSqlPolicy.requireReviewed(
                 "CREATE FUNCTION f() RETURNS void LANGUAGE sql AS $$ SELECT 1 $$; DROP TABLE items",
                 DatabaseDialect.POSTGRESQL))

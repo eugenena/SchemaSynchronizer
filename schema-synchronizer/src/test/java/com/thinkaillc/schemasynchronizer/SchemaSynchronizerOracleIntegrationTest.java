@@ -588,6 +588,73 @@ class SchemaSynchronizerOracleIntegrationTest {
                 List.of());
     }
 
+    @Test
+    void changeSetsCreateSequenceViewProcedurePackageAndTypeAndVerifyThemThroughCatalogQueries() throws Exception {
+        SchemaDefinition definition = new SchemaDefinition(2, "oracle", Map.of("objects_items",
+                        new SchemaDefinition.TableDef("CREATE TABLE objects_items (id NUMBER(10) PRIMARY KEY, "
+                                + "qty NUMBER(10) NOT NULL)",
+                                List.of(new SchemaDefinition.ColumnDef("id", "NUMBER(10) NOT NULL"),
+                                        new SchemaDefinition.ColumnDef("qty", "NUMBER(10) NOT NULL")), List.of())),
+                List.of(
+                        new SchemaDefinition.ChangeSet("001-objects-sequence", "change-set a sequence",
+                                List.of("CREATE SEQUENCE objects_seq START WITH 10 INCREMENT BY 5"),
+                                "SELECT CASE WHEN COUNT(*) = 1 THEN 1 ELSE 0 END FROM user_sequences "
+                                        + "WHERE sequence_name = 'OBJECTS_SEQ'",
+                                SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA),
+                        new SchemaDefinition.ChangeSet("002-objects-view", "change-set a view",
+                                List.of("CREATE OR REPLACE VIEW objects_items_v "
+                                        + "AS SELECT id, qty FROM objects_items"),
+                                "SELECT CASE WHEN COUNT(*) = 1 THEN 1 ELSE 0 END FROM user_views "
+                                        + "WHERE view_name = 'OBJECTS_ITEMS_V'",
+                                SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA),
+                        new SchemaDefinition.ChangeSet("003-objects-procedure", "change-set a procedure",
+                                List.of("CREATE OR REPLACE PROCEDURE objects_set_qty(target NUMBER) IS BEGIN "
+                                        + "UPDATE objects_items SET qty = target WHERE id = 1; "
+                                        + "END objects_set_qty;"),
+                                "SELECT CASE WHEN COUNT(*) = 1 THEN 1 ELSE 0 END FROM user_objects "
+                                        + "WHERE object_name = 'OBJECTS_SET_QTY' "
+                                        + "AND object_type = 'PROCEDURE'",
+                                SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA),
+                        new SchemaDefinition.ChangeSet("004-objects-package-spec", "change-set a package spec",
+                                List.of("CREATE OR REPLACE PACKAGE objects_util AS "
+                                        + "PROCEDURE bump(target NUMBER); END objects_util;"),
+                                "SELECT CASE WHEN COUNT(*) = 1 THEN 1 ELSE 0 END FROM user_objects "
+                                        + "WHERE object_name = 'OBJECTS_UTIL' "
+                                        + "AND object_type = 'PACKAGE'",
+                                SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA),
+                        new SchemaDefinition.ChangeSet("005-objects-package-body", "change-set a package body",
+                                List.of("CREATE OR REPLACE PACKAGE BODY objects_util AS "
+                                        + "PROCEDURE bump(target NUMBER) IS BEGIN "
+                                        + "UPDATE objects_items SET qty = qty + target WHERE id = 1; "
+                                        + "END bump; END objects_util;"),
+                                "SELECT CASE WHEN COUNT(*) = 1 THEN 1 ELSE 0 END FROM user_objects "
+                                        + "WHERE object_name = 'OBJECTS_UTIL' "
+                                        + "AND object_type = 'PACKAGE BODY'",
+                                SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA),
+                        new SchemaDefinition.ChangeSet("006-objects-type", "change-set a type",
+                                List.of("CREATE OR REPLACE TYPE objects_point AS OBJECT (x NUMBER, y NUMBER)"),
+                                "SELECT CASE WHEN COUNT(*) = 1 THEN 1 ELSE 0 END FROM user_objects "
+                                        + "WHERE object_name = 'OBJECTS_POINT' "
+                                        + "AND object_type = 'TYPE'",
+                                SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA)));
+        try (Connection connection = connection()) {
+            assertThat(synchronizer(false).synchronizeWithResult(connection, definition).changeSetsApplied())
+                    .isEqualTo(6);
+            try (var statement = connection.createStatement()) {
+                statement.execute("INSERT INTO objects_items (id, qty) VALUES (1, 0)");
+                statement.execute("BEGIN objects_set_qty(3); END;");
+                statement.execute("BEGIN objects_util.bump(4); END;");
+            }
+            assertThat(LiveTestSupport.scalar(connection, "SELECT qty FROM objects_items_v WHERE id = 1"))
+                    .isEqualTo("7");
+            assertThat(LiveTestSupport.scalar(connection, "SELECT objects_seq.NEXTVAL FROM dual")).isEqualTo("10");
+            assertThat(LiveTestSupport.scalar(connection,
+                    "SELECT objects_point(1, 2).x FROM dual")).isEqualTo("1");
+            assertThat(synchronizer(false).synchronizeWithResult(connection, definition).changeSetsApplied())
+                    .isZero();
+        }
+    }
+
     private SchemaSynchronizer synchronizer() {
         return synchronizer(false);
     }

@@ -433,6 +433,10 @@ final class ChangeSetSchemaScope {
                             && correlations.declares(chain.first(), schema)))) {
                 continue;
             }
+            if (!typed && parts == 2 && sequenceOwnedByColumn(tokens, chain.first())) {
+                // CREATE SEQUENCE … OWNED BY table.column: the table, not a schema, is the first part.
+                continue;
+            }
             if (!typed && routine && correlations.routineItemChain(chain, objectLists)) {
                 continue;
             }
@@ -674,6 +678,16 @@ final class ChangeSetSchemaScope {
                 DatabaseDialect.ORACLE);
         Token after = SqlTokenizer.next(tokens, chain.last());
         return (pseudo.equals("NEXTVAL") || pseudo.equals("CURRVAL")) && (after == null || !after.punct("("));
+    }
+
+    /**
+     * {@code OWNED BY table.column}: PostgreSQL sequence ownership of a column of a table in the
+     * synchronized schema — {@code schema.table.column} keeps its schema checked, and
+     * {@code OWNED BY NONE} has no dotted name at all.
+     */
+    private static boolean sequenceOwnedByColumn(List<Token> tokens, int first) {
+        int by = previousSignificant(tokens, first);
+        return by >= 1 && tokens.get(by).keyword("BY") && tokens.get(by - 1).keyword("OWNED");
     }
 
     /**
@@ -1843,12 +1857,18 @@ final class ChangeSetSchemaScope {
         /** Oracle routine-header variables ({@code FUNCTION f … IS v t; BEGIN}) and the trigger {@code WHEN}. */
         private void oracleHeader(SqlTokenizer.Routine header) {
             boolean subprogram = header.kind().equals("FUNCTION") || header.kind().equals("PROCEDURE");
+            // A package spec or body, or a type body, opens its declaration section at its header
+            // IS/AS: package variables and its subprograms' own names, parameters, and locals
+            // resolve through the body exactly as a FUNCTION's do.
+            boolean container = header.kind().equals("PACKAGE")
+                    || (header.kind().equals("TYPE") && header.kindIndex() + 1 < tokens.size()
+                    && tokens.get(header.kindIndex() + 1).keyword("BODY"));
             for (int index = header.kindIndex() + 1; index < tokens.size(); index++) {
                 Token token = tokens.get(index);
                 if (token.depth() != 0) {
                     continue;
                 }
-                if (subprogram && (token.keyword("IS") || token.keyword("AS"))) {
+                if ((subprogram || container) && (token.keyword("IS") || token.keyword("AS"))) {
                     declarations(index + 1, true);
                     return;
                 }

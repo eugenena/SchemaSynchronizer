@@ -154,12 +154,13 @@ final class NonDestructiveSqlPolicy {
         SqlLexer.Mode mode = SqlLexer.mode(dialect);
         String normalized = executableSql(sql, mode).toUpperCase(Locale.ROOT);
         List<Token> tokens = SqlTokenizer.tokenize(sql, mode);
-        rejectObjectTypeNotYetSupported(tokens, sql);
+        CreateHead head = rejectUnsupportedCreateObject(tokens, dialect, sql);
         requireSingleStatement(tokens, mode, sql, "schema change SQL");
         requireNoForbiddenTokens(sql, tokens, mode);
-        if (!matchesAllowedStatement(normalized, tokens) && !allowedCteStatement(tokens, dialect)) {
+        if (!matchesAllowedStatement(normalized, tokens, dialect, head) && !allowedCteStatement(tokens, dialect)) {
             throw new IllegalArgumentException("unsupported schema change SQL: " + summarize(sql));
         }
+        requireSupportedCreateObjectForm(head, tokens, mode, sql);
     }
 
     /**
@@ -175,9 +176,9 @@ final class NonDestructiveSqlPolicy {
         SqlLexer.Mode mode = SqlLexer.mode(dialect);
         String normalized = executableSql(sql, mode).toUpperCase(Locale.ROOT);
         List<Token> tokens = SqlTokenizer.tokenize(sql, mode);
-        rejectObjectTypeNotYetSupported(tokens, sql);
+        CreateHead head = rejectUnsupportedCreateObject(tokens, dialect, sql);
         requireSingleStatement(tokens, mode, sql, "schema change SQL");
-        if (!matchesAllowedStatement(normalized, tokens) && !allowedCteStatement(tokens, dialect)) {
+        if (!matchesAllowedStatement(normalized, tokens, dialect, head) && !allowedCteStatement(tokens, dialect)) {
             throw new IllegalArgumentException("unsupported schema change SQL: " + summarize(sql));
         }
     }
@@ -335,34 +336,211 @@ final class NonDestructiveSqlPolicy {
         IndexDefinition.parse(sql, dialect);
     }
 
-    /** Object types change sets cannot create yet (docs/ROADMAP.md). */
-    private static final Set<String> NOT_YET_SUPPORTED_OBJECTS = Set.of("VIEW", "SEQUENCE", "PROCEDURE", "PACKAGE",
-            "TYPE");
-    /** Where the object type of a CREATE head has been passed without naming one of those. */
+    /** Where the object type of a CREATE head has passed without naming a supported object kind. */
     private static final Set<String> CREATE_HEAD_END = Set.of("TABLE", "INDEX", "FUNCTION", "TRIGGER", "AS", "ON",
             "IS", "BEGIN", "SCHEMA", "DATABASE", "EXTENSION", "USER", "ROLE", "LOGIN", "SYNONYM", "EVENT", "DOMAIN",
             "SERVER");
 
     /**
-     * Rejects {@code CREATE [modifiers] VIEW|SEQUENCE|PROCEDURE|PACKAGE|TYPE} by its object type
-     * before statement splitting, which would otherwise split a T-SQL {@code CREATE VIEW … AS SELECT}
-     * at the SELECT and report it as two statements.
+     * Object kinds a CREATE head can name (issue #16). Dialect support is decided by
+     * {@link #kindSupported}; {@code MATERIALIZED VIEW} is named by the classifier but never
+     * supported. Head words the engines allow between {@code CREATE} and the kind
+     * ({@code OR REPLACE|ALTER}, {@code TEMP[ORARY]}, {@code [NON]EDITIONABLE}, {@code FORCE},
+     * {@code ALGORITHM}, {@code DEFINER = …}, {@code SQL SECURITY …}) and the object name are
+     * walked past; a quoted identifier of the same spelling is only a name.
      */
-    private static void rejectObjectTypeNotYetSupported(List<Token> tokens, String sql) {
+    private static final Set<String> CREATE_OBJECT_KINDS =
+            Set.of("VIEW", "SEQUENCE", "PROCEDURE", "PROC", "PACKAGE", "TYPE");
+
+    /** The object kind a {@code CREATE} head names, with the index of its kind word; null when none. */
+    record CreateHead(String kind, int kindIndex) {}
+
+    private static CreateHead createHead(List<Token> tokens) {
         if (tokens.isEmpty() || !tokens.get(0).keyword("CREATE")) {
-            return;
+            return null;
         }
-        for (int i = 1; i < tokens.size() && i <= 16; i++) {
-            Token token = tokens.get(i);
-            if (token.keyword(NOT_YET_SUPPORTED_OBJECTS)) {
-                throw new IllegalArgumentException("unsupported schema change SQL: CREATE "
-                        + token.text().toUpperCase(Locale.ROOT) + " is not yet supported in change sets; "
-                        + "create this object outside SchemaSynchronizer (see docs/ROADMAP.md): " + summarize(sql));
+        boolean materialized = false;
+        for (int index = 1; index < tokens.size() && index <= 16; index++) {
+            Token token = tokens.get(index);
+            if (token.keyword("MATERIALIZED")) {
+                materialized = true;
+                continue;
+            }
+            if (token.keyword(CREATE_OBJECT_KINDS)) {
+                String kind = token.keyword("PROC") ? "PROCEDURE" : token.text().toUpperCase(Locale.ROOT);
+                return new CreateHead(materialized ? "MATERIALIZED VIEW" : kind, index);
             }
             if (token.keyword(CREATE_HEAD_END) || token.punct("(") || token.punct(";")) {
-                return;
+                return null;
             }
         }
+        return null;
+    }
+
+    /** Whether change sets can create this object kind on this dialect (issue #16). */
+    private static boolean kindSupported(String kind, DatabaseDialect dialect) {
+        return switch (kind) {
+            case "VIEW" -> true;
+            case "SEQUENCE" -> dialect == DatabaseDialect.POSTGRESQL || dialect == DatabaseDialect.SQLSERVER
+                    || dialect == DatabaseDialect.ORACLE || dialect == DatabaseDialect.MARIADB;
+            case "PROCEDURE" -> dialect != DatabaseDialect.H2;
+            case "PACKAGE", "TYPE" -> dialect == DatabaseDialect.ORACLE;
+            default -> false;
+        };
+    }
+
+    /**
+     * Rejects {@code CREATE [modifiers] KIND} whose kind this dialect does not yet support in
+     * change sets, before statement splitting — which would otherwise split a T-SQL
+     * {@code CREATE VIEW … AS SELECT} at the SELECT and report two statements — and returns the
+     * supported kind for the checks that follow. Materialized views stay rejected on every
+     * dialect, as do sequences on MySQL (which has none) and H2, stored procedures on H2, and
+     * packages and types outside Oracle (see docs/ROADMAP.md).
+     */
+    private static CreateHead rejectUnsupportedCreateObject(List<Token> tokens, DatabaseDialect dialect,
+                                                            String sql) {
+        CreateHead head = createHead(tokens);
+        if (head != null && !kindSupported(head.kind(), dialect)) {
+            throw new IllegalArgumentException("unsupported schema change SQL: CREATE " + head.kind()
+                    + " is not yet supported in change sets; create this object outside SchemaSynchronizer "
+                    + "(see docs/ROADMAP.md): " + summarize(sql));
+        }
+        return head;
+    }
+
+    /**
+     * Checks the automatic policy runs on the newly supported object kinds: the view's query goes
+     * through the same read-only checks as verification SQL, and no view or routine head elevates
+     * the executing owner ({@code DEFINER = …}, {@code SQL SECURITY DEFINER}, Oracle {@code AUTHID …};
+     * T-SQL {@code WITH EXECUTE AS} is rejected as unvetted execution). {@code requireReviewed}
+     * skips this: a maintainer vouched for those effects.
+     */
+    private static void requireSupportedCreateObjectForm(CreateHead head, List<Token> tokens,
+                                                         SqlLexer.Mode mode, String sql) {
+        if (head == null) {
+            return;
+        }
+        for (int index = 1; index < createHeadEnd(tokens, head, mode); index++) {
+            Token token = tokens.get(index);
+            if (token.depth() != 0) {
+                continue;
+            }
+            if (token.keyword("DEFINER") || token.keyword("AUTHID")) {
+                throw new IllegalArgumentException("change sets must not specify DEFINER, SQL SECURITY DEFINER,"
+                        + " or AUTHID ownership; put the effect in a change set with reviewedSql after review: "
+                        + summarize(sql));
+            }
+        }
+        if (mode == SqlLexer.Mode.POSTGRES && head.kind().equals("PROCEDURE")) {
+            // PostgreSQL permits procedure characteristics after the AS body literal too. The
+            // body is one STRING/BODY token, so inspect the trailing option tokens without
+            // interpreting ownership words that happen to occur inside the procedure source.
+            int trailingOptions = postgresProcedureOptionsAfterBody(tokens, head.kindIndex());
+            for (int index = trailingOptions; index < tokens.size(); index++) {
+                Token token = tokens.get(index);
+                if (token.depth() == 0 && (token.keyword("DEFINER") || token.keyword("AUTHID"))) {
+                    throw new IllegalArgumentException("change sets must not specify DEFINER, SQL SECURITY DEFINER,"
+                            + " or AUTHID ownership; put the effect in a change set with reviewedSql after review: "
+                            + summarize(sql));
+                }
+            }
+        }
+        if (head.kind().equals("VIEW")) {
+            requireReadOnlyViewQuery(head, tokens, mode, sql);
+        }
+    }
+
+    /** The first token after a PostgreSQL procedure's quoted body, or token count if absent. */
+    private static int postgresProcedureOptionsAfterBody(List<Token> tokens, int kindIndex) {
+        for (int index = kindIndex + 1; index < tokens.size(); index++) {
+            Token token = tokens.get(index);
+            if (!token.keyword("AS") || token.depth() != 0) {
+                continue;
+            }
+            for (int body = index + 1; body < tokens.size(); body++) {
+                Token candidate = tokens.get(body);
+                if (candidate.type() == SqlTokenizer.Type.STRING || candidate.type() == SqlTokenizer.Type.BODY) {
+                    return body + 1;
+                }
+            }
+            return tokens.size();
+        }
+        return tokens.size();
+    }
+
+    /** The index just past the head of the created object: its body opener, or the token count. */
+    private static int createHeadEnd(List<Token> tokens, CreateHead head, SqlLexer.Mode mode) {
+        for (int index = head.kindIndex() + 1; index < tokens.size(); index++) {
+            Token token = tokens.get(index);
+            if (token.depth() != 0) {
+                continue;
+            }
+            boolean terminator = switch (head.kind()) {
+                case "VIEW" -> token.keyword("AS");
+                // A MySQL/MariaDB routine's characteristics end before its compound statement.
+                case "PROCEDURE" -> switch (mode) {
+                    case MYSQL -> token.keyword("BEGIN");
+                    // LANGUAGE is a procedure option, not a body boundary: SECURITY and other
+                    // characteristics may legally follow it before the AS/BEGIN body opener.
+                    case POSTGRES -> token.keyword("AS") || token.keyword("BEGIN") || token.keyword("RETURN");
+                    case SQLSERVER -> token.keyword("AS");
+                    case ORACLE -> token.keyword("IS") || token.keyword("AS");
+                };
+                case "PACKAGE", "TYPE" -> mode == SqlLexer.Mode.ORACLE
+                        && (token.keyword("IS") || token.keyword("AS"));
+                default -> false;
+            };
+            if (terminator) {
+                return index;
+            }
+        }
+        return tokens.size();
+    }
+
+    /**
+     * The view's query is checked like verification SQL: a {@code SELECT} or {@code WITH} query
+     * with no data-modifying statement and no writing, locking, or sequence-advancing construct.
+     * The forbidden-name checks ran over the whole statement already.
+     */
+    private static void requireReadOnlyViewQuery(CreateHead head, List<Token> tokens, SqlLexer.Mode mode,
+                                                 String sql) {
+        int query = viewQueryStart(tokens, head.kindIndex());
+        if (query >= tokens.size()) {
+            throw new IllegalArgumentException("view definition must name its query with AS: " + summarize(sql));
+        }
+        Token lead = tokens.get(query);
+        if (!(lead.keyword("SELECT") || lead.keyword("WITH"))) {
+            throw new IllegalArgumentException("view query must be a SELECT or WITH query: " + summarize(sql));
+        }
+        int end = tokens.size();
+        if (tokens.get(end - 1).punct(";")) {
+            end--;
+        }
+        List<Token> body = tokens.subList(query, end);
+        if (body.stream().anyMatch(token -> token.keyword(DATA_MODIFYING))) {
+            throw new IllegalArgumentException("view query must not contain a data-modifying statement: "
+                    + summarize(sql));
+        }
+        if (hasVerificationSideEffect(body, mode)) {
+            throw new IllegalArgumentException("view query must not write, lock, or advance sequences: "
+                    + summarize(sql));
+        }
+    }
+
+    /**
+     * The head {@code AS} of a view: the first one at depth zero after the kind word, past the
+     * name and its optional column list; the token count when the head never names a query.
+     */
+    private static int viewQueryStart(List<Token> tokens, int kindIndex) {
+        for (int index = kindIndex + 1; index < tokens.size(); index++) {
+            if (tokens.get(index).depth() != 0) {
+                continue;
+            }
+            if (tokens.get(index).keyword("AS")) {
+                return index + 1;
+            }
+        }
+        return tokens.size();
     }
 
     private static void requireSingleStatement(List<Token> tokens, SqlLexer.Mode mode, String sql, String label) {
@@ -723,7 +901,11 @@ final class NonDestructiveSqlPolicy {
                 + "triggers, or run administrative statements: " + summarize(sql));
     }
 
-    private static boolean matchesAllowedStatement(String sql, List<Token> tokens) {
+    private static boolean matchesAllowedStatement(String sql, List<Token> tokens, DatabaseDialect dialect,
+                                                    CreateHead head) {
+        if (head != null && kindSupported(head.kind(), dialect)) {
+            return true;
+        }
         if (sql.matches("(?s)^ALTER\\s+TABLE\\b.*")) {
             return alterTableActionsAllowed(sql);
         }

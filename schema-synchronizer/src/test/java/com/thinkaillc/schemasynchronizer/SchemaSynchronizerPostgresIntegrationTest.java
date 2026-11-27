@@ -1017,6 +1017,50 @@ class SchemaSynchronizerPostgresIntegrationTest {
         }
     }
 
+    @Test
+    void changeSetsCreateSequenceViewAndProcedureAndVerifyThemThroughCatalogQueries() throws Exception {
+        DataSource dataSource = dataSource();
+        String schema = uniqueSchema("objects_case");
+        createSchema(dataSource, schema);
+        SchemaDefinition definition = new SchemaDefinition(2, "postgresql", Map.of("objects_items",
+                new SchemaDefinition.TableDef("CREATE TABLE objects_items (id BIGINT PRIMARY KEY, qty INTEGER NOT NULL)",
+                        List.of(new SchemaDefinition.ColumnDef("id", "BIGINT NOT NULL"),
+                                new SchemaDefinition.ColumnDef("qty", "INTEGER NOT NULL")), List.of())),
+                List.of(
+                        new SchemaDefinition.ChangeSet("001-objects-sequence", "change-set a sequence",
+                                List.of("CREATE SEQUENCE objects_seq START WITH 10 INCREMENT BY 5 "
+                                        + "OWNED BY objects_items.id"),
+                                "SELECT EXISTS (SELECT 1 FROM information_schema.sequences "
+                                        + "WHERE sequence_schema = '" + schema
+                                        + "' AND sequence_name = 'objects_seq')",
+                                SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA),
+                        new SchemaDefinition.ChangeSet("002-objects-view", "change-set a view",
+                                List.of("CREATE VIEW objects_items_v AS SELECT id, qty FROM objects_items"),
+                                "SELECT to_regclass('" + schema + ".objects_items_v') IS NOT NULL",
+                                SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA),
+                        new SchemaDefinition.ChangeSet("003-objects-procedure", "change-set a procedure",
+                                List.of("CREATE PROCEDURE objects_set_qty(target INTEGER) LANGUAGE plpgsql "
+                                        + "AS $$ BEGIN UPDATE objects_items SET qty = target WHERE id = 1; END $$"),
+                                "SELECT to_regprocedure('" + schema + ".objects_set_qty(integer)') IS NOT NULL",
+                                SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA)));
+        try (Connection connection = dataSource.getConnection()) {
+            assertThat(synchronizer(dataSource, schema, false).synchronizeWithResult(connection, definition)
+                    .changeSetsApplied()).isEqualTo(3);
+            statement(connection, "INSERT INTO " + schema + ".objects_items (id, qty) VALUES (1, 0)");
+            statement(connection, "CALL " + schema + ".objects_set_qty(7)");
+            assertThat(queryLong(connection, "SELECT qty FROM " + schema + ".objects_items_v WHERE id = 1"))
+                    .isEqualTo(7);
+            assertThat(queryLong(connection, "SELECT nextval('" + schema + ".objects_seq')")).isEqualTo(10);
+            assertThat(queryString(connection, "SELECT routine_name FROM information_schema.routines "
+                    + "WHERE routine_schema = '" + schema + "' AND routine_name = 'objects_set_qty'"))
+                    .isEqualTo("objects_set_qty");
+            SchemaSynchronizationResult second = synchronizer(dataSource, schema, false)
+                    .synchronizeWithResult(connection, definition);
+            assertThat(second.changeSetsApplied()).isZero();
+            assertThat(second.changed()).isFalse();
+        }
+    }
+
     private SchemaSynchronizer synchronizer(DataSource dataSource, String schema, boolean dryRun) {
         return new SchemaSynchronizer(new ObjectMapper(), dataSource, "/schema-definition.json",
                 new SchemaSynchronizerOptions(schema, "schema_synchronizer_history", 91L, dryRun, true, true));
