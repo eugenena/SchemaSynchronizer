@@ -598,25 +598,28 @@ class SchemaSynchronizerOracleIntegrationTest {
                 List.of(
                         new SchemaDefinition.ChangeSet("001-objects-sequence", "change-set a sequence",
                                 List.of("CREATE SEQUENCE objects_seq START WITH 10 INCREMENT BY 5"),
-                                "SELECT COUNT(*) = 1 FROM user_sequences "
+                                "SELECT CASE WHEN COUNT(*) = 1 THEN 1 ELSE 0 END FROM user_sequences "
                                         + "WHERE sequence_name = 'OBJECTS_SEQ'",
                                 SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA),
                         new SchemaDefinition.ChangeSet("002-objects-view", "change-set a view",
                                 List.of("CREATE OR REPLACE VIEW objects_items_v "
                                         + "AS SELECT id, qty FROM objects_items"),
-                                "SELECT COUNT(*) = 1 FROM user_views WHERE view_name = 'OBJECTS_ITEMS_V'",
+                                "SELECT CASE WHEN COUNT(*) = 1 THEN 1 ELSE 0 END FROM user_views "
+                                        + "WHERE view_name = 'OBJECTS_ITEMS_V'",
                                 SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA),
                         new SchemaDefinition.ChangeSet("003-objects-procedure", "change-set a procedure",
                                 List.of("CREATE OR REPLACE PROCEDURE objects_set_qty(target NUMBER) IS BEGIN "
                                         + "UPDATE objects_items SET qty = target WHERE id = 1; "
                                         + "END objects_set_qty;"),
-                                "SELECT COUNT(*) = 1 FROM user_objects WHERE object_name = 'OBJECTS_SET_QTY' "
+                                "SELECT CASE WHEN COUNT(*) = 1 THEN 1 ELSE 0 END FROM user_objects "
+                                        + "WHERE object_name = 'OBJECTS_SET_QTY' "
                                         + "AND object_type = 'PROCEDURE'",
                                 SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA),
                         new SchemaDefinition.ChangeSet("004-objects-package-spec", "change-set a package spec",
                                 List.of("CREATE OR REPLACE PACKAGE objects_util AS "
                                         + "PROCEDURE bump(target NUMBER); END objects_util;"),
-                                "SELECT COUNT(*) = 1 FROM user_objects WHERE object_name = 'OBJECTS_UTIL' "
+                                "SELECT CASE WHEN COUNT(*) = 1 THEN 1 ELSE 0 END FROM user_objects "
+                                        + "WHERE object_name = 'OBJECTS_UTIL' "
                                         + "AND object_type = 'PACKAGE'",
                                 SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA),
                         new SchemaDefinition.ChangeSet("005-objects-package-body", "change-set a package body",
@@ -624,12 +627,14 @@ class SchemaSynchronizerOracleIntegrationTest {
                                         + "PROCEDURE bump(target NUMBER) IS BEGIN "
                                         + "UPDATE objects_items SET qty = qty + target WHERE id = 1; "
                                         + "END bump; END objects_util;"),
-                                "SELECT COUNT(*) = 1 FROM user_objects WHERE object_name = 'OBJECTS_UTIL' "
+                                "SELECT CASE WHEN COUNT(*) = 1 THEN 1 ELSE 0 END FROM user_objects "
+                                        + "WHERE object_name = 'OBJECTS_UTIL' "
                                         + "AND object_type = 'PACKAGE BODY'",
                                 SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA),
                         new SchemaDefinition.ChangeSet("006-objects-type", "change-set a type",
                                 List.of("CREATE OR REPLACE TYPE objects_point AS OBJECT (x NUMBER, y NUMBER)"),
-                                "SELECT COUNT(*) = 1 FROM user_objects WHERE object_name = 'OBJECTS_POINT' "
+                                "SELECT CASE WHEN COUNT(*) = 1 THEN 1 ELSE 0 END FROM user_objects "
+                                        + "WHERE object_name = 'OBJECTS_POINT' "
                                         + "AND object_type = 'TYPE'",
                                 SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA)));
         try (Connection connection = connection()) {

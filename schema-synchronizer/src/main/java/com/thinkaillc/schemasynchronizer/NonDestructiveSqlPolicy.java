@@ -448,8 +448,9 @@ final class NonDestructiveSqlPolicy {
                 // A MySQL/MariaDB routine's characteristics end before its compound statement.
                 case "PROCEDURE" -> switch (mode) {
                     case MYSQL -> token.keyword("BEGIN");
-                    case POSTGRES -> token.keyword("AS") || token.keyword("LANGUAGE") || token.keyword("BEGIN")
-                            || token.keyword("RETURN");
+                    // LANGUAGE is a procedure option, not a body boundary: SECURITY and other
+                    // characteristics may legally follow it before the AS/BEGIN body opener.
+                    case POSTGRES -> token.keyword("AS") || token.keyword("BEGIN") || token.keyword("RETURN");
                     case SQLSERVER -> token.keyword("AS");
                     case ORACLE -> token.keyword("IS") || token.keyword("AS");
                 };

@@ -2568,6 +2568,10 @@ class GuardrailTokenizerContractTest {
                     OWNERSHIP);
             policyRejects(MARIADB, "CREATE OR REPLACE PROCEDURE p() SQL SECURITY DEFINER BEGIN "
                     + "UPDATE items SET qty = 1; END", OWNERSHIP);
+            policyRejects(PG, "CREATE PROCEDURE p() LANGUAGE sql SECURITY DEFINER AS "
+                    + "$$ UPDATE items SET qty = 1 $$", OWNERSHIP);
+            policyRejects(PG, "CREATE PROCEDURE p() LANGUAGE plpgsql SECURITY DEFINER AS "
+                    + "$$ BEGIN UPDATE items SET qty = 1; END $$", OWNERSHIP);
             policyRejects(ORACLE, "CREATE OR REPLACE PROCEDURE p AUTHID DEFINER IS BEGIN NULL; END;", OWNERSHIP);
             policyRejects(ORACLE, "CREATE OR REPLACE PROCEDURE p AUTHID CURRENT_USER IS BEGIN NULL; END;",
                     OWNERSHIP);
@@ -2603,6 +2607,11 @@ class GuardrailTokenizerContractTest {
             accepted(ORACLE, "CREATE OR REPLACE PACKAGE BODY util AS PROCEDURE retitle IS "
                     + "BEGIN FOR r IN (SELECT id FROM items) LOOP "
                     + "UPDATE items SET qty = r.id WHERE id = r.id; END LOOP; END; END util;");
+            accepted(ORACLE, "CREATE OR REPLACE PACKAGE BODY util AS PROCEDURE p IS BEGIN NULL; END; "
+                    + "BEGIN NULL; END util;");
+            accepted(ORACLE, "CREATE OR REPLACE PACKAGE BODY util AS PROCEDURE p IS "
+                    + "FUNCTION q RETURN NUMBER IS BEGIN RETURN 1; END q; BEGIN NULL; END p; "
+                    + "BEGIN NULL; END util;");
         }
 
         @Test

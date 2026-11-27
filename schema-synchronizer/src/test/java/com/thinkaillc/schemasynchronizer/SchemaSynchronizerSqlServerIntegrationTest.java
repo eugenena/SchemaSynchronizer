@@ -504,17 +504,17 @@ class SchemaSynchronizerSqlServerIntegrationTest {
                 List.of(
                         new SchemaDefinition.ChangeSet("001-objects-sequence", "change-set a sequence",
                                 List.of("CREATE SEQUENCE dbo.objects_seq START WITH 10 INCREMENT BY 5"),
-                                "SELECT OBJECT_ID('dbo.objects_seq', 'SO') IS NOT NULL",
+                                "SELECT CASE WHEN OBJECT_ID('dbo.objects_seq', 'SO') IS NOT NULL THEN 1 ELSE 0 END",
                                 SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA),
                         new SchemaDefinition.ChangeSet("002-objects-view", "change-set a view",
                                 List.of("CREATE OR ALTER VIEW dbo.objects_items_v "
                                         + "AS SELECT id, qty FROM dbo.objects_items"),
-                                "SELECT OBJECT_ID('dbo.objects_items_v', 'V') IS NOT NULL",
+                                "SELECT CASE WHEN OBJECT_ID('dbo.objects_items_v', 'V') IS NOT NULL THEN 1 ELSE 0 END",
                                 SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA),
                         new SchemaDefinition.ChangeSet("003-objects-procedure", "change-set a procedure",
                                 List.of("CREATE OR ALTER PROCEDURE dbo.objects_set_qty @target INT AS "
                                         + "BEGIN UPDATE dbo.objects_items SET qty = @target WHERE id = 1; END"),
-                                "SELECT OBJECT_ID('dbo.objects_set_qty', 'P') IS NOT NULL",
+                                "SELECT CASE WHEN OBJECT_ID('dbo.objects_set_qty', 'P') IS NOT NULL THEN 1 ELSE 0 END",
                                 SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA)));
         try (Connection connection = connection()) {
             assertThat(synchronizer(false).synchronizeWithResult(connection, definition).changeSetsApplied())

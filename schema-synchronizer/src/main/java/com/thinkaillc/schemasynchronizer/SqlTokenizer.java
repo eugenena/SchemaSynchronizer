@@ -66,6 +66,11 @@ final class SqlTokenizer {
     /** A routine body scanned as code, with its text for the lexical checks that still run on masked text. */
     record Body(String text, List<Token> tokens) {}
 
+    /** Tracks package subprograms so the package initializer BEGIN is not mistaken for a nested block. */
+    private static final class OraclePackageBodyState {
+        private final Deque<Boolean> members = new ArrayDeque<>();
+    }
+
     private static final Set<String> ROUTINE_KINDS =
             Set.of("FUNCTION", "PROCEDURE", "PROC", "TRIGGER", "PACKAGE", "TYPE", "EVENT");
 
@@ -574,6 +579,8 @@ final class SqlTokenizer {
      */
     private static int oracleRoutineEnd(List<Token> tokens, int start, Routine routine) {
         Deque<Boolean> open = new ArrayDeque<>();
+        OraclePackageBodyState packageState = oraclePackageBody(routine, tokens, start)
+                ? new OraclePackageBodyState() : null;
         boolean opened = false;
         int index = start;
         while (index < tokens.size()) {
@@ -586,7 +593,7 @@ final class SqlTokenizer {
                 index = oracleRoutineEnd(tokens, index + 1, routine);
                 continue;
             }
-            int consumed = trackBlock(tokens, index, start, routine, SqlLexer.Mode.ORACLE, open, "");
+            int consumed = trackBlock(tokens, index, start, routine, SqlLexer.Mode.ORACLE, open, "", packageState);
             if (!open.isEmpty()) {
                 opened = true;
             } else if (opened) {
@@ -853,8 +860,10 @@ final class SqlTokenizer {
     private static void requireBalanced(List<Token> tokens, int start, Routine routine, SqlLexer.Mode mode,
                                         String sql) {
         Deque<Boolean> open = new ArrayDeque<>();
+        OraclePackageBodyState packageState = mode == SqlLexer.Mode.ORACLE && oraclePackageBody(routine, tokens, start)
+                ? new OraclePackageBodyState() : null;
         for (int index = start; index < tokens.size(); index++) {
-            index = trackBlock(tokens, index, start, routine, mode, open, sql);
+            index = trackBlock(tokens, index, start, routine, mode, open, sql, packageState);
         }
         if (!open.isEmpty()) {
             throw unterminatedBody(sql);
@@ -869,7 +878,28 @@ final class SqlTokenizer {
      */
     private static int trackBlock(List<Token> tokens, int index, int start, Routine routine, SqlLexer.Mode mode,
                                   Deque<Boolean> open, String sql) {
+        return trackBlock(tokens, index, start, routine, mode, open, sql, null);
+    }
+
+    private static int trackBlock(List<Token> tokens, int index, int start, Routine routine, SqlLexer.Mode mode,
+                                  Deque<Boolean> open, String sql, OraclePackageBodyState packageState) {
         Token token = tokens.get(index);
+        if (packageState != null && token.depth() == 0) {
+            if (token.keyword("PROCEDURE") || token.keyword("FUNCTION")) {
+                packageState.members.push(false);
+            }
+            if (token.keyword("BEGIN") && open.size() == 1) {
+                if (packageState.members.isEmpty()) {
+                    // In a package body this is the initializer's executable section. Its END
+                    // also closes the package body itself, so it reuses the AS/IS package block.
+                    return index;
+                }
+                if (!packageState.members.peek()) {
+                    packageState.members.pop();
+                    packageState.members.push(true);
+                }
+            }
+        }
         boolean inExpression = !open.isEmpty() && open.peek();
         if (opensBlock(tokens, index, start, routine, mode, inExpression)) {
             open.push(token.keyword("CASE") && (mode == SqlLexer.Mode.POSTGRES
@@ -882,7 +912,12 @@ final class SqlTokenizer {
         if (open.isEmpty()) {
             throw unbalanced(sql);
         }
+        boolean closesPackageMember = packageState != null && open.size() == 2
+                && !packageState.members.isEmpty() && packageState.members.peek();
         boolean expression = open.pop();
+        if (closesPackageMember) {
+            packageState.members.pop();
+        }
         if (!expression && index + 1 < tokens.size() && tokens.get(index + 1).keyword(BLOCK_SUFFIXES)) {
             return index + 1;
         }
@@ -941,6 +976,14 @@ final class SqlTokenizer {
             }
         }
         return true;
+    }
+
+    private static boolean oraclePackageBody(Routine routine, List<Token> tokens, int start) {
+        if (routine == null || !routine.kind().equals("PACKAGE")) {
+            return false;
+        }
+        int kindIndex = start + routine.kindIndex();
+        return kindIndex + 1 < tokens.size() && tokens.get(kindIndex + 1).keyword("BODY");
     }
 
     /** Whether the token at {@code index} starts a statement inside a MySQL or PL/SQL routine; never inside a CASE expression. */

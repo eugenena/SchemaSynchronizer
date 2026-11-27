@@ -715,8 +715,8 @@ class SchemaSynchronizerMariaDbIntegrationTest {
                 List.of(
                         new SchemaDefinition.ChangeSet("001-objects-sequence", "change-set a sequence",
                                 List.of("CREATE SEQUENCE objects_seq START WITH 10 INCREMENT BY 5"),
-                                "SELECT COUNT(*) = 1 FROM information_schema.SEQUENCES "
-                                        + "WHERE sequence_schema = DATABASE() AND sequence_name = 'objects_seq'",
+                                "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() "
+                                        + "AND TABLE_NAME = 'objects_seq' AND TABLE_TYPE = 'SEQUENCE'",
                                 SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA),
                         new SchemaDefinition.ChangeSet("002-objects-view", "change-set a view",
                                 List.of("CREATE VIEW objects_items_v AS SELECT id, qty FROM objects_items"),
