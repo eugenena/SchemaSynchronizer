@@ -1,6 +1,6 @@
 # Command-line guide
 
-SchemaSynchronizer 2.3.0 publishes a self-contained executable JAR with six
+SchemaSynchronizer 2.4.0 publishes a self-contained executable JAR with six
 working commands (plus `help` / `--help` / `-h` and `version` / `--version` / `-V`):
 
 - `serialize` captures the declarative portion of a live source schema.
@@ -47,15 +47,15 @@ JDBC drivers as optional dependencies.
 ## Download and verify
 
 ```bash
-curl -fLO https://repo1.maven.org/maven2/com/thinkaillc/schema-synchronizer-cli/2.3.0/schema-synchronizer-cli-2.3.0-standalone.jar
-curl -fLO https://repo1.maven.org/maven2/com/thinkaillc/schema-synchronizer-cli/2.3.0/schema-synchronizer-cli-2.3.0-standalone.jar.sha256
+curl -fLO https://repo1.maven.org/maven2/com/thinkaillc/schema-synchronizer-cli/2.4.0/schema-synchronizer-cli-2.4.0-standalone.jar
+curl -fLO https://repo1.maven.org/maven2/com/thinkaillc/schema-synchronizer-cli/2.4.0/schema-synchronizer-cli-2.4.0-standalone.jar.sha256
 ```
 
 Compare the JAR's SHA-256 digest with the downloaded checksum before execution.
 
 ```bash
-java -jar schema-synchronizer-cli-2.3.0-standalone.jar --version
-java -jar schema-synchronizer-cli-2.3.0-standalone.jar --help
+java -jar schema-synchronizer-cli-2.4.0-standalone.jar --version
+java -jar schema-synchronizer-cli-2.4.0-standalone.jar --help
 ```
 
 Use the environment for credentials so passwords do not appear in shell history or
@@ -72,8 +72,8 @@ validate <schema-file> [schema]
 ```
 
 ```bash
-java -jar schema-synchronizer-cli-2.3.0-standalone.jar validate schema-definition.json
-java -jar schema-synchronizer-cli-2.3.0-standalone.jar validate schema-definition.json public
+java -jar schema-synchronizer-cli-2.4.0-standalone.jar validate schema-definition.json
+java -jar schema-synchronizer-cli-2.4.0-standalone.jar validate schema-definition.json public
 ```
 
 No database connection is required. The command checks format, dialect, declarative
@@ -93,7 +93,7 @@ dry-run <jdbc-url> <user> - <schema-file> [schema] [history-table]
 ```
 
 ```bash
-java -jar schema-synchronizer-cli-2.3.0-standalone.jar dry-run \
+java -jar schema-synchronizer-cli-2.4.0-standalone.jar dry-run \
   jdbc:postgresql://localhost:5432/target_app app_user - \
   schema-definition.json public schema_synchronizer_history
 ```
@@ -105,7 +105,7 @@ compare <schema-file-a> <schema-file-b>
 ```
 
 ```bash
-java -jar schema-synchronizer-cli-2.3.0-standalone.jar compare \
+java -jar schema-synchronizer-cli-2.4.0-standalone.jar compare \
   schema-definition-postgresql.json schema-definition-h2.json
 ```
 
@@ -130,7 +130,7 @@ fingerprint <schema-file>
 ```
 
 ```bash
-java -jar schema-synchronizer-cli-2.3.0-standalone.jar fingerprint schema-definition.json
+java -jar schema-synchronizer-cli-2.4.0-standalone.jar fingerprint schema-definition.json
 ```
 
 Prints a stable `sha256:…` structural hash of the definition: JSON ordering and
@@ -147,21 +147,21 @@ serialize <jdbc-url> <user> - <schema> <output-path>
 PostgreSQL:
 
 ```bash
-java -jar schema-synchronizer-cli-2.3.0-standalone.jar serialize \
+java -jar schema-synchronizer-cli-2.4.0-standalone.jar serialize \
   jdbc:postgresql://localhost:5432/source_app app_user - public schema-definition.json
 ```
 
 MySQL:
 
 ```bash
-java -jar schema-synchronizer-cli-2.3.0-standalone.jar serialize \
+java -jar schema-synchronizer-cli-2.4.0-standalone.jar serialize \
   jdbc:mysql://localhost:3306/source_app app_user - source_app schema-definition.json
 ```
 
 SQL Server (schema must equal the login's `DEFAULT_SCHEMA`):
 
 ```bash
-java -jar schema-synchronizer-cli-2.3.0-standalone.jar serialize \
+java -jar schema-synchronizer-cli-2.4.0-standalone.jar serialize \
   "jdbc:sqlserver://localhost:1433;databaseName=app;encrypt=true;trustServerCertificate=true" \
   schema_sync - app schema-definition.json
 ```
@@ -172,7 +172,7 @@ servers with self-signed certificates, and keep `encrypt=true`.
 Oracle (schema is the connected user):
 
 ```bash
-java -jar schema-synchronizer-cli-2.3.0-standalone.jar serialize \
+java -jar schema-synchronizer-cli-2.4.0-standalone.jar serialize \
   jdbc:oracle:thin:@localhost:1521/XEPDB1 schema_sync - schema_sync schema-definition.json
 ```
 
@@ -191,7 +191,7 @@ sync <jdbc-url> <user> - <schema-file> [schema] [history-table]
 ```
 
 ```bash
-java -jar schema-synchronizer-cli-2.3.0-standalone.jar sync \
+java -jar schema-synchronizer-cli-2.4.0-standalone.jar sync \
   jdbc:postgresql://localhost:5432/target_app app_user - \
   schema-definition.json public schema_synchronizer_history
 ```
@@ -216,7 +216,7 @@ Exit statuses are stable for automation:
 git clone https://github.com/eugenena/SchemaSynchronizer.git
 cd SchemaSynchronizer
 mvn clean package
-java -jar schema-synchronizer-cli/target/schema-synchronizer-cli-2.3.0-standalone.jar --help
+java -jar schema-synchronizer-cli/target/schema-synchronizer-cli-2.4.0-standalone.jar --help
 ```
 
 ## Credential rules

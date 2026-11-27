@@ -9,12 +9,11 @@ Delivered with per change-set outcomes, SchemaFingerprints and ConstraintInvento
 SqlScriptSplitter, and the offline profile tooling with the CLI compare and fingerprint
 commands. See the [changelog](../CHANGELOG.md).
 
-## 2.4.0 — change-set support for more object types (release preparation)
+## 2.4.0 — change-set support for more object types (shipped 2026-11-27)
 
 Issue [#16](https://github.com/eugenena/SchemaSynchronizer/issues/16) is implemented and
-merged. This release is being prepared; it is not published yet. See the [changelog](../CHANGELOG.md)
-for the release contents and the [release audit](ISSUE_16_RELEASE_AUDIT.md) for verification
-and publication gates.
+released as `v2.4.0`. See the [changelog](../CHANGELOG.md) for the release contents and the
+[release audit](ISSUE_16_RELEASE_AUDIT.md) for verification details.
 
 ## 2.5.0 and later — planned
 
