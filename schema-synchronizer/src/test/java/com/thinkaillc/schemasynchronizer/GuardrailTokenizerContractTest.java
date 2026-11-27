@@ -2570,6 +2570,9 @@ class GuardrailTokenizerContractTest {
                     + "UPDATE items SET qty = 1; END", OWNERSHIP);
             policyRejects(PG, "CREATE PROCEDURE p() LANGUAGE sql SECURITY DEFINER AS "
                     + "$$ UPDATE items SET qty = 1 $$", OWNERSHIP);
+            policyRejects(PG, "CREATE PROCEDURE p() AS $$ UPDATE items SET qty = 1 $$ "
+                    + "LANGUAGE sql SECURITY DEFINER", OWNERSHIP);
+            accepted(PG, "CREATE PROCEDURE p() AS $$ SELECT 'SECURITY DEFINER' FROM items $$ LANGUAGE sql");
             policyRejects(PG, "CREATE PROCEDURE p() LANGUAGE plpgsql SECURITY DEFINER AS "
                     + "$$ BEGIN UPDATE items SET qty = 1; END $$", OWNERSHIP);
             policyRejects(ORACLE, "CREATE OR REPLACE PROCEDURE p AUTHID DEFINER IS BEGIN NULL; END;", OWNERSHIP);

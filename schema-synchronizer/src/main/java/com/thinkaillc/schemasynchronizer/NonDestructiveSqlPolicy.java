@@ -431,9 +431,41 @@ final class NonDestructiveSqlPolicy {
                         + summarize(sql));
             }
         }
+        if (mode == SqlLexer.Mode.POSTGRES && head.kind().equals("PROCEDURE")) {
+            // PostgreSQL permits procedure characteristics after the AS body literal too. The
+            // body is one STRING/BODY token, so inspect the trailing option tokens without
+            // interpreting ownership words that happen to occur inside the procedure source.
+            int trailingOptions = postgresProcedureOptionsAfterBody(tokens, head.kindIndex());
+            for (int index = trailingOptions; index < tokens.size(); index++) {
+                Token token = tokens.get(index);
+                if (token.depth() == 0 && (token.keyword("DEFINER") || token.keyword("AUTHID"))) {
+                    throw new IllegalArgumentException("change sets must not specify DEFINER, SQL SECURITY DEFINER,"
+                            + " or AUTHID ownership; put the effect in a change set with reviewedSql after review: "
+                            + summarize(sql));
+                }
+            }
+        }
         if (head.kind().equals("VIEW")) {
             requireReadOnlyViewQuery(head, tokens, mode, sql);
         }
+    }
+
+    /** The first token after a PostgreSQL procedure's quoted body, or token count if absent. */
+    private static int postgresProcedureOptionsAfterBody(List<Token> tokens, int kindIndex) {
+        for (int index = kindIndex + 1; index < tokens.size(); index++) {
+            Token token = tokens.get(index);
+            if (!token.keyword("AS") || token.depth() != 0) {
+                continue;
+            }
+            for (int body = index + 1; body < tokens.size(); body++) {
+                Token candidate = tokens.get(body);
+                if (candidate.type() == SqlTokenizer.Type.STRING || candidate.type() == SqlTokenizer.Type.BODY) {
+                    return body + 1;
+                }
+            }
+            return tokens.size();
+        }
+        return tokens.size();
     }
 
     /** The index just past the head of the created object: its body opener, or the token count. */
