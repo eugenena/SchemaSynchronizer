@@ -1,6 +1,8 @@
 # Changelog
 
-## 2.4.0 — Unreleased
+## Unreleased
+
+## 2.4.0 — 2026-11-27 — change-set support for more object types
 
 - Oracle package initialization accepts forward-declared procedures and functions,
   including nested declarations, without treating their prototypes as unfinished bodies.

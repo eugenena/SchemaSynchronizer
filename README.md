@@ -156,7 +156,7 @@ SchemaSynchronizer requires Java 17 or later. For Spring Boot 3, add the existin
 <dependency>
   <groupId>com.thinkaillc</groupId>
   <artifactId>schema-synchronizer</artifactId>
-  <version>2.3.0</version>
+  <version>2.4.0</version>
 </dependency>
 ```
 
@@ -166,7 +166,7 @@ For Spring Boot 4, use the version-specific adapter instead. It brings in the sh
 <dependency>
   <groupId>com.thinkaillc</groupId>
   <artifactId>schema-synchronizer-spring-boot4</artifactId>
-  <version>2.3.0</version>
+  <version>2.4.0</version>
 </dependency>
 ```
 
@@ -190,7 +190,7 @@ Gradle Kotlin DSL, Spring Boot 3:
 
 ```kotlin
 dependencies {
-    implementation("com.thinkaillc:schema-synchronizer:2.3.0")
+    implementation("com.thinkaillc:schema-synchronizer:2.4.0")
 }
 ```
 
@@ -198,7 +198,7 @@ Gradle Kotlin DSL, Spring Boot 4:
 
 ```kotlin
 dependencies {
-    implementation("com.thinkaillc:schema-synchronizer-spring-boot4:2.3.0")
+    implementation("com.thinkaillc:schema-synchronizer-spring-boot4:2.4.0")
 }
 ```
 
@@ -225,8 +225,8 @@ Connect as a schema-scoped, least-privilege account; see
 ### 1. Download the executable JAR
 
 ```bash
-curl -fLO https://repo1.maven.org/maven2/com/thinkaillc/schema-synchronizer-cli/2.3.0/schema-synchronizer-cli-2.3.0-standalone.jar
-java -jar schema-synchronizer-cli-2.3.0-standalone.jar --version
+curl -fLO https://repo1.maven.org/maven2/com/thinkaillc/schema-synchronizer-cli/2.4.0/schema-synchronizer-cli-2.4.0-standalone.jar
+java -jar schema-synchronizer-cli-2.4.0-standalone.jar --version
 ```
 
 Maven Central publishes `.sha256` and `.sha512` files beside the JAR for integrity
@@ -244,14 +244,14 @@ export SCHEMA_DB_PASSWORD='source-password'
 PostgreSQL example:
 
 ```bash
-java -jar schema-synchronizer-cli-2.3.0-standalone.jar serialize \
+java -jar schema-synchronizer-cli-2.4.0-standalone.jar serialize \
   jdbc:postgresql://localhost:5432/source_app app_user - public schema-definition.json
 ```
 
 MariaDB example (the schema argument is the database/catalog name):
 
 ```bash
-java -jar schema-synchronizer-cli-2.3.0-standalone.jar serialize \
+java -jar schema-synchronizer-cli-2.4.0-standalone.jar serialize \
   jdbc:mariadb://localhost:3306/source_app app_user - source_app schema-definition.json
 ```
 
@@ -263,7 +263,7 @@ SQL Server example (the schema argument must be the login's `DEFAULT_SCHEMA`, he
 use a dedicated login, never `sa`):
 
 ```bash
-java -jar schema-synchronizer-cli-2.3.0-standalone.jar serialize \
+java -jar schema-synchronizer-cli-2.4.0-standalone.jar serialize \
   "jdbc:sqlserver://localhost:1433;databaseName=app;encrypt=true;trustServerCertificate=true" \
   schema_sync - app schema-definition.json
 ```
@@ -275,7 +275,7 @@ certificate (for example with `trustStore=` or a CA-issued certificate) and drop
 Oracle example (schema argument is the Oracle user/schema):
 
 ```bash
-java -jar schema-synchronizer-cli-2.3.0-standalone.jar serialize \
+java -jar schema-synchronizer-cli-2.4.0-standalone.jar serialize \
   jdbc:oracle:thin:@localhost:1521/XEPDB1 \
   app_user - app_user schema-definition.json
 ```
@@ -298,7 +298,7 @@ export SCHEMA_DB_PASSWORD='target-password'
 PostgreSQL example:
 
 ```bash
-java -jar schema-synchronizer-cli-2.3.0-standalone.jar sync \
+java -jar schema-synchronizer-cli-2.4.0-standalone.jar sync \
   jdbc:postgresql://localhost:5432/target_app app_user - \
   schema-definition.json public schema_synchronizer_history
 ```
@@ -306,7 +306,7 @@ java -jar schema-synchronizer-cli-2.3.0-standalone.jar sync \
 MariaDB example:
 
 ```bash
-java -jar schema-synchronizer-cli-2.3.0-standalone.jar sync \
+java -jar schema-synchronizer-cli-2.4.0-standalone.jar sync \
   jdbc:mariadb://localhost:3306/target_app app_user - \
   schema-definition.json target_app schema_synchronizer_history
 ```
@@ -328,7 +328,7 @@ Add the Maven Central release to an application:
 <dependency>
   <groupId>com.thinkaillc</groupId>
   <artifactId>schema-synchronizer</artifactId>
-  <version>2.3.0</version>
+  <version>2.4.0</version>
 </dependency>
 ```
 
@@ -361,14 +361,14 @@ bundle. Central releases are immutable; never reuse a published version number.
 The standalone JAR has one entry point with eight commands:
 
 ```text
-java -jar schema-synchronizer-cli-2.3.0-standalone.jar serialize <jdbc-url> <user> - <schema> <output-path>
-java -jar schema-synchronizer-cli-2.3.0-standalone.jar sync      <jdbc-url> <user> - <schema-file> [schema] [history-table]
-java -jar schema-synchronizer-cli-2.3.0-standalone.jar dry-run   <jdbc-url> <user> - <schema-file> [schema] [history-table]
-java -jar schema-synchronizer-cli-2.3.0-standalone.jar validate  <schema-file> [schema]
-java -jar schema-synchronizer-cli-2.3.0-standalone.jar compare   <schema-file-a> <schema-file-b>
-java -jar schema-synchronizer-cli-2.3.0-standalone.jar fingerprint <schema-file>
-java -jar schema-synchronizer-cli-2.3.0-standalone.jar help      (also --help, -h)
-java -jar schema-synchronizer-cli-2.3.0-standalone.jar version   (also --version, -V)
+java -jar schema-synchronizer-cli-2.4.0-standalone.jar serialize <jdbc-url> <user> - <schema> <output-path>
+java -jar schema-synchronizer-cli-2.4.0-standalone.jar sync      <jdbc-url> <user> - <schema-file> [schema] [history-table]
+java -jar schema-synchronizer-cli-2.4.0-standalone.jar dry-run   <jdbc-url> <user> - <schema-file> [schema] [history-table]
+java -jar schema-synchronizer-cli-2.4.0-standalone.jar validate  <schema-file> [schema]
+java -jar schema-synchronizer-cli-2.4.0-standalone.jar compare   <schema-file-a> <schema-file-b>
+java -jar schema-synchronizer-cli-2.4.0-standalone.jar fingerprint <schema-file>
+java -jar schema-synchronizer-cli-2.4.0-standalone.jar help      (also --help, -h)
+java -jar schema-synchronizer-cli-2.4.0-standalone.jar version   (also --version, -V)
 ```
 
 Exit codes: `0` success, `1` the command failed (including pending manual SQL), `2` unknown

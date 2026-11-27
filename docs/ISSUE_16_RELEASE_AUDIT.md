@@ -42,6 +42,5 @@ Record live-suite outcomes separately from the offline reactor build: a skip is 
 Use `schema.test.require.live=true` for the selected engines. Run release artifact generation
 and the standalone license check against the final dependency versions. Publication also
 requires a new, unpublished project version, a matching changelog entry, and the signed-tag
-process in the README; this audit does not publish artifacts. Release metadata is now prepared
-for 2.4.0 in the release-preparation branch. It remains unpublished; no signed tag, Maven
-Central deployment, or GitHub release has been created.
+process in the README; this audit does not publish artifacts. Release `v2.4.0` was published
+to Maven Central and GitHub on 2026-11-27.

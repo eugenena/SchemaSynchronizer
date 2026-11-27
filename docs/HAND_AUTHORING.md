@@ -27,14 +27,14 @@ applications normally sync the committed file onto their single datasource.
 2. Offline check:
 
    ```bash
-   java -jar schema-synchronizer-cli-2.3.0-standalone.jar validate schema-definition.json
+   java -jar schema-synchronizer-cli-2.4.0-standalone.jar validate schema-definition.json
    ```
 
 3. Preview against a disposable database:
 
    ```bash
    export SCHEMA_DB_PASSWORD='…'
-   java -jar schema-synchronizer-cli-2.3.0-standalone.jar dry-run \
+   java -jar schema-synchronizer-cli-2.4.0-standalone.jar dry-run \
      jdbc:postgresql://localhost:5432/app_scratch app_user - \
      schema-definition.json public
    ```
@@ -67,13 +67,13 @@ runs — adoption relies on a change set whose `verificationSql` proves the cons
 present. Keep every inline foreign key claimed by such a change set:
 
 ```bash
-java -jar schema-synchronizer-cli-2.3.0-standalone.jar validate schema-definition.json
+java -jar schema-synchronizer-cli-2.4.0-standalone.jar validate schema-definition.json
 ```
 
 fails on structure and policy but not on coverage, so run the coverage check explicitly:
 
 ```bash
-java -jar schema-synchronizer-cli-2.3.0-standalone.jar compare \
+java -jar schema-synchronizer-cli-2.4.0-standalone.jar compare \
   schema-definition.json schema-definition.json
 ```
 
