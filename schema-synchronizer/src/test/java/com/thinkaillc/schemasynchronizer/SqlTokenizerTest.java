@@ -136,6 +136,17 @@ class SqlTokenizerTest {
     }
 
     @Test
+    void oracleForwardDeclarationsKeepThePackageAndFollowingStatementSeparate() {
+        String body = "CREATE PACKAGE BODY util AS PROCEDURE p; "
+                + "PROCEDURE p IS BEGIN NULL; END p; BEGIN NULL; END util;";
+        assertThat(statementCount(body, Mode.ORACLE)).isEqualTo(1);
+        String script = body + " UPDATE items SET qty = 2;";
+        assertThat(SqlTokenizer.scriptStatements(SqlTokenizer.tokenize(script, Mode.ORACLE), Mode.ORACLE, script))
+                .hasSize(2);
+        assertUnsplittable(body.replace("END util;", ""), Mode.ORACLE);
+    }
+
+    @Test
     void sqlServerRoutineExtendsToTheEndOfTheBatch() {
         assertThat(statementCount("CREATE TRIGGER trg ON items AFTER INSERT AS BEGIN SET NOCOUNT ON; "
                 + "UPDATE items SET qty = 0 WHERE id IN (SELECT id FROM inserted); END", Mode.SQLSERVER)).isEqualTo(1);

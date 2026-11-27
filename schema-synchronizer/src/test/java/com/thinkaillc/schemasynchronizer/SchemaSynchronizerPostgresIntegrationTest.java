@@ -1040,6 +1040,7 @@ class SchemaSynchronizerPostgresIntegrationTest {
                                 SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA),
                         new SchemaDefinition.ChangeSet("003-objects-procedure", "change-set a procedure",
                                 List.of("CREATE PROCEDURE objects_set_qty(target INTEGER) LANGUAGE plpgsql "
+                                        + "SET search_path TO " + schema + " "
                                         + "AS $$ BEGIN UPDATE objects_items SET qty = target WHERE id = 1; END $$"),
                                 "SELECT to_regprocedure('" + schema + ".objects_set_qty(integer)') IS NOT NULL",
                                 SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA)));
