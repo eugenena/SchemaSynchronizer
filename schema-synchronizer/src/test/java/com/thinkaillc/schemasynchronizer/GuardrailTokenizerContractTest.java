@@ -2620,6 +2620,20 @@ class GuardrailTokenizerContractTest {
         }
 
         @Test
+        void packageForwardDeclarationsDoNotOpenExecutableMembers() {
+            accepted(ORACLE, "CREATE PACKAGE BODY util AS PROCEDURE p; "
+                    + "PROCEDURE p IS BEGIN NULL; END p; BEGIN NULL; END util;");
+            accepted(ORACLE, "CREATE PACKAGE BODY util AS FUNCTION f(n NUMBER) RETURN NUMBER; "
+                    + "FUNCTION f(n NUMBER) RETURN NUMBER IS BEGIN RETURN n; END f; BEGIN NULL; END util;");
+            accepted(ORACLE, "CREATE PACKAGE BODY util AS PROCEDURE p; "
+                    + "PROCEDURE p IS PROCEDURE q; PROCEDURE q IS BEGIN NULL; END q; "
+                    + "BEGIN NULL; END p; BEGIN NULL; END util;");
+            policyRejects(ORACLE, "CREATE PACKAGE BODY util AS PROCEDURE p; "
+                    + "PROCEDURE p IS BEGIN NULL; END p; BEGIN "
+                    + "ALTER TABLE items ADD extra NUMBER; END util;", BODY_DDL);
+        }
+
+        @Test
         void everyRoutineInABodyIsChecked() {
             policyRejects(ORACLE, "CREATE OR REPLACE PACKAGE BODY util AS PROCEDURE bump IS BEGIN "
                     + "ALTER TABLE items ADD COLUMN extra NUMBER; END; END util;", BODY_DDL);

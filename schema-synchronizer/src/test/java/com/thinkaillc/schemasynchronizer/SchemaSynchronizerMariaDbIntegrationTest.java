@@ -567,7 +567,8 @@ class SchemaSynchronizerMariaDbIntegrationTest {
             SchemaSynchronizationResult result = synchronizer().synchronizeWithResult(connection, declared);
             assertThat(result.columnsAltered()).isZero();
             assertThat(result.pendingSql()).hasSize(2)
-                    .anyMatch(sql -> sql.contains("MODIFY COLUMN `binned`") && sql.contains("utf8_bin"))
+                    .anyMatch(sql -> sql.contains("MODIFY COLUMN `binned`")
+                            && (sql.contains("utf8_bin") || sql.contains("utf8mb3_bin")))
                     .anyMatch(sql -> sql.contains("MODIFY COLUMN `wide`") && sql.contains("utf8mb4"))
                     .noneMatch(sql -> sql.contains("nick"));
         }

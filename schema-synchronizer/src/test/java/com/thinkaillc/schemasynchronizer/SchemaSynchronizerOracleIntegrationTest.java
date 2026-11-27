@@ -624,12 +624,15 @@ class SchemaSynchronizerOracleIntegrationTest {
                                 SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA),
                         new SchemaDefinition.ChangeSet("005-objects-package-body", "change-set a package body",
                                 List.of("CREATE OR REPLACE PACKAGE BODY objects_util AS "
+                                        + "PROCEDURE initialize; "
+                                        + "PROCEDURE initialize IS BEGIN "
+                                        + "UPDATE objects_items SET qty = qty + 1 WHERE id = 1; END initialize; "
                                         + "PROCEDURE bump(target NUMBER) IS BEGIN "
                                         + "UPDATE objects_items SET qty = qty + target WHERE id = 1; "
-                                        + "END bump; END objects_util;"),
+                                        + "END bump; BEGIN initialize; END objects_util;"),
                                 "SELECT CASE WHEN COUNT(*) = 1 THEN 1 ELSE 0 END FROM user_objects "
                                         + "WHERE object_name = 'OBJECTS_UTIL' "
-                                        + "AND object_type = 'PACKAGE BODY'",
+                                        + "AND object_type = 'PACKAGE BODY' AND status = 'VALID'",
                                 SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA),
                         new SchemaDefinition.ChangeSet("006-objects-type", "change-set a type",
                                 List.of("CREATE OR REPLACE TYPE objects_point AS OBJECT (x NUMBER, y NUMBER)"),
@@ -646,7 +649,7 @@ class SchemaSynchronizerOracleIntegrationTest {
                 statement.execute("BEGIN objects_util.bump(4); END;");
             }
             assertThat(LiveTestSupport.scalar(connection, "SELECT qty FROM objects_items_v WHERE id = 1"))
-                    .isEqualTo("7");
+                    .isEqualTo("8");
             assertThat(LiveTestSupport.scalar(connection, "SELECT objects_seq.NEXTVAL FROM dual")).isEqualTo("10");
             assertThat(LiveTestSupport.scalar(connection,
                     "SELECT objects_point(1, 2).x FROM dual")).isEqualTo("1");

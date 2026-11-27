@@ -885,7 +885,8 @@ final class SqlTokenizer {
                                   Deque<Boolean> open, String sql, OraclePackageBodyState packageState) {
         Token token = tokens.get(index);
         if (packageState != null && token.depth() == 0) {
-            if (token.keyword("PROCEDURE") || token.keyword("FUNCTION")) {
+            if ((token.keyword("PROCEDURE") || token.keyword("FUNCTION"))
+                    && oracleSubprogramHasBody(tokens, index)) {
                 packageState.members.push(false);
             }
             if (token.keyword("BEGIN") && open.size() == 1) {
@@ -922,6 +923,23 @@ final class SqlTokenizer {
             return index + 1;
         }
         return index;
+    }
+
+    /** A forward declaration ends at its semicolon before any depth-zero IS/AS body opener. */
+    private static boolean oracleSubprogramHasBody(List<Token> tokens, int start) {
+        for (int index = start + 1; index < tokens.size(); index++) {
+            Token token = tokens.get(index);
+            if (token.depth() != 0) {
+                continue;
+            }
+            if (token.keyword("IS") || token.keyword("AS")) {
+                return true;
+            }
+            if (token.punct(";")) {
+                return false;
+            }
+        }
+        return false;
     }
 
     private static boolean opensBlock(List<Token> tokens, int index, int start, Routine routine, SqlLexer.Mode mode,

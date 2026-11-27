@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Oracle package initialization accepts forward-declared procedures and functions,
+  including nested declarations, without treating their prototypes as unfinished bodies.
+- Keep MariaDB Connector/J on 3.5.10: 4.0.0 rejects the binary result character set
+  required to preserve binary defaults in `SHOW CREATE TABLE` snapshots.
 - Change sets create sequences, views, stored procedures, and Oracle packages and types
   ([#16](https://github.com/eugenena/SchemaSynchronizer/issues/16)):
   - Sequences: `CREATE SEQUENCE [IF NOT EXISTS]` on PostgreSQL, SQL Server, Oracle, and
