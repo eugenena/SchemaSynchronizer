@@ -495,6 +495,43 @@ class SchemaSynchronizerSqlServerIntegrationTest {
                 List.of());
     }
 
+    @Test
+    void changeSetsCreateSequenceViewAndProcedureAndVerifyThemThroughCatalogQueries() throws Exception {
+        SchemaDefinition definition = new SchemaDefinition(2, "sqlserver", Map.of("objects_items",
+                new SchemaDefinition.TableDef("CREATE TABLE objects_items (id BIGINT PRIMARY KEY, qty INT NOT NULL)",
+                        List.of(new SchemaDefinition.ColumnDef("id", "BIGINT NOT NULL"),
+                                new SchemaDefinition.ColumnDef("qty", "INT NOT NULL")), List.of())),
+                List.of(
+                        new SchemaDefinition.ChangeSet("001-objects-sequence", "change-set a sequence",
+                                List.of("CREATE SEQUENCE dbo.objects_seq START WITH 10 INCREMENT BY 5"),
+                                "SELECT OBJECT_ID('dbo.objects_seq', 'SO') IS NOT NULL",
+                                SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA),
+                        new SchemaDefinition.ChangeSet("002-objects-view", "change-set a view",
+                                List.of("CREATE OR ALTER VIEW dbo.objects_items_v "
+                                        + "AS SELECT id, qty FROM dbo.objects_items"),
+                                "SELECT OBJECT_ID('dbo.objects_items_v', 'V') IS NOT NULL",
+                                SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA),
+                        new SchemaDefinition.ChangeSet("003-objects-procedure", "change-set a procedure",
+                                List.of("CREATE OR ALTER PROCEDURE dbo.objects_set_qty @target INT AS "
+                                        + "BEGIN UPDATE dbo.objects_items SET qty = @target WHERE id = 1; END"),
+                                "SELECT OBJECT_ID('dbo.objects_set_qty', 'P') IS NOT NULL",
+                                SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA)));
+        try (Connection connection = connection()) {
+            assertThat(synchronizer(false).synchronizeWithResult(connection, definition).changeSetsApplied())
+                    .isEqualTo(3);
+            try (var statement = connection.createStatement()) {
+                statement.execute("INSERT INTO dbo.objects_items (id, qty) VALUES (1, 0)");
+                statement.execute("EXEC dbo.objects_set_qty @target = 7");
+            }
+            assertThat(LiveTestSupport.scalar(connection, "SELECT qty FROM dbo.objects_items_v WHERE id = 1"))
+                    .isEqualTo("7");
+            assertThat(LiveTestSupport.scalar(connection, "SELECT CAST(NEXT VALUE FOR dbo.objects_seq AS NVARCHAR(20))"))
+                    .isEqualTo("10");
+            assertThat(synchronizer(false).synchronizeWithResult(connection, definition).changeSetsApplied())
+                    .isZero();
+        }
+    }
+
     private SchemaSynchronizer synchronizer() {
         return synchronizer(false);
     }

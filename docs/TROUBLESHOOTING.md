@@ -17,17 +17,22 @@ Without it nothing runs, even with a definition on the classpath and other
 2.0.0 checks change-set SQL more strictly. Typical messages:
 
 - `unsupported schema change SQL: …` or `destructive or manually-reviewed SQL is not allowed: …`:
-  the statement is outside the allowlist (for example `CREATE EXTENSION`, `CREATE SEQUENCE`,
-  `CREATE VIEW`, a `DROP`, or a statement that reaches another schema).
+  the statement is outside the allowlist (for example `CREATE EXTENSION`,
+  `CREATE MATERIALIZED VIEW`, a `DROP`, or a statement that reaches another schema).
 - `… definitions must not use schema 'public'; pass dbo / catalog / connected user`: SQL Server,
   Oracle, MySQL, and MariaDB definitions need their real namespace.
 - `only LANGUAGE sql and plpgsql bodies can be checked; …`: a PostgreSQL routine in another
   language must be created outside SchemaSynchronizer.
-- `unsupported schema change SQL: CREATE VIEW is not yet supported in change sets; create this
-  object outside SchemaSynchronizer (see docs/ROADMAP.md): …` (also `SEQUENCE`, `PROCEDURE`,
-  `PACKAGE`, `TYPE`): these object types are planned in
+- `view query must …`: the view's query is checked like verification SQL — it has to be a
+  read-only, schema-scoped `SELECT`/`WITH` query without side-effecting calls.
+- `change sets must not specify DEFINER, SQL SECURITY DEFINER, or AUTHID ownership; …`:
+  ownership elevation is not automatic. Create the object in provisioning, or record the
+  statement in a change set with `reviewedSql: true` after review.
+- `unsupported schema change SQL: CREATE MATERIALIZED VIEW is not yet supported in change sets; …`
+  (also `CREATE SEQUENCE` on MySQL and H2, `CREATE PROCEDURE` on H2, and `CREATE TYPE` /
+  `CREATE PACKAGE` outside Oracle): these object kinds are planned in
   [ROADMAP](ROADMAP.md#change-set-support-for-more-object-types). Use an identity column
-  instead of a sequence, or create the object in provisioning.
+  where a sequence would do, or create the object in provisioning.
 
 A change set **already recorded** in history is not re-checked, so existing databases keep
 working. The same change set fails on an **empty database**, where every change set is checked.

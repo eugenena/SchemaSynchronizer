@@ -88,11 +88,32 @@ Use change sets for operations that metadata cannot reconstruct reliably, includ
 backfills, constraints, functions, triggers, comments, and grants. Install extensions
 outside change sets (for example in database provisioning); `CREATE EXTENSION` is rejected.
 
-Change sets do not yet create sequences, views, stored procedures, or Oracle packages and
-types: `CREATE SEQUENCE`, `CREATE VIEW`, `CREATE PROCEDURE`, `CREATE PACKAGE`, and
-`CREATE TYPE` are rejected. Use identity columns in column definitions instead of
-sequences, or create these objects outside SchemaSynchronizer and reference them from change
-sets. Support is planned; see [ROADMAP.md](ROADMAP.md).
+Change sets also create sequences, views, stored procedures, and Oracle packages and types:
+
+- **Sequences**: `CREATE SEQUENCE [IF NOT EXISTS] …` on PostgreSQL, SQL Server, Oracle, and
+  MariaDB (`IF NOT EXISTS` where the engine accepts it). The name and PostgreSQL's
+  `OWNED BY table.column` destination are schema-scoped. MySQL has no sequences, and H2
+  keeps using identity columns; `CREATE SEQUENCE` is rejected there.
+- **Views**: `CREATE [OR REPLACE] VIEW` (`CREATE OR ALTER VIEW` on SQL Server) on every
+  dialect. The view's query goes through the same checks as verification SQL: it has to
+  be a `SELECT` or `WITH` query, read-only, with no side-effecting calls, and scoped to
+  the configured namespace. `CREATE MATERIALIZED VIEW` is rejected on every dialect.
+- **Stored procedures**: `CREATE [OR REPLACE] PROCEDURE` (`CREATE OR ALTER PROCEDURE` on
+  SQL Server) on every dialect except H2. A procedure's body is checked like a function
+  body: no DDL, grants, role changes, dynamic SQL, or file/network access. On PostgreSQL
+  it must declare `LANGUAGE sql` or `plpgsql` like a function.
+- **Oracle packages and types**: `CREATE [OR REPLACE] PACKAGE` and `PACKAGE BODY`, `TYPE`,
+  and `TYPE BODY`. The spec and the body are separate change-set statements. Every routine
+  inside a body is checked individually.
+- **Ownership**: `DEFINER = …`, `SQL SECURITY DEFINER`, `SECURITY DEFINER`, Oracle
+  `AUTHID …`, and SQL Server `WITH EXECUTE AS` elevate the executing owner, so the
+  automatic policy rejects them in unreviewed change sets. After review, record the
+  statement in a change set with `reviewedSql: true` (see below).
+
+Sequences, views, procedures, and packages are change-set only: they are not part of the
+declarative `tables` model compared against metadata, and materialized views, `CREATE
+TYPE`/`CREATE PACKAGE` outside Oracle, and H2 sequences/procedures stay rejected (see
+[ROADMAP.md](ROADMAP.md#change-set-support-for-more-object-types)).
 
 ```json
 {

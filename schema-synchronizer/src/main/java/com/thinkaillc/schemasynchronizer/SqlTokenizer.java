@@ -659,7 +659,11 @@ final class SqlTokenizer {
         return null;
     }
 
-    /** Skips {@code = principal}, where the principal is a name, string, or {@code user@host} form. */
+    /**
+     * Skips {@code = principal}, where the principal is a name, string, or MySQL
+     * {@code user@host} form — the host can be unquoted and dotted with a {@code %} wildcard
+     * ({@code root@10.0.%}, {@code app@%}).
+     */
     private static int skipDefiner(List<Token> tokens, int index) {
         if (index < tokens.size() && tokens.get(index).punct("=")) {
             index++;
@@ -668,7 +672,9 @@ final class SqlTokenizer {
                 && !tokens.get(index).keyword("SQL") && !tokens.get(index).keyword(ROUTINE_HEAD_MODIFIERS)) {
             Token token = tokens.get(index);
             if (!(token.name() || token.type() == Type.STRING || token.type() == Type.VARIABLE
-                    || token.punct("@") || token.punct("(") || token.punct(")"))) {
+                    || token.type() == Type.NUMBER
+                    || token.punct("@") || token.punct("%") || token.punct(".")
+                    || token.punct("(") || token.punct(")"))) {
                 break;
             }
             index++;
@@ -690,6 +696,9 @@ final class SqlTokenizer {
         boolean updateSet = lead.keyword("UPDATE") && start + 1 < tokens.size()
                 && tokens.get(start + 1).keyword("STATISTICS");
         boolean privilegeTarget = false;
+        // A CREATE|ALTER VIEW's single query follows its head AS; without this, the batch
+        // would end at the SELECT and report the view as two statements.
+        boolean view = false;
         int cases = 0;
         for (int index = start; index < tokens.size(); index++) {
             Token token = tokens.get(index);
@@ -697,6 +706,10 @@ final class SqlTokenizer {
                 return index + 1;
             }
             if (index == start || token.type() != Type.WORD || token.depth() != 0) {
+                continue;
+            }
+            if ((lead.keyword("CREATE") || lead.keyword("ALTER")) && token.keyword("VIEW")) {
+                view = true;
                 continue;
             }
             if (token.keyword("CASE")) {
@@ -729,7 +742,9 @@ final class SqlTokenizer {
             }
             String word = token.text().toUpperCase(Locale.ROOT);
             boolean continues = switch (word) {
-                case "SELECT" -> previous.keyword(TSQL_SET_OPERATORS) || privilegeList
+                // In a view query, a depth-zero SELECT or WITH belongs to that query — the
+                // head one follows the head AS and a CTE's main query follows its parenthesis.
+                case "SELECT" -> previous.keyword(TSQL_SET_OPERATORS) || privilegeList || view
                         || ("INSERT".equals(main) && !rowSource);
                 case "INSERT", "UPDATE", "DELETE" -> privilegeList
                         || (word.equals("INSERT") && index - 1 == start && lead.keyword("BULK"))
@@ -739,11 +754,12 @@ final class SqlTokenizer {
                         || ("MERGE".equals(main) && previous.keyword("UPDATE"))
                         || ((previous.keyword("DELETE") || previous.keyword("UPDATE")) && index - 2 > start
                         && tokens.get(index - 2).keyword("ON"));
-                case "ALTER" -> privilegeList || (next != null && next.keyword("COLUMN"));
+                case "ALTER" -> privilegeList || (next != null && next.keyword("COLUMN"))
+                        || (previous.keyword("OR") && lead.keyword("CREATE"));
                 case "CREATE", "EXEC", "EXECUTE" -> privilegeList;
                 case "GRANT" -> (previous.keyword("WITH") && next != null && next.keyword("OPTION"))
                         || (index - 1 == start && lead.keyword("REVOKE"));
-                case "WITH" -> !cteShaped(tokens, index);
+                case "WITH" -> view || !cteShaped(tokens, index);
                 case "IF" -> previous.keyword(TSQL_IF_OBJECTS);
                 case "FETCH" -> previous.keyword("ROWS") || previous.keyword("ROW");
                 default -> false;

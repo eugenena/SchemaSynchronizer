@@ -19,6 +19,10 @@ class DuplicateObjectSqlTest {
                 .isTrue();
         assertThat(DuplicateObjectSql.isAlreadyExists(new SQLException("column exists", "42701")))
                 .isTrue();
+        // A procedure, function, or aggregate of that signature already exists.
+        assertThat(DuplicateObjectSql.isAlreadyExists(new SQLException(
+                "function \"objects_set_qty(integer)\" already exists with same argument types", "42723")))
+                .isTrue();
     }
 
     @Test
@@ -30,6 +34,13 @@ class DuplicateObjectSqlTest {
         assertThat(DuplicateObjectSql.isAlreadyExists(new SQLException("Duplicate key name", "42000", 1061)))
                 .isTrue();
         assertThat(DuplicateObjectSql.isAlreadyExists(new SQLException("Duplicate FK", "HY000", 1826)))
+                .isTrue();
+        // A stored function, procedure, or trigger of that name already exists.
+        assertThat(DuplicateObjectSql.isAlreadyExists(
+                new SQLException("PROCEDURE objects_set_qty already exists", "HY000", 1304)))
+                .isTrue();
+        assertThat(DuplicateObjectSql.isAlreadyExists(
+                new SQLException("Trigger trg_items already exists", "HY000", 1359)))
                 .isTrue();
     }
 

@@ -265,16 +265,16 @@ abstract class IdentifierQuotingLiveCells {
     }
 
     @Test
-    void aChangeSetCreatingAViewIsRejectedAsNotYetSupportedBeforeAnythingRuns() throws Exception {
+    void aChangeSetCreatingAMaterializedViewIsRejectedAsNotYetSupportedBeforeAnythingRuns() throws Exception {
         String from = dialect() == DatabaseDialect.ORACLE ? " FROM dual" : "";
         SchemaDefinition withView = new SchemaDefinition(2, dialect().id(), Map.of(), List.of(
-                new SchemaDefinition.ChangeSet("001-view", "a view",
-                        List.of("CREATE VIEW items_v AS SELECT 1 AS x" + from))));
+                new SchemaDefinition.ChangeSet("001-materialized-view", "a materialized view",
+                        List.of("CREATE MATERIALIZED VIEW items_mv AS SELECT 1 AS x" + from))));
         try (Connection connection = connection()) {
             List<String> before = liveTables(connection, schema());
             assertThatThrownBy(() -> synchronizer(schema()).synchronizeWithResult(connection, withView))
                     .isInstanceOf(SchemaDefinitionException.class)
-                    .hasMessageContaining("CREATE VIEW is not yet supported in change sets")
+                    .hasMessageContaining("CREATE MATERIALIZED VIEW is not yet supported in change sets")
                     .hasMessageNotContaining("exactly one statement");
             assertThat(liveTables(connection, schema())).containsExactlyInAnyOrderElementsOf(before);
         }

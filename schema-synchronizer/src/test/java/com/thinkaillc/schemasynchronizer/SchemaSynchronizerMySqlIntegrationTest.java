@@ -1118,6 +1118,39 @@ class SchemaSynchronizerMySqlIntegrationTest {
         }
     }
 
+    @Test
+    void changeSetsCreateViewAndProcedureAndVerifyThemThroughCatalogQueries() throws Exception {
+        SchemaDefinition definition = new SchemaDefinition(2, "mysql", Map.of("objects_items",
+                new SchemaDefinition.TableDef("CREATE TABLE objects_items (id BIGINT PRIMARY KEY, qty INT NOT NULL)",
+                        List.of(new SchemaDefinition.ColumnDef("id", "BIGINT NOT NULL"),
+                                new SchemaDefinition.ColumnDef("qty", "INT NOT NULL")), List.of())),
+                List.of(
+                        new SchemaDefinition.ChangeSet("001-objects-view", "change-set a view",
+                                List.of("CREATE VIEW objects_items_v AS SELECT id, qty FROM objects_items"),
+                                "SELECT COUNT(*) = 1 FROM information_schema.VIEWS "
+                                        + "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'objects_items_v'",
+                                SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA),
+                        new SchemaDefinition.ChangeSet("002-objects-procedure", "change-set a procedure",
+                                List.of("CREATE PROCEDURE objects_set_qty(target INT) BEGIN "
+                                        + "UPDATE objects_items SET qty = target WHERE id = 1; END"),
+                                "SELECT COUNT(*) = 1 FROM information_schema.ROUTINES "
+                                        + "WHERE ROUTINE_SCHEMA = DATABASE() AND ROUTINE_NAME = 'objects_set_qty' "
+                                        + "AND ROUTINE_TYPE = 'PROCEDURE'",
+                                SchemaDefinition.ChangeSet.Phase.AFTER_SCHEMA)));
+        try (Connection connection = connection()) {
+            assertThat(synchronizer(false).synchronizeWithResult(connection, definition).changeSetsApplied())
+                    .isEqualTo(2);
+            try (var statement = connection.createStatement()) {
+                statement.execute("INSERT INTO objects_items (id, qty) VALUES (1, 0)");
+                statement.execute("CALL objects_set_qty(7)");
+            }
+            assertThat(LiveTestSupport.scalar(connection, "SELECT qty FROM objects_items_v WHERE id = 1"))
+                    .isEqualTo("7");
+            assertThat(synchronizer(false).synchronizeWithResult(connection, definition).changeSetsApplied())
+                    .isZero();
+        }
+    }
+
     private SchemaSynchronizer synchronizer() throws Exception {
         return synchronizer(false);
     }

@@ -18,6 +18,9 @@ instances of the same dialect, not between SQL dialects.
 - Dry run: plans changes without executing DDL; it cannot roll back catalog writes
 - Identifiers: H2 folds unquoted identifiers to upper case and declarations follow that convention
 - SQL: use H2-native syntax; a PostgreSQL definition is not an H2 definition
+- Change sets: create views over declared tables. `CREATE SEQUENCE` and
+  `CREATE PROCEDURE` are rejected; H2 declarations keep using identity columns, and
+  routines belong to a real engine's change sets
 
 ## PostgreSQL
 
@@ -32,6 +35,9 @@ instances of the same dialect, not between SQL dialects.
   `verificationSql` is not executed
 - Identifiers: declared names fold to lower case and are emitted quoted, within PostgreSQL's
   63-byte limit (see [Reserved words and identifier case](SCHEMA_DEFINITION.md#reserved-words-and-identifier-case))
+- Change sets: create sequences (`CREATE SEQUENCE [IF NOT EXISTS]`, whose `OWNED BY
+  table.column` destination is schema-scoped), views, and procedures (`LANGUAGE sql` /
+  `plpgsql` like a function). `CREATE MATERIALIZED VIEW` is rejected.
 
 PostgreSQL pending destructive output is wrapped in a transaction and includes a
 schema-scoped `search_path` for operator review.
@@ -52,6 +58,9 @@ dialect that accepts schema-qualified column types. See
   the lock name 1.2.0 used is also acquired, so a rolling upgrade still excludes older instances
 - DDL: may commit implicitly
 - Dry run: statements and verification are not executed; live apply may still commit DDL
+- Change sets: create sequences (`CREATE SEQUENCE IF NOT EXISTS`), views
+  (`CREATE OR REPLACE VIEW`), and procedures (`CREATE OR REPLACE PROCEDURE`)
+  alongside tables, indexes, functions, and triggers
 
 Retry-safe explicit DDL requires a verification query and one statement per change
 set when verification is false.
@@ -67,6 +76,9 @@ ascending indexes there or the live index will not match the declaration.
   the lock name 1.2.0 used is also acquired, so a rolling upgrade still excludes older instances
 - DDL: may commit implicitly
 - Dry run: statements and verification are not executed; live apply may still commit DDL
+- Change sets: create views and procedures (`CREATE OR REPLACE` is not MySQL syntax, so
+  re-creating a routine needs a new name or a reviewed change set that drops it first);
+  `CREATE SEQUENCE` is rejected — MySQL has no sequences, so use identity columns
 - Identifiers: declared names fold to lower case and are emitted with backticks, up to 64
   characters (MariaDB as well)
 - Schema: the configured schema must equal the session's `DATABASE()` exactly (case-sensitive);
@@ -218,6 +230,10 @@ schema model, not every vendor extension.
 - Idempotent DDL: no `IF NOT EXISTS` for `CREATE TABLE` / `CREATE INDEX`; existence is
   checked via metadata before apply, and change-set adoption recognizes SQL Server
   duplicate-object codes (`2714`, `1913`, `2705`, …)
+- Change sets: create sequences, views (`CREATE OR ALTER VIEW`), and procedures
+  (`CREATE OR ALTER PROCEDURE`), whose bodies are checked like function bodies.
+  `WITH EXECUTE AS` is rejected in unreviewed change sets (it is unvetted execution);
+  `reviewedSql: true` after review is the opt-in.
 - Column changes: `ALTER COLUMN` is applied only when SQL Server accepts it without side
   effects. These are reported as pending instead:
   - a base-type change under a DEFAULT constraint;
@@ -256,8 +272,10 @@ schema model, not every vendor extension.
   `CREATE [OR REPLACE] TRIGGER|PROCEDURE|FUNCTION|PACKAGE|TYPE`. A PL/SQL trigger or
   function with inner `;` is one array item: its `BEGIN`/`IF`/`CASE`/`LOOP` … `END` blocks
   must balance, and every statement inside is checked like a top-level one. Change sets
-  accept `CREATE [OR REPLACE] TRIGGER` and `FUNCTION`; create procedures, packages, and
-  types outside SchemaSynchronizer.
+  accept `CREATE [OR REPLACE] TRIGGER`, `FUNCTION`, `PROCEDURE`, `VIEW`, and `SEQUENCE`,
+  and package and type bodies: a spec and a body are separate statements, and every
+  routine in a body is checked like a top-level one. `AUTHID …` is rejected in unreviewed
+  change sets; `reviewedSql: true` after review is the opt-in.
 - Types: `INTEGER` and ANSI `NUMERIC`/`DECIMAL`/`DEC` without precision are stored as
   `NUMBER(38,0)` and compare as that type, so against a live column with a scale they are a
   narrowing and stay pending. `FLOAT`, `DOUBLE PRECISION`, and `REAL` are stored as `FLOAT`
