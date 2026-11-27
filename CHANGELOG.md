@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.4.0 — Unreleased
 
 - Oracle package initialization accepts forward-declared procedures and functions,
   including nested declarations, without treating their prototypes as unfinished bodies.

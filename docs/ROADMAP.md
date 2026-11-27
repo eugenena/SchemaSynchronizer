@@ -1,6 +1,6 @@
 # Roadmap
 
-Planned work for releases after 2.3.0. Items are tracked as GitHub issues; this page
+Planned work for releases after 2.4.0. Items are tracked as GitHub issues; this page
 summarizes them and their intended order. Nothing here is a commitment to a date.
 
 ## 2.3.0 — adoption observability and profile tooling (shipped)
@@ -9,7 +9,14 @@ Delivered with per change-set outcomes, SchemaFingerprints and ConstraintInvento
 SqlScriptSplitter, and the offline profile tooling with the CLI compare and fingerprint
 commands. See the [changelog](../CHANGELOG.md).
 
-## 2.4.0 and later — planned
+## 2.4.0 — change-set support for more object types (release preparation)
+
+Issue [#16](https://github.com/eugenena/SchemaSynchronizer/issues/16) is implemented and
+merged. This release is being prepared; it is not published yet. See the [changelog](../CHANGELOG.md)
+for the release contents and the [release audit](ISSUE_16_RELEASE_AUDIT.md) for verification
+and publication gates.
+
+## 2.5.0 and later — planned
 
 - An adoption test kit with versioned baselines so consumer test suites can retire their
   migration-tool test dependencies.
